@@ -17,4 +17,10 @@ obj/
 # Project notes
 Project.md
 
+# Claude Code
+.claude/
+
+# Git backup
+.git.backup/
+
 .fake
