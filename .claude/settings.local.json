@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dotnet restore:*)",
+      "Bash(dotnet build:*)",
+      "Bash(dotnet publish:*)",
+      "Bash(xargs wc:*)",
+      "Bash(find src:*)",
+      "Bash(dotnet run:*)",
+      "Bash(rm -f artifacts/publish/win-x64/*.pdb)",
+      "Bash(powershell -Command \"Compress-Archive -Path artifacts/publish/win-x64/* -DestinationPath artifacts/AppleMusicLyrics-v0.1.0-win-x64.zip -Force\")"
+    ]
+  }
+}

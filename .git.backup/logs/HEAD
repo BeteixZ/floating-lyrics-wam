@@ -1,0 +1,5 @@
+0000000000000000000000000000000000000000 db4f5475c59f82a5f93ea379f5f8b01f89340ab2 Izaiah Zhang <1158817754@qq.com> 1775615914 +0800	clone: from https://github.com/BeteixZ/AppleMusicLyrics.git
+db4f5475c59f82a5f93ea379f5f8b01f89340ab2 bdaa35def17210d73986e878e3ab2cbb631ab917 Izaiah Zhang <1158817754@qq.com> 1775619436 +0800	commit: 更新 README 和构建脚本，增加对 Python 3.13 的支持，优化虚拟环境创建和依赖安装流程
+bdaa35def17210d73986e878e3ab2cbb631ab917 c731c488a341b66282dd471d086837a104763ad2 Izaiah Zhang <1158817754@qq.com> 1775619628 +0800	pull --tags origin main: Fast-forward
+c731c488a341b66282dd471d086837a104763ad2 77565d5ae1a0c2fd8079c9458a9b30e6892b3080 Izaiah Zhang <1158817754@qq.com> 1775717039 +0800	checkout: moving from main to feature/csharp-rewrite
+77565d5ae1a0c2fd8079c9458a9b30e6892b3080 3490012a595f0e4ee5051af9a58d0ee68c05a6ea Izaiah Zhang <1158817754@qq.com> 1775728320 +0800	commit: Release v0.1.2

@@ -1,0 +1,20 @@
+# Local runtime configuration
+settings.ini
+
+build_tmp/
+dist/
+dist_build/
+release/
+artifacts/
+bin/
+obj/
+.vs/
+
+# Local environments
+.venv/
+.venv-build/
+
+# Project notes
+Project.md
+
+.fake

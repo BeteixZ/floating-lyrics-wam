@@ -1,0 +1,401 @@
+<Window x:Class="AppleMusicLyrics.App.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Overlay Settings"
+        Width="520"
+        Height="720"
+        MinWidth="460"
+        MinHeight="620"
+        WindowStartupLocation="CenterOwner"
+        Background="#101114"
+        Foreground="White">
+  <Window.Resources>
+    <Style x:Key="CardStyle" TargetType="Border">
+      <Setter Property="Background" Value="#171A1F" />
+      <Setter Property="CornerRadius" Value="18" />
+      <Setter Property="Padding" Value="18" />
+      <Setter Property="Margin" Value="0,0,0,14" />
+      <Setter Property="BorderBrush" Value="#262C34" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
+    <Style x:Key="SectionTitleStyle" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="14" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="Foreground" Value="#F4F7FB" />
+      <Setter Property="Margin" Value="0,0,0,14" />
+    </Style>
+    <Style x:Key="FieldLabelStyle" TargetType="TextBlock">
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="Foreground" Value="#ACB4C0" />
+      <Setter Property="Margin" Value="0,0,0,6" />
+    </Style>
+    <Style x:Key="EditorTextBoxStyle" TargetType="TextBox">
+      <Setter Property="Padding" Value="10,8" />
+      <Setter Property="Background" Value="#0E1014" />
+      <Setter Property="BorderBrush" Value="#313A45" />
+      <Setter Property="Foreground" Value="#F6F8FC" />
+      <Setter Property="SelectionBrush" Value="#55A8D4FF" />
+    </Style>
+    <Style x:Key="EditorComboBoxStyle" TargetType="ComboBox">
+      <Setter Property="Padding" Value="10,8" />
+      <Setter Property="Background" Value="#0E1014" />
+      <Setter Property="BorderBrush" Value="#313A45" />
+      <Setter Property="Foreground" Value="#F6F8FC" />
+    </Style>
+    <Style x:Key="EditorComboBoxItemStyle" TargetType="ComboBoxItem">
+      <Setter Property="Background" Value="#0E1014" />
+      <Setter Property="Foreground" Value="#F6F8FC" />
+      <Setter Property="Padding" Value="8,6" />
+      <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+      <Style.Triggers>
+        <Trigger Property="IsHighlighted" Value="True">
+          <Setter Property="Background" Value="#223044" />
+        </Trigger>
+        <Trigger Property="IsSelected" Value="True">
+          <Setter Property="Background" Value="#2B4768" />
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+    <Style x:Key="ModernScrollBarStyle" TargetType="ScrollBar">
+      <Setter Property="Background" Value="#13161B" />
+      <Setter Property="Width" Value="10" />
+    </Style>
+    <Style x:Key="ToggleStyle" TargetType="CheckBox">
+      <Setter Property="Foreground" Value="#EDF1F7" />
+      <Setter Property="Margin" Value="0,0,0,12" />
+      <Setter Property="FontSize" Value="13" />
+    </Style>
+    <Style x:Key="ActionButtonStyle" TargetType="Button">
+      <Setter Property="Padding" Value="12,8" />
+      <Setter Property="MinWidth" Value="68" />
+      <Setter Property="Background" Value="#222833" />
+      <Setter Property="Foreground" Value="#E5ECF6" />
+      <Setter Property="BorderBrush" Value="#384252" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
+    <Style x:Key="PrimaryButtonStyle" TargetType="Button">
+      <Setter Property="Padding" Value="16,10" />
+      <Setter Property="MinWidth" Value="96" />
+      <Setter Property="Background" Value="#DCE9FF" />
+      <Setter Property="Foreground" Value="#101114" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style x:Key="SecondaryButtonStyle" TargetType="Button">
+      <Setter Property="Padding" Value="16,10" />
+      <Setter Property="MinWidth" Value="96" />
+      <Setter Property="Background" Value="#21262D" />
+      <Setter Property="Foreground" Value="#EDF1F7" />
+      <Setter Property="BorderBrush" Value="#313A45" />
+      <Setter Property="BorderThickness" Value="1" />
+    </Style>
+  </Window.Resources>
+
+  <Grid Margin="20">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+
+    <Border Grid.Row="0"
+            Margin="0,0,0,18"
+            Padding="18"
+            CornerRadius="22"
+            Background="#151922"
+            BorderBrush="#2B3340"
+            BorderThickness="1">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <StackPanel>
+          <TextBlock FontSize="28"
+                     FontWeight="SemiBold"
+                     Text="Overlay Settings" />
+                </StackPanel>
+            </Grid>
+    </Border>
+
+    <ScrollViewer Grid.Row="1"
+                  VerticalScrollBarVisibility="Auto">
+      <ScrollViewer.Resources>
+        <Style TargetType="ScrollBar" BasedOn="{StaticResource ModernScrollBarStyle}" />
+      </ScrollViewer.Resources>
+      <StackPanel>
+        <Border Style="{StaticResource CardStyle}">
+          <StackPanel>
+            <TextBlock Style="{StaticResource SectionTitleStyle}" Text="Behavior" />
+            <CheckBox x:Name="PureModeCheckBox" Style="{StaticResource ToggleStyle}" Content="Pure mode" />
+            <CheckBox x:Name="ClickThroughCheckBox" Style="{StaticResource ToggleStyle}" Content="Click through" />
+            <CheckBox x:Name="AutoHideCheckBox" Style="{StaticResource ToggleStyle}" Content="Hide overlay when no lyric cache is available" />
+            <CheckBox x:Name="SingleLineModeCheckBox" Style="{StaticResource ToggleStyle}" Content="Single-line mode" Checked="LayoutModeCheckBox_OnChanged" Unchecked="LayoutModeCheckBox_OnChanged" />
+            <CheckBox x:Name="TwoLineModeCheckBox" Style="{StaticResource ToggleStyle}" Content="Two-line mode (current + next)" Checked="LayoutModeCheckBox_OnChanged" Unchecked="LayoutModeCheckBox_OnChanged" />
+            <CheckBox x:Name="ShowDebugPanelCheckBox" Style="{StaticResource ToggleStyle}" Margin="0" Content="Show debug panel" />
+          </StackPanel>
+        </Border>
+
+        <Border Style="{StaticResource CardStyle}">
+          <StackPanel>
+            <TextBlock Style="{StaticResource SectionTitleStyle}" Text="Timing" />
+
+            <Grid Margin="0,0,0,14">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Lyrics lead time" />
+              <TextBlock x:Name="LyricsOffsetValueText"
+                         Grid.Column="1"
+                         Style="{StaticResource FieldLabelStyle}"
+                         Text="0.28s" />
+            </Grid>
+            <Slider x:Name="LyricsOffsetSlider"
+                    Minimum="-0.10"
+                    Maximum="0.80"
+                    TickFrequency="0.02"
+                    Value="0.28"
+                    ValueChanged="SliderValueChanged" />
+          </StackPanel>
+        </Border>
+
+        <Border Style="{StaticResource CardStyle}">
+          <StackPanel>
+            <TextBlock Style="{StaticResource SectionTitleStyle}" Text="Window" />
+
+            <Grid Margin="0,0,0,14">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Window opacity" />
+              <TextBlock x:Name="OverlayOpacityValueText"
+                         Grid.Column="1"
+                         Style="{StaticResource FieldLabelStyle}"
+                         Text="100%" />
+            </Grid>
+            <Slider x:Name="OverlayOpacitySlider"
+                    Minimum="0.2"
+                    Maximum="1.0"
+                    TickFrequency="0.05"
+                    Value="1.0"
+                    ValueChanged="SliderValueChanged" />
+
+            <Grid Margin="0,18,0,14">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Background alpha" />
+              <TextBlock x:Name="BackgroundAlphaValueText"
+                         Grid.Column="1"
+                         Style="{StaticResource FieldLabelStyle}"
+                         Text="78%" />
+            </Grid>
+            <Slider x:Name="BackgroundAlphaSlider"
+                    Minimum="0"
+                    Maximum="100"
+                    TickFrequency="2"
+                    Value="78"
+                    ValueChanged="SliderValueChanged" />
+          </StackPanel>
+        </Border>
+
+        <Border Style="{StaticResource CardStyle}">
+          <StackPanel>
+            <TextBlock Style="{StaticResource SectionTitleStyle}" Text="Typography" />
+
+            <Grid Margin="0,0,0,14">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Maximum current lyric size" />
+              <TextBlock x:Name="MaxCurrentFontValueText"
+                         Grid.Column="1"
+                         Style="{StaticResource FieldLabelStyle}"
+                         Text="40" />
+            </Grid>
+            <Slider x:Name="MaxCurrentFontSlider"
+                    Minimum="24"
+                    Maximum="72"
+                    TickFrequency="1"
+                    Value="40"
+                    ValueChanged="SliderValueChanged" />
+
+            <Grid Margin="0,18,0,14">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Context lyric size cap" />
+              <TextBlock x:Name="ContextFontValueText"
+                         Grid.Column="1"
+                         Style="{StaticResource FieldLabelStyle}"
+                         Text="24" />
+            </Grid>
+            <Slider x:Name="ContextFontSlider"
+                    Minimum="12"
+                    Maximum="36"
+                    TickFrequency="1"
+                    Value="24"
+                    ValueChanged="SliderValueChanged" />
+
+            <TextBlock Style="{StaticResource FieldLabelStyle}" Margin="0,18,0,6" Text="Font family" />
+            <ComboBox x:Name="FontFamilyComboBox"
+                      Style="{StaticResource EditorComboBoxStyle}"
+                      ItemContainerStyle="{StaticResource EditorComboBoxItemStyle}">
+              <ComboBox.Resources>
+                <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#0E1014" />
+                <SolidColorBrush x:Key="{x:Static SystemColors.ControlBrushKey}" Color="#0E1014" />
+                <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#2B4768" />
+                <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#F6F8FC" />
+              </ComboBox.Resources>
+            </ComboBox>
+          </StackPanel>
+        </Border>
+
+        <Border Style="{StaticResource CardStyle}">
+          <StackPanel>
+            <TextBlock Style="{StaticResource SectionTitleStyle}" Text="Color and Glow" />
+
+            <Grid Margin="0,0,0,14">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+              </Grid.ColumnDefinitions>
+              <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Glow opacity" />
+              <TextBlock x:Name="GlowOpacityValueText"
+                         Grid.Column="1"
+                         Style="{StaticResource FieldLabelStyle}"
+                         Text="42%" />
+            </Grid>
+            <Slider x:Name="GlowOpacitySlider"
+                    Minimum="0"
+                    Maximum="1.0"
+                    TickFrequency="0.05"
+                    Value="0.42"
+                    ValueChanged="SliderValueChanged" />
+
+            <UniformGrid Margin="0,18,0,0"
+                         Columns="2">
+              <StackPanel Margin="0,0,8,0">
+                <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Current line color" />
+                <DockPanel LastChildFill="False">
+                  <TextBox x:Name="CurrentColorTextBox"
+                           Width="90"
+                           Style="{StaticResource EditorTextBoxStyle}"
+                           Text="#FFFFFF" />
+                  <Border x:Name="CurrentColorPreview"
+                          Width="28"
+                          Height="28"
+                          Margin="10,0,8,0"
+                          VerticalAlignment="Center"
+                          CornerRadius="8"
+                          BorderBrush="#313A45"
+                          BorderThickness="1" />
+                  <Button Content="Pick"
+                          Tag="Current"
+                          Style="{StaticResource ActionButtonStyle}"
+                          Click="PickColorButton_OnClick" />
+                </DockPanel>
+              </StackPanel>
+              <StackPanel Margin="8,0,0,0">
+                <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Context line color" />
+                <DockPanel LastChildFill="False">
+                  <TextBox x:Name="ContextColorTextBox"
+                           Width="90"
+                           Style="{StaticResource EditorTextBoxStyle}"
+                           Text="#C8C8C8" />
+                  <Border x:Name="ContextColorPreview"
+                          Width="28"
+                          Height="28"
+                          Margin="10,0,8,0"
+                          VerticalAlignment="Center"
+                          CornerRadius="8"
+                          BorderBrush="#313A45"
+                          BorderThickness="1" />
+                  <Button Content="Pick"
+                          Tag="Context"
+                          Style="{StaticResource ActionButtonStyle}"
+                          Click="PickColorButton_OnClick" />
+                </DockPanel>
+              </StackPanel>
+            </UniformGrid>
+
+            <UniformGrid Margin="0,14,0,0"
+                         Columns="2">
+              <StackPanel Margin="0,0,8,0">
+                <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Paused line color" />
+                <DockPanel LastChildFill="False">
+                  <TextBox x:Name="PausedColorTextBox"
+                           Width="90"
+                           Style="{StaticResource EditorTextBoxStyle}"
+                           Text="#AAAAAA" />
+                  <Border x:Name="PausedColorPreview"
+                          Width="28"
+                          Height="28"
+                          Margin="10,0,8,0"
+                          VerticalAlignment="Center"
+                          CornerRadius="8"
+                          BorderBrush="#313A45"
+                          BorderThickness="1" />
+                  <Button Content="Pick"
+                          Tag="Paused"
+                          Style="{StaticResource ActionButtonStyle}"
+                          Click="PickColorButton_OnClick" />
+                </DockPanel>
+              </StackPanel>
+              <StackPanel Margin="8,0,0,0">
+                <TextBlock Style="{StaticResource FieldLabelStyle}" Text="Glow color" />
+                <DockPanel LastChildFill="False">
+                  <TextBox x:Name="GlowColorTextBox"
+                           Width="90"
+                           Style="{StaticResource EditorTextBoxStyle}"
+                           Text="#FFFFFF" />
+                  <Border x:Name="GlowColorPreview"
+                          Width="28"
+                          Height="28"
+                          Margin="10,0,8,0"
+                          VerticalAlignment="Center"
+                          CornerRadius="8"
+                          BorderBrush="#313A45"
+                          BorderThickness="1" />
+                  <Button Content="Pick"
+                          Tag="Glow"
+                          Style="{StaticResource ActionButtonStyle}"
+                          Click="PickColorButton_OnClick" />
+                </DockPanel>
+              </StackPanel>
+            </UniformGrid>
+          </StackPanel>
+        </Border>
+      </StackPanel>
+    </ScrollViewer>
+
+    <DockPanel Grid.Row="2"
+               Margin="0,18,0,0"
+               LastChildFill="False">
+      <Button x:Name="ApplyButton"
+              Margin="0,0,10,0"
+              Content="Apply"
+              DockPanel.Dock="Left"
+              Style="{StaticResource SecondaryButtonStyle}"
+              Click="ApplyButton_OnClick" />
+      <Button MinWidth="96"
+              Padding="16,10"
+              Content="Cancel"
+              DockPanel.Dock="Right"
+              Style="{StaticResource SecondaryButtonStyle}"
+              IsCancel="True" />
+      <Button x:Name="SaveButton"
+              Margin="10,0,0,0"
+              Content="Save"
+              DockPanel.Dock="Right"
+              Style="{StaticResource PrimaryButtonStyle}"
+              Click="SaveButton_OnClick"
+              IsDefault="True" />
+    </DockPanel>
+  </Grid>
+</Window>

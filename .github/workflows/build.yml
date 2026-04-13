@@ -1,0 +1,95 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - main
+      - feature/**
+    tags:
+      - v*
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  CONFIGURATION: Release
+
+jobs:
+  build-test:
+    runs-on: windows-latest
+    outputs:
+      zip_name: ${{ steps.package.outputs.zip_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore AppleMusicLyrics.sln
+
+      - name: Build
+        run: dotnet build AppleMusicLyrics.sln -c $env:CONFIGURATION --no-restore
+
+      - name: Test
+        run: dotnet test AppleMusicLyrics.sln -c $env:CONFIGURATION --no-build -v minimal
+
+      - name: Publish WPF App
+        run: dotnet publish .\src\AppleMusicLyrics.App\AppleMusicLyrics.App.csproj -c $env:CONFIGURATION -r win-x64 -p:PublishSingleFile=true -o .\artifacts\publish\win-x64
+
+      - name: Create Release Zip
+        id: package
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $version = $env:GITHUB_REF.Substring(10)
+          }
+          else {
+            $version = "dev-$($env:GITHUB_SHA.Substring(0, 7))"
+          }
+
+          $zipName = "AppleMusicLyrics-$version-win-x64.zip"
+          $zipPath = ".\artifacts\$zipName"
+          if (Test-Path $zipPath) {
+            Remove-Item $zipPath -Force
+          }
+
+          Compress-Archive -Path .\artifacts\publish\win-x64\* -DestinationPath $zipPath
+          "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Upload Publish Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AppleMusicLyrics-win-x64
+          path: artifacts/${{ steps.package.outputs.zip_name }}
+
+  release:
+    needs: build-test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Release Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: AppleMusicLyrics-win-x64
+          path: artifacts
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: AppleMusicLyrics ${{ github.ref_name }}
+          files: artifacts/${{ needs.build-test.outputs.zip_name }}
+          generate_release_notes: true
