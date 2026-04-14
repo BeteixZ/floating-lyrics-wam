@@ -4,7 +4,9 @@
 
 A lightweight Windows desktop app that displays synchronized lyrics for Apple Music in a floating overlay window.
 
-![Version](https://img.shields.io/badge/version-0.1.2-blue)
+![Demo](.github/assets/demo.gif)
+
+![Version](https://img.shields.io/badge/version-0.1.0-blue)
 ![.NET](https://img.shields.io/badge/.NET-10.0-purple)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 

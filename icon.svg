@@ -8,7 +8,7 @@
     <rect x="85" y="50" width="8" height="70" rx="4"/>
 
     <!-- Note head -->
-    <ellipse cx="89" cy="120" rx="18" cy="120" ry="14" transform="rotate(-20 89 120)"/>
+    <ellipse cx="89" cy="120" rx="18" ry="14" transform="rotate(-20 89 120)"/>
 
     <!-- Eighth note flag -->
     <path d="M 93 50 Q 120 45 125 65 Q 120 60 110 62 Q 100 64 93 70 Z"/>
