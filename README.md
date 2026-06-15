@@ -6,7 +6,7 @@ A lightweight Windows desktop app that displays synchronized lyrics for Apple Mu
 
 ![Demo](.github/assets/demo.gif)
 
-![Version](https://img.shields.io/badge/version-0.1.0-blue)
+![Version](https://img.shields.io/badge/version-0.2.0-blue)
 ![.NET](https://img.shields.io/badge/.NET-10.0-purple)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 
@@ -28,7 +28,7 @@ A lightweight Windows desktop app that displays synchronized lyrics for Apple Mu
 
 ## Installation
 
-1. Download the latest release from [Releases](../../releases)
+1. Download the latest release from [Releases](../../releases) and make sure you have .NET 10 Runtime installed 
 2. Extract `AppleMusicLyrics-vX.X.X-win-x64.zip`
 3. Run `AppleMusicLyrics.App.exe`
 
