@@ -24,3 +24,6 @@ Project.md
 .git.backup/
 
 .fake
+
+# Tooling working directory
+.mimocode/

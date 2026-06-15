@@ -20,7 +20,8 @@ public sealed class LyricsRuntimeServiceTests
             [
                 new LyricsLine(0.0, 0.05, "line one"),
                 new LyricsLine(0.05, 0.50, "line two"),
-            ]);
+            ],
+            DurationSeconds: 180);
 
         var lyricsProvider = new StubLyricsProvider(document);
         var playerProvider = new StubPlayerProvider(new PlayerState("Song", "Artist", null, 0.0, 180, true));

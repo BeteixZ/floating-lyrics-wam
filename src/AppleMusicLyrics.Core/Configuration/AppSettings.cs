@@ -60,7 +60,9 @@ public sealed class AppSettings
 
     public bool ShowDebugPanel { get; set; }
 
-    public bool AutoHideNoLyrics { get; set; }
+    public bool AutoHideNoLyrics { get; set; } = true;
+
+    public bool FadeWhenPaused { get; set; } = true;
 
     public bool PureMode { get; set; }
 
@@ -69,6 +71,12 @@ public sealed class AppSettings
     public double OverlayOpacity { get; set; } = 1.0;
 
     public int? BackgroundAlpha { get; set; }
+
+    public bool HoverFadeEnabled { get; set; } = true;
+
+    public double HoverFadeDuration { get; set; } = 0.3;
+
+    public double HoverFadeMinOpacity { get; set; } = 0.05;
 
     public AppSettings Clone()
     {
@@ -103,10 +111,14 @@ public sealed class AppSettings
             TwoLineMode = TwoLineMode,
             ShowDebugPanel = ShowDebugPanel,
             AutoHideNoLyrics = AutoHideNoLyrics,
+            FadeWhenPaused = FadeWhenPaused,
             PureMode = PureMode,
             ClickThrough = ClickThrough,
             OverlayOpacity = OverlayOpacity,
             BackgroundAlpha = BackgroundAlpha,
+            HoverFadeEnabled = HoverFadeEnabled,
+            HoverFadeDuration = HoverFadeDuration,
+            HoverFadeMinOpacity = HoverFadeMinOpacity,
         };
     }
 }

@@ -42,6 +42,9 @@ public sealed class IniSettingsStoreTests : IDisposable
             AutoHideNoLyrics = true,
             OverlayOpacity = 0.72,
             BackgroundAlpha = 96,
+            HoverFadeEnabled = true,
+            HoverFadeDuration = 0.45,
+            HoverFadeMinOpacity = 0.15,
         };
 
         store.Save(settings);
@@ -68,6 +71,38 @@ public sealed class IniSettingsStoreTests : IDisposable
         Assert.True(loaded.AutoHideNoLyrics);
         Assert.Equal(0.72, loaded.OverlayOpacity);
         Assert.Equal(96, loaded.BackgroundAlpha);
+        Assert.True(loaded.HoverFadeEnabled);
+        Assert.Equal(0.45, loaded.HoverFadeDuration);
+        Assert.Equal(0.15, loaded.HoverFadeMinOpacity);
+    }
+
+    [Fact]
+    public void SaveAndLoad_HoverFadeDefaultsAreCorrect()
+    {
+        var settings = new AppSettings();
+        Assert.True(settings.HoverFadeEnabled);
+        Assert.Equal(0.3, settings.HoverFadeDuration);
+        Assert.Equal(0.05, settings.HoverFadeMinOpacity);
+    }
+
+    [Fact]
+    public void Clone_CopiesHoverFadeSettings()
+    {
+        var original = new AppSettings
+        {
+            HoverFadeEnabled = true,
+            HoverFadeDuration = 0.5,
+            HoverFadeMinOpacity = 0.2,
+        };
+
+        var clone = original.Clone();
+
+        Assert.True(clone.HoverFadeEnabled);
+        Assert.Equal(0.5, clone.HoverFadeDuration);
+        Assert.Equal(0.2, clone.HoverFadeMinOpacity);
+
+        clone.HoverFadeEnabled = false;
+        Assert.True(original.HoverFadeEnabled);
     }
 
     public void Dispose()

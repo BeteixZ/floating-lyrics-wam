@@ -99,7 +99,7 @@
             CornerRadius="16"
             Background="#C8141416"
             MouseLeftButtonDown="ShellBorder_OnMouseLeftButtonDown">
-      <Grid>
+      <Grid x:Name="ContentRoot">
         <Grid.RowDefinitions>
           <RowDefinition Height="Auto" />
           <RowDefinition Height="*" />
@@ -181,6 +181,15 @@
                      MaxHeight="36"
                      Text="Next line" />
         </Grid>
+
+        <!-- Frozen snapshot of the outgoing lyrics, used to crossfade into the new ones -->
+        <Image x:Name="LyricGhostImage"
+               Grid.Row="1"
+               HorizontalAlignment="Center"
+               VerticalAlignment="Center"
+               Stretch="None"
+               IsHitTestVisible="False"
+               Visibility="Collapsed" />
 
         <StackPanel x:Name="FooterPanel"
                     Grid.Row="2">

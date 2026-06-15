@@ -117,8 +117,13 @@ public sealed class LyricsRuntimeService
             _currentDocument = null;
         }
 
+        // Only accept the latest-written cache file if it plausibly belongs to the current
+        // track. Apple Music also writes/prefetches cache files for *other* songs, so trusting
+        // recency alone shows the wrong lyrics. When it doesn't match, fall back to the
+        // duration+title matcher which scans every cache file for the best fit.
         if (incomingDocument is not null &&
-            incomingDocument.UpdatedAt >= _sessionChangedAt.AddSeconds(-1))
+            incomingDocument.UpdatedAt >= _sessionChangedAt.AddSeconds(-1) &&
+            MatchesPlayer(incomingDocument, player))
         {
             _currentDocument = incomingDocument;
         }
@@ -135,12 +140,35 @@ public sealed class LyricsRuntimeService
         if (_currentDocument is null &&
             incomingDocument is not null &&
             _allowStartupDocumentFallback &&
-            incomingDocument.UpdatedAt >= DateTimeOffset.UtcNow.Subtract(StartupDocumentGrace))
+            incomingDocument.UpdatedAt >= DateTimeOffset.UtcNow.Subtract(StartupDocumentGrace) &&
+            MatchesPlayer(incomingDocument, player))
         {
             _currentDocument = incomingDocument;
         }
 
         return _currentDocument;
+    }
+
+    // True when the lyric document's total duration is close enough to the playing track's
+    // duration to be considered the same song. Unknown durations are treated as a match so we
+    // never reject a valid file that simply lacks duration metadata.
+    private static bool MatchesPlayer(LyricsDocument document, PlayerState player)
+    {
+        const double toleranceSeconds = 6.0;
+
+        if (player.Duration <= 0)
+        {
+            return true;
+        }
+
+        var documentDuration = document.DurationSeconds
+            ?? (document.Lines.Count > 0 ? document.Lines.Max(line => line.End) : 0.0);
+        if (documentDuration <= 0)
+        {
+            return true;
+        }
+
+        return Math.Abs(documentDuration - player.Duration) <= toleranceSeconds;
     }
 
     private static string BuildSessionKey(PlayerState player)

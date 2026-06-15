@@ -41,9 +41,13 @@ public partial class SettingsWindow : Window
         PureModeCheckBox.IsChecked = Settings.PureMode;
         ClickThroughCheckBox.IsChecked = Settings.ClickThrough;
         AutoHideCheckBox.IsChecked = Settings.AutoHideNoLyrics;
+        FadeWhenPausedCheckBox.IsChecked = Settings.FadeWhenPaused;
         SingleLineModeCheckBox.IsChecked = Settings.SingleLineMode;
         TwoLineModeCheckBox.IsChecked = Settings.TwoLineMode;
         ShowDebugPanelCheckBox.IsChecked = Settings.ShowDebugPanel;
+        HoverFadeCheckBox.IsChecked = Settings.HoverFadeEnabled;
+        HoverFadeDurationSlider.Value = Settings.HoverFadeDuration;
+        HoverFadeMinOpacitySlider.Value = Settings.HoverFadeMinOpacity;
         LyricsOffsetSlider.Value = Settings.LyricsOffsetSeconds;
         OverlayOpacitySlider.Value = Settings.OverlayOpacity;
         BackgroundAlphaSlider.Value = Math.Round(((Settings.BackgroundAlpha ?? 200) / 255.0) * 100, 0);
@@ -102,6 +106,7 @@ public partial class SettingsWindow : Window
         Settings.PureMode = PureModeCheckBox.IsChecked == true;
         Settings.ClickThrough = ClickThroughCheckBox.IsChecked == true;
         Settings.AutoHideNoLyrics = AutoHideCheckBox.IsChecked == true;
+        Settings.FadeWhenPaused = FadeWhenPausedCheckBox.IsChecked == true;
         Settings.SingleLineMode = SingleLineModeCheckBox.IsChecked == true;
         Settings.TwoLineMode = TwoLineModeCheckBox.IsChecked == true;
         if (Settings.SingleLineMode && Settings.TwoLineMode)
@@ -110,6 +115,9 @@ public partial class SettingsWindow : Window
         }
 
         Settings.ShowDebugPanel = ShowDebugPanelCheckBox.IsChecked == true;
+        Settings.HoverFadeEnabled = HoverFadeCheckBox.IsChecked == true;
+        Settings.HoverFadeDuration = Math.Round(HoverFadeDurationSlider.Value, 2);
+        Settings.HoverFadeMinOpacity = Math.Round(HoverFadeMinOpacitySlider.Value, 2);
         Settings.LyricsOffsetSeconds = Math.Round(LyricsOffsetSlider.Value, 2);
         Settings.OverlayOpacity = Math.Round(OverlayOpacitySlider.Value, 2);
         Settings.BackgroundAlpha = (int)Math.Round((BackgroundAlphaSlider.Value / 100.0) * 255);
@@ -206,6 +214,8 @@ public partial class SettingsWindow : Window
         MaxCurrentFontValueText.Text = $"{Math.Round(MaxCurrentFontSlider.Value):0}px";
         ContextFontValueText.Text = $"{Math.Round(ContextFontSlider.Value):0}px";
         GlowOpacityValueText.Text = $"{GlowOpacitySlider.Value:P0}";
+        HoverFadeDurationValueText.Text = $"{HoverFadeDurationSlider.Value:F2}s";
+        HoverFadeMinOpacityValueText.Text = $"{HoverFadeMinOpacitySlider.Value:P0}";
     }
 
     private void UpdateColorPreviews()
