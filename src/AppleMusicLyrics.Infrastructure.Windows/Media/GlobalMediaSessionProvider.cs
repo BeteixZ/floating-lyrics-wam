@@ -8,11 +8,14 @@ public sealed class GlobalMediaSessionProvider : IPlayerSessionProvider
 {
     private readonly Lazy<Task<GlobalSystemMediaTransportControlsSessionManager>> _managerTask;
 
-    public GlobalMediaSessionProvider()
+    public GlobalMediaSessionProvider(bool allowNonAppleMediaSessions = false)
     {
+        AllowNonAppleMediaSessions = allowNonAppleMediaSessions;
         _managerTask = new Lazy<Task<GlobalSystemMediaTransportControlsSessionManager>>(
             () => GlobalSystemMediaTransportControlsSessionManager.RequestAsync().AsTask());
     }
+
+    public bool AllowNonAppleMediaSessions { get; set; }
 
     public async Task<PlayerState?> GetCurrentPlayerStateAsync(CancellationToken cancellationToken = default)
     {
@@ -23,60 +26,36 @@ public sealed class GlobalMediaSessionProvider : IPlayerSessionProvider
             var manager = await _managerTask.Value.ConfigureAwait(false);
             var currentSession = manager.GetCurrentSession();
             var currentState = await TryCreatePlayerStateAsync(currentSession, cancellationToken).ConfigureAwait(false);
-            if (IsPreferredState(currentState))
+            if (MediaSessionSelectionPolicy.IsAppleMusicState(currentState))
             {
                 return currentState;
             }
 
-            var sessions = manager.GetSessions();
-            PlayerState? fallback = null;
-
-            foreach (var session in sessions)
+            var states = new List<PlayerState>();
+            foreach (var session in manager.GetSessions())
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
                 var state = await TryCreatePlayerStateAsync(session, cancellationToken).ConfigureAwait(false);
-                if (state is null)
+                if (state is not null)
                 {
-                    continue;
-                }
-
-                if (IsAppleMusicState(state))
-                {
-                    return state;
-                }
-
-                if (fallback is null && state.Playing && !string.IsNullOrWhiteSpace(state.Title))
-                {
-                    fallback = state;
+                    states.Add(state);
                 }
             }
 
-            return currentState ?? fallback;
+            return MediaSessionSelectionPolicy.Select(
+                currentState,
+                states,
+                AllowNonAppleMediaSessions);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
             return null;
         }
-    }
-
-    private static bool IsPreferredState(PlayerState? state)
-    {
-        return state is not null
-            && state.Position >= 0
-            && (!string.IsNullOrWhiteSpace(state.Title) || IsAppleMusicState(state));
-    }
-
-    private static bool IsAppleMusicState(PlayerState state)
-    {
-        return ContainsAppleMusicMarker(state.SourceAppId);
-    }
-
-    private static bool ContainsAppleMusicMarker(string? sourceAppId)
-    {
-        return !string.IsNullOrWhiteSpace(sourceAppId)
-            && (sourceAppId.Contains("AppleMusic", StringComparison.OrdinalIgnoreCase)
-                || sourceAppId.Contains("AppleInc.AppleMusicWin", StringComparison.OrdinalIgnoreCase));
     }
 
     private static async Task<PlayerState?> TryCreatePlayerStateAsync(
@@ -109,6 +88,10 @@ public sealed class GlobalMediaSessionProvider : IPlayerSessionProvider
                 Duration: Math.Max(0, duration),
                 Playing: playbackInfo?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing,
                 SourceAppId: session.SourceAppUserModelId);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {

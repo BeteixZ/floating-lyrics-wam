@@ -10,11 +10,44 @@ public sealed class AppSettings
 
     public double UiRefreshInterval { get; set; } = 0.033;
 
-    public double LyricsOffsetSeconds { get; set; } = 0.28;
+    // Calibrates how far SMTC's reported position lags the audio you actually hear. Since the
+    // playback clock now measures the sub-second phase instead of guessing it, this is the only
+    // remaining hand-tuned term.
+    //
+    // It used to default to 0.28 while the clock also pushed the estimate forward by a guessed
+    // ~0.48s. That guess is gone, so the default absorbs it to keep the timing people already
+    // calibrated by ear; an existing settings.ini still holding 0.28 wants roughly +0.5.
+    public double LyricsOffsetSeconds { get; set; } = 0.78;
+
+    // Honour the lyricOffset Apple ships inside a TTML document, which corrects lyric timings for
+    // the particular master being played. Only a minority of documents carry one.
+    public bool ApplyNativeLyricOffset { get; set; } = true;
 
     public int PreviewLineCount { get; set; } = 8;
 
-    public double RecentFileGraceSeconds { get; set; } = 2.0;
+    // Other SMTC applications can publish plausible metadata and previously hijacked matching.
+    // Keep the fallback opt-in because this application targets Apple Music by default.
+    public bool AllowNonAppleMediaSessions { get; set; }
+
+    // Low-confidence local candidates are hidden by default. Users who prefer coverage over
+    // correctness can explicitly opt in to duration-only or otherwise unverifiable matches.
+    public bool AllowLowConfidenceLyrics { get; set; }
+
+    // Cached lyrics files carry an "AP_<catalog song id>" id, so when the local duration check
+    // cannot separate two cached songs the playing track is looked up in the public iTunes catalog
+    // and matched on that id instead. Disable to stay fully offline at the cost of accuracy.
+    public bool CatalogLookupEnabled { get; set; } = true;
+
+    // Comma-separated storefronts, tried in order until one gives a confident title+artist hit.
+    public string CatalogStorefronts { get; set; } = "us,cn,jp,gb";
+
+    public double CatalogLookupTimeoutSeconds { get; set; } = 3.0;
+
+    // For songs Apple's own cache has no lyrics for at all, fall back to the community database at
+    // lrclib.net. Fetched on a background task, so a slow lookup never stalls the display.
+    public bool ExternalLyricsEnabled { get; set; } = true;
+
+    public double ExternalLyricsTimeoutSeconds { get; set; } = 6.0;
 
     // Normal mode window position and size
     public int WindowX { get; set; } = 100;
@@ -29,6 +62,22 @@ public sealed class AppSettings
     public int PureModeWindowX { get; set; } = 100;
 
     public int PureModeWindowY { get; set; } = 100;
+
+    // Versioned per-monitor placement. Negative anchors mean an older settings file that should be
+    // migrated from the legacy absolute coordinates above on the next successful capture.
+    public int WindowPlacementVersion { get; set; }
+
+    public string WindowMonitorId { get; set; } = string.Empty;
+
+    public double WindowRelativeCenterX { get; set; } = -1.0;
+
+    public double WindowRelativeCenterY { get; set; } = -1.0;
+
+    public string PureModeMonitorId { get; set; } = string.Empty;
+
+    public double PureModeRelativeCenterX { get; set; } = -1.0;
+
+    public double PureModeRelativeCenterY { get; set; } = -1.0;
 
     public int MinWindowWidth { get; set; } = 280;
 
@@ -70,6 +119,8 @@ public sealed class AppSettings
 
     public double OverlayOpacity { get; set; } = 1.0;
 
+    public double PureModeDragOpacity { get; set; } = 0.8;
+
     public int? BackgroundAlpha { get; set; }
 
     public bool HoverFadeEnabled { get; set; } = true;
@@ -87,14 +138,28 @@ public sealed class AppSettings
             CliRenderInterval = CliRenderInterval,
             UiRefreshInterval = UiRefreshInterval,
             LyricsOffsetSeconds = LyricsOffsetSeconds,
+            ApplyNativeLyricOffset = ApplyNativeLyricOffset,
             PreviewLineCount = PreviewLineCount,
-            RecentFileGraceSeconds = RecentFileGraceSeconds,
+            AllowNonAppleMediaSessions = AllowNonAppleMediaSessions,
+            AllowLowConfidenceLyrics = AllowLowConfidenceLyrics,
+            CatalogLookupEnabled = CatalogLookupEnabled,
+            CatalogStorefronts = CatalogStorefronts,
+            CatalogLookupTimeoutSeconds = CatalogLookupTimeoutSeconds,
+            ExternalLyricsEnabled = ExternalLyricsEnabled,
+            ExternalLyricsTimeoutSeconds = ExternalLyricsTimeoutSeconds,
             WindowX = WindowX,
             WindowY = WindowY,
             WindowWidth = WindowWidth,
             WindowHeight = WindowHeight,
             PureModeWindowX = PureModeWindowX,
             PureModeWindowY = PureModeWindowY,
+            WindowPlacementVersion = WindowPlacementVersion,
+            WindowMonitorId = WindowMonitorId,
+            WindowRelativeCenterX = WindowRelativeCenterX,
+            WindowRelativeCenterY = WindowRelativeCenterY,
+            PureModeMonitorId = PureModeMonitorId,
+            PureModeRelativeCenterX = PureModeRelativeCenterX,
+            PureModeRelativeCenterY = PureModeRelativeCenterY,
             MinWindowWidth = MinWindowWidth,
             MinWindowHeight = MinWindowHeight,
             MaxCurrentFontSize = MaxCurrentFontSize,
@@ -115,6 +180,7 @@ public sealed class AppSettings
             PureMode = PureMode,
             ClickThrough = ClickThrough,
             OverlayOpacity = OverlayOpacity,
+            PureModeDragOpacity = PureModeDragOpacity,
             BackgroundAlpha = BackgroundAlpha,
             HoverFadeEnabled = HoverFadeEnabled,
             HoverFadeDuration = HoverFadeDuration,

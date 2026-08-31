@@ -56,6 +56,54 @@ public sealed class LyricsSynchronizerTests
     }
 
     [Fact]
+    public void Resolve_AppliesTheNativeLyricOffsetShippedInTheDocument()
+    {
+        var synchronizer = new LyricsSynchronizer();
+        var document = new LyricsDocument(
+            LyricsId: "1",
+            Status: "ok",
+            SourceFile: "sample.json",
+            UpdatedAt: DateTimeOffset.UtcNow,
+            Lines:
+            [
+                new LyricsLine(0, 1, "line one"),
+                new LyricsLine(1, 2, "line two"),
+            ],
+            NativeOffsetSeconds: 0.512);
+        var player = new PlayerState("Song", "Artist", null, 1.3, 180, true);
+
+        // 1.3 lands in "line two" on the raw timeline, but the document says its own timings run
+        // 0.512s ahead of this master, which puts playback back inside "line one".
+        var state = synchronizer.Resolve(document, player);
+
+        Assert.Equal(0, state.CurrentIndex);
+        Assert.Equal("line one", state.CurrentLine?.Text);
+    }
+
+    [Fact]
+    public void Resolve_IgnoresTheNativeLyricOffsetWhenDisabled()
+    {
+        var synchronizer = new LyricsSynchronizer();
+        var document = new LyricsDocument(
+            LyricsId: "1",
+            Status: "ok",
+            SourceFile: "sample.json",
+            UpdatedAt: DateTimeOffset.UtcNow,
+            Lines:
+            [
+                new LyricsLine(0, 1, "line one"),
+                new LyricsLine(1, 2, "line two"),
+            ],
+            NativeOffsetSeconds: 0.512);
+        var player = new PlayerState("Song", "Artist", null, 1.3, 180, true);
+
+        var state = synchronizer.Resolve(document, player, offsetSeconds: 0.0, applyNativeOffset: false);
+
+        Assert.Equal(1, state.CurrentIndex);
+        Assert.Equal("line two", state.CurrentLine?.Text);
+    }
+
+    [Fact]
     public void Resolve_KeepsLastLineCurrentAfterLyricsEnd()
     {
         var synchronizer = new LyricsSynchronizer();

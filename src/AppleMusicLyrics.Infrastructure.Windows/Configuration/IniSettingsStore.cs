@@ -22,36 +22,41 @@ public sealed class IniSettingsStore : ISettingsStore
             return new AppSettings();
         }
 
-        var values = File.ReadAllLines(_path)
-            .Select(line => line.Trim())
-            .Where(line => !string.IsNullOrWhiteSpace(line) && !line.StartsWith('#') && !line.StartsWith(';'))
-            .SkipWhile(line => !line.Equals($"[{SectionName}]", StringComparison.OrdinalIgnoreCase))
-            .Skip(1)
-            .TakeWhile(line => !line.StartsWith('['))
-            .Select(line => line.Split('=', 2))
-            .Where(parts => parts.Length == 2)
-            .ToDictionary(parts => parts[0].Trim(), parts => parts[1].Trim(), StringComparer.OrdinalIgnoreCase);
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var insideSection = false;
+        foreach (var rawLine in File.ReadAllLines(_path))
+        {
+            var line = rawLine.Trim();
+            if (string.IsNullOrWhiteSpace(line) || line.StartsWith('#') || line.StartsWith(';'))
+            {
+                continue;
+            }
+
+            if (line.StartsWith('['))
+            {
+                insideSection = line.Equals($"[{SectionName}]", StringComparison.OrdinalIgnoreCase);
+                continue;
+            }
+
+            if (!insideSection)
+            {
+                continue;
+            }
+
+            var parts = line.Split('=', 2);
+            if (parts.Length == 2 && !string.IsNullOrWhiteSpace(parts[0]))
+            {
+                // Last value wins so a hand-edited duplicate cannot prevent startup.
+                values[parts[0].Trim()] = parts[1].Trim();
+            }
+        }
 
         var settings = new AppSettings();
         var properties = typeof(AppSettings).GetProperties(BindingFlags.Public | BindingFlags.Instance);
         foreach (var property in properties)
         {
-            if (!values.TryGetValue(property.Name, out var rawValue))
-            {
-                continue;
-            }
-
-            object? parsed = property.PropertyType switch
-            {
-                var type when type == typeof(string) => rawValue,
-                var type when type == typeof(int) => int.Parse(rawValue, CultureInfo.InvariantCulture),
-                var type when type == typeof(int?) => string.IsNullOrWhiteSpace(rawValue) ? null : int.Parse(rawValue, CultureInfo.InvariantCulture),
-                var type when type == typeof(double) => double.Parse(rawValue, CultureInfo.InvariantCulture),
-                var type when type == typeof(bool) => bool.Parse(rawValue),
-                _ => null,
-            };
-
-            if (parsed is not null || property.PropertyType == typeof(int?))
+            if (values.TryGetValue(property.Name, out var rawValue)
+                && TryParseValue(property.PropertyType, rawValue, out var parsed))
             {
                 property.SetValue(settings, parsed);
             }
@@ -62,6 +67,8 @@ public sealed class IniSettingsStore : ISettingsStore
 
     public void Save(AppSettings settings)
     {
+        ArgumentNullException.ThrowIfNull(settings);
+
         var directory = Path.GetDirectoryName(_path);
         if (!string.IsNullOrWhiteSpace(directory))
         {
@@ -69,13 +76,78 @@ public sealed class IniSettingsStore : ISettingsStore
         }
 
         var lines = new List<string> { $"[{SectionName}]" };
-
         foreach (var property in typeof(AppSettings).GetProperties(BindingFlags.Public | BindingFlags.Instance))
         {
-            var value = property.GetValue(settings);
-            lines.Add($"{property.Name}={value}");
+            lines.Add($"{property.Name}={FormatValue(property.GetValue(settings))}");
         }
 
-        File.WriteAllLines(_path, lines);
+        var temporaryPath = $"{_path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllLines(temporaryPath, lines);
+            File.Move(temporaryPath, _path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temporaryPath))
+            {
+                File.Delete(temporaryPath);
+            }
+        }
+    }
+
+    private static bool TryParseValue(Type propertyType, string rawValue, out object? parsed)
+    {
+        parsed = null;
+        if (propertyType == typeof(string))
+        {
+            parsed = rawValue;
+            return true;
+        }
+
+        if (propertyType == typeof(int))
+        {
+            var success = int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value);
+            parsed = value;
+            return success;
+        }
+
+        if (propertyType == typeof(int?))
+        {
+            if (string.IsNullOrWhiteSpace(rawValue))
+            {
+                return true;
+            }
+
+            var success = int.TryParse(rawValue, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value);
+            parsed = value;
+            return success;
+        }
+
+        if (propertyType == typeof(double))
+        {
+            var success = double.TryParse(rawValue, NumberStyles.Float, CultureInfo.InvariantCulture, out var value);
+            parsed = value;
+            return success;
+        }
+
+        if (propertyType == typeof(bool))
+        {
+            var success = bool.TryParse(rawValue, out var value);
+            parsed = value;
+            return success;
+        }
+
+        return false;
+    }
+
+    private static string FormatValue(object? value)
+    {
+        return value switch
+        {
+            null => string.Empty,
+            IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
+            _ => value.ToString() ?? string.Empty,
+        };
     }
 }

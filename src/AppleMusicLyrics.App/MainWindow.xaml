@@ -7,6 +7,7 @@
         Height="240"
         MinWidth="320"
         MinHeight="140"
+        SizeToContent="Manual"
         WindowStartupLocation="Manual"
         WindowStyle="None"
         ResizeMode="NoResize"

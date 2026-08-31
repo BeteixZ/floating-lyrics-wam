@@ -1,5 +1,10 @@
 # Local runtime configuration
 settings.ini
+catalog-cache.json
+
+# Test output
+TestResults/
+*.trx
 
 build_tmp/
 dist/
@@ -27,3 +32,4 @@ Project.md
 
 # Tooling working directory
 .mimocode/
+semantic-review/

@@ -1,3 +1,4 @@
+using AppleMusicLyrics.Core.Models;
 using AppleMusicLyrics.Core.Parsing;
 using AppleMusicLyrics.Infrastructure.Windows.Cache;
 using Xunit;
@@ -31,27 +32,12 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
     }
 
     [Fact]
-    public void GetLatestRecentFile_SkipsSeenLyricsIds()
-    {
-        var first = CreateLyricsFile("ttmlLyrics-1.json", "seen", minutesAgo: 1);
-        var second = CreateLyricsFile("ttmlLyrics-2.json", "new", minutesAgo: 0);
-
-        var startedAt = DateTimeOffset.UtcNow.AddMinutes(-2);
-        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), roots: [_root], startedAt: startedAt);
-
-        var latest = scanner.GetLatestRecentFile([first, second], startedAt, new HashSet<string> { "seen" });
-
-        Assert.Equal(second, latest);
-    }
-
-    [Fact]
     public async Task GetLatestLyricsAsync_ParsesNewestLyricsFile()
     {
         _ = CreateLyricsFile("ttmlLyrics-old.json", "old", minutesAgo: 1, text: "old line");
         var expected = CreateLyricsFile("ttmlLyrics-new.json", "new", minutesAgo: 0, text: "new line");
 
-        var startedAt = DateTimeOffset.UtcNow.AddMinutes(-2);
-        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), roots: [_root], startedAt: startedAt);
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), roots: [_root]);
 
         var document = await scanner.GetLatestLyricsAsync();
 
@@ -62,22 +48,23 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
     }
 
     [Fact]
-    public async Task GetLatestLyricsAsync_ReturnsNullForMalformedJsonInsteadOfThrowing()
+    public async Task GetLatestLyricsAsync_ReturnsTheSameFileWhenAskedRepeatedly()
     {
-        var path = Path.Combine(CreateDirectory("INetCache", "A"), "ttmlLyrics-bad.json");
-        File.WriteAllText(path, "{ bad json");
-        File.SetLastWriteTimeUtc(path, DateTime.UtcNow);
+        // Regression: lyricsIds used to be blacklisted once returned, so replaying a track (repeat,
+        // or skipping back) silently fell through to whatever else happened to be in the cache.
+        var expected = CreateLyricsFile("ttmlLyrics-1.json", "AP_1", minutesAgo: 0, text: "only line");
 
-        var startedAt = DateTimeOffset.UtcNow.AddMinutes(-2);
-        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), roots: [_root], startedAt: startedAt);
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), roots: [_root]);
 
-        var document = await scanner.GetLatestLyricsAsync();
+        var first = await scanner.GetLatestLyricsAsync();
+        var second = await scanner.GetLatestLyricsAsync();
 
-        Assert.Null(document);
+        Assert.Equal(expected, first?.SourceFile);
+        Assert.Equal(expected, second?.SourceFile);
     }
 
     [Fact]
-    public async Task FindBestLyricsAsync_PrefersCachedSongThatMatchesPlayerDurationAndTitle()
+    public async Task FindCandidatesAsync_PrefersCachedSongThatMatchesPlayerDurationAndTitle()
     {
         _ = CreateLyricsFile(
             "ttmlLyrics-other.json",
@@ -94,7 +81,7 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
             bodyDuration: "6:03.521");
 
         var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), roots: [_root]);
-        var player = new AppleMusicLyrics.Core.Models.PlayerState(
+        var player = new PlayerState(
             Title: "Rap God",
             Artist: "Eminem",
             Album: "The Marshall Mathers LP2",
@@ -107,6 +94,64 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
         Assert.NotNull(document);
         Assert.Equal(expected, document!.SourceFile);
         Assert.Equal("rap-god", document.LyricsId);
+    }
+
+    [Fact]
+    public async Task FindCandidatesAsync_KeepsEveryFileWithinToleranceSoTiesStaySeparable()
+    {
+        // Two songs three seconds apart is an ordinary album; the scanner must surface both rather
+        // than silently commit to one, because only the catalog id can tell them apart.
+        _ = CreateLyricsFile("ttmlLyrics-a.json", "AP_1", minutesAgo: 0, bodyDuration: "3:00.000");
+        _ = CreateLyricsFile("ttmlLyrics-b.json", "AP_2", minutesAgo: 5, bodyDuration: "3:03.000");
+
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), roots: [_root]);
+        var player = new PlayerState("Song", "Artist", "Album", 0, 181.0, true);
+
+        var candidates = await scanner.FindCandidatesAsync(player);
+
+        Assert.Equal(2, candidates.Count);
+        Assert.Equal("AP_1", candidates[0].Document.LyricsId);
+        Assert.Contains(candidates, candidate => candidate.Document.LyricsId == "AP_2");
+    }
+
+    [Fact]
+    public async Task FindCandidatesAsync_DropsFilesFarOutsideTolerance()
+    {
+        _ = CreateLyricsFile("ttmlLyrics-far.json", "AP_far", minutesAgo: 0, bodyDuration: "6:00.000");
+
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), roots: [_root]);
+        var player = new PlayerState("Song", "Artist", "Album", 0, 180.0, true);
+
+        var candidates = await scanner.FindCandidatesAsync(player);
+
+        Assert.Empty(candidates);
+    }
+
+    [Fact]
+    public async Task FindCandidatesAsync_ReturnsNothingWhileTheDurationIsUnknown()
+    {
+        _ = CreateLyricsFile("ttmlLyrics-a.json", "AP_1", minutesAgo: 0, bodyDuration: "3:00.000");
+
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), roots: [_root]);
+        var player = new PlayerState("Song", "Artist", "Album", 0, 0, true);
+
+        var candidates = await scanner.FindCandidatesAsync(player);
+
+        Assert.Empty(candidates);
+    }
+
+    [Fact]
+    public async Task GetLatestLyricsAsync_ReturnsNullForMalformedJsonInsteadOfThrowing()
+    {
+        var path = Path.Combine(CreateDirectory("INetCache", "A"), "ttmlLyrics-bad.json");
+        File.WriteAllText(path, "{ bad json");
+        File.SetLastWriteTimeUtc(path, DateTime.UtcNow);
+
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), roots: [_root]);
+
+        var document = await scanner.GetLatestLyricsAsync();
+
+        Assert.Null(document);
     }
 
     private string CreateLyricsFile(

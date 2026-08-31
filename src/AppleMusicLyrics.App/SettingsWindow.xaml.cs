@@ -13,6 +13,7 @@ namespace AppleMusicLyrics.App;
 public partial class SettingsWindow : Window
 {
     private readonly Action<AppSettings>? _applyPreview;
+    private bool _backgroundAlphaEdited;
 
     public SettingsWindow(AppSettings settings, Action<AppSettings>? applyPreview = null)
     {
@@ -50,7 +51,8 @@ public partial class SettingsWindow : Window
         HoverFadeMinOpacitySlider.Value = Settings.HoverFadeMinOpacity;
         LyricsOffsetSlider.Value = Settings.LyricsOffsetSeconds;
         OverlayOpacitySlider.Value = Settings.OverlayOpacity;
-        BackgroundAlphaSlider.Value = Math.Round(((Settings.BackgroundAlpha ?? 200) / 255.0) * 100, 0);
+        PureModeDragOpacitySlider.Value = Settings.PureModeDragOpacity;
+        BackgroundAlphaSlider.Value = Math.Round(((Settings.BackgroundAlpha ?? (Settings.PureMode ? 72 : 200)) / 255.0) * 100, 0);
         MaxCurrentFontSlider.Value = Settings.MaxCurrentFontSize;
         ContextFontSlider.Value = Settings.ContextFontSize;
         GlowOpacitySlider.Value = Settings.GlowOpacity;
@@ -120,7 +122,12 @@ public partial class SettingsWindow : Window
         Settings.HoverFadeMinOpacity = Math.Round(HoverFadeMinOpacitySlider.Value, 2);
         Settings.LyricsOffsetSeconds = Math.Round(LyricsOffsetSlider.Value, 2);
         Settings.OverlayOpacity = Math.Round(OverlayOpacitySlider.Value, 2);
-        Settings.BackgroundAlpha = (int)Math.Round((BackgroundAlphaSlider.Value / 100.0) * 255);
+        Settings.PureModeDragOpacity = Math.Round(PureModeDragOpacitySlider.Value, 2);
+        if (_backgroundAlphaEdited || Settings.BackgroundAlpha.HasValue)
+        {
+            Settings.BackgroundAlpha = (int)Math.Round((BackgroundAlphaSlider.Value / 100.0) * 255);
+        }
+
         Settings.MaxCurrentFontSize = Math.Round(MaxCurrentFontSlider.Value, 1);
         Settings.ContextFontSize = Math.Round(ContextFontSlider.Value, 1);
         Settings.GlowOpacity = Math.Round(GlowOpacitySlider.Value, 2);
@@ -157,6 +164,11 @@ public partial class SettingsWindow : Window
         if (!IsLoaded)
         {
             return;
+        }
+
+        if (ReferenceEquals(sender, BackgroundAlphaSlider))
+        {
+            _backgroundAlphaEdited = true;
         }
 
         UpdateSliderLabels();
@@ -210,6 +222,7 @@ public partial class SettingsWindow : Window
     {
         LyricsOffsetValueText.Text = $"{LyricsOffsetSlider.Value:+0.00;-0.00;0.00}s";
         OverlayOpacityValueText.Text = $"{OverlayOpacitySlider.Value:P0}";
+        PureModeDragOpacityValueText.Text = $"{PureModeDragOpacitySlider.Value:P0}";
         BackgroundAlphaValueText.Text = $"{BackgroundAlphaSlider.Value:0}%";
         MaxCurrentFontValueText.Text = $"{Math.Round(MaxCurrentFontSlider.Value):0}px";
         ContextFontValueText.Text = $"{Math.Round(ContextFontSlider.Value):0}px";

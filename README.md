@@ -1,137 +1,130 @@
 # Apple Music Lyrics
 
-> ⚠️ **Early Development** - This project is in active development. Features and APIs may change.
+> Early development: features and configuration may change.
 
-A lightweight Windows desktop app that displays synchronized lyrics for Apple Music in a floating overlay window.
+A lightweight Windows desktop app that displays synchronized Apple Music lyrics in an always-on-top overlay.
 
 ![Demo](.github/assets/demo.gif)
 
-![Version](https://img.shields.io/badge/version-0.2.0-blue)
+![Version](https://img.shields.io/badge/version-0.3.0-blue)
 ![.NET](https://img.shields.io/badge/.NET-10.0-purple)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 
 ## Features
 
-- 🎵 **Floating Lyrics Overlay** - Always-on-top window with synchronized lyrics
-- 🎨 **Customizable Appearance** - Adjust colors, opacity, fonts, and glow effects
-- 📐 **Multiple Display Modes** - Single-line, multi-line, and pure mode
-- 🖱️ **Click-Through Mode** - Interact with apps beneath the overlay
-- ⚙️ **System Tray Integration** - Minimize to tray with quick access menu
-- 🔄 **Auto-Sync** - Automatically syncs with Apple Music playback
-- 💾 **Persistent Settings** - Remembers your preferences and window position
+- Synchronized floating lyrics with single-line, two-line, and context layouts
+- Strict Apple Music media-session selection by default
+- Confidence-based lyric matching with Apple catalog verification
+- Optional LRCLIB fallback when Apple Music has no usable cached lyrics
+- Pure Mode with content-sized bounds, configurable drag opacity, and click-through support
+- Per-monitor-v2 DPI awareness, mixed-DPI positioning, and independent normal/Pure Mode placement
+- Rendering-driven lyric transitions that follow WPF/DWM composition cadence
+- Configurable colors, opacity, fonts, glow, timing offset, and visibility behavior
+- System tray controls and persistent per-user settings
 
 ## Requirements
 
-- **Windows 10/11** (version 19041 or later)
-- **Apple Music** (Windows app)
-- **.NET 10 Runtime** - [Download here](https://dotnet.microsoft.com/download/dotnet/10.0)
+- Windows 10 version 19041 or later, or Windows 11
+- Apple Music for Windows
+- x64 [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)
+
+The release is framework-dependent; the Desktop Runtime must be installed before starting the app.
 
 ## Installation
 
-1. Download the latest release from [Releases](../../releases) and make sure you have .NET 10 Runtime installed 
-2. Extract `AppleMusicLyrics-vX.X.X-win-x64.zip`
-3. Run `AppleMusicLyrics.App.exe`
+1. Download `AppleMusicLyrics-vX.X.X-win-x64.zip` from [Releases](../../releases).
+2. Extract the archive.
+3. Run `AppleMusicLyrics.App.exe`.
 
-The app will automatically:
-- Scan Apple Music's lyric cache
-- Detect currently playing songs
-- Display synchronized lyrics in the overlay
+Settings and the catalog lookup cache are stored in `%LOCALAPPDATA%\AppleMusicLyrics`. On first launch after upgrading, legacy `settings.ini` and `catalog-cache.json` files beside the executable are copied there when possible.
 
 ## Usage
 
-### Basic Controls
+Use the tray icon to show/hide the overlay, open Settings, switch display modes, or toggle click-through behavior. Drag the visible card to move it. Normal mode and Pure Mode retain independent positions.
 
-- **Show/Hide Overlay** - Right-click tray icon → Show/Hide
-- **Move Window** - Drag the overlay to reposition
-- **Resize Window** - Drag window edges
-- **Settings** - Right-click tray icon → Settings
+Important settings include:
 
-### Display Modes
+- **Lyrics lead time**: calibrates lyrics against audible playback.
+- **Apply native timing correction**: honors Apple Music's TTML `lyricOffset` metadata.
+- **Compatibility mode**: allows non-Apple media sessions; disabled by default to prevent another player or browser from taking over.
+- **Low-confidence candidates**: trades matching accuracy for coverage; disabled by default.
+- **Online lyrics**: enables Apple catalog verification and LRCLIB fallback. Changes to these two providers require an app restart.
+- **Pure mode drag opacity**: controls visibility while repositioning the card.
+- **Debug panel**: shows lyric-resolution evidence plus measured render FPS and player polling rate.
 
-- **Multi-line Mode** - Shows previous, current, and next lyrics
-- **Single-line Mode** - Shows only the current line
-- **Pure Mode** - Minimal UI with no background
-- **Click-Through** - Enable to interact with windows beneath the overlay
+`CompositionTarget.Rendering` normally tracks the WPF/DWM composition cadence of the active display. The debug FPS value measures actual callbacks; it is not a promise that every system or driver will exactly match the monitor's advertised refresh rate.
 
-### Settings
+## Network and privacy
 
-Access settings via tray icon or by clicking the settings button in the overlay:
+Both online options are enabled by default and can be disabled in Settings for fully offline operation.
 
-- **Sync Lead Time** - Adjust timing offset for lyrics synchronization
-- **Appearance** - Customize colors, opacity, glow effects
-- **Font** - Choose font family, size, and weight
-- **Layout** - Configure line spacing and padding
+- **Apple iTunes Search API**: when local candidates are ambiguous, the app sends title and artist to verify the Apple catalog song ID.
+- **LRCLIB**: when Apple Music has no verified local lyrics, the app sends title, artist, album, and duration for exact lookup, with title/artist search fallback.
+
+Requests run in cancellable background operations with bounded retries. The app does not upload lyric cache files. Advanced storefront and timeout values remain available in `%LOCALAPPDATA%\AppleMusicLyrics\settings.ini`.
+
+## How lyric selection works
+
+1. Read Apple Music playback metadata through Windows System Media Transport Controls.
+2. Scan Apple Music's local lyric cache and parse timed TTML.
+3. Accept a close, unambiguous local match or verify ambiguous candidates against Apple's catalog.
+4. Optionally query LRCLIB if no verified local lyrics exist.
+5. Keep media/cache/network polling low-frequency while projecting playback and switching lines locally on visual frames.
+
+A missing lyric is preferred over displaying a low-confidence wrong lyric unless the user explicitly enables low-confidence candidates.
 
 ## Development
 
 ### Prerequisites
 
-- [.NET SDK 10.0.201](https://dotnet.microsoft.com/download/dotnet/10.0)
+- .NET SDK version pinned by [`global.json`](global.json)
 - Windows 10/11
-- Visual Studio 2022 or VS Code (optional)
 
-### Build
+### Build and test
 
-```bash
-# Restore dependencies
+```powershell
 dotnet restore AppleMusicLyrics.sln
-
-# Build
-dotnet build AppleMusicLyrics.sln -c Release
-
-# Run
-dotnet run --project src/AppleMusicLyrics.App/AppleMusicLyrics.App.csproj
+dotnet build AppleMusicLyrics.sln -c Release --no-restore
+dotnet test AppleMusicLyrics.sln -c Release --no-build
 ```
 
-### Test
+### Run
 
-```bash
-dotnet test AppleMusicLyrics.sln -c Release
+```powershell
+dotnet run --project src/AppleMusicLyrics.App/AppleMusicLyrics.App.csproj
 ```
 
 ### Publish
 
-```bash
-dotnet publish src/AppleMusicLyrics.App/AppleMusicLyrics.App.csproj -c Release -r win-x64 -o artifacts/publish
+```powershell
+dotnet publish src/AppleMusicLyrics.App/AppleMusicLyrics.App.csproj -c Release -r win-x64 -p:PublishSingleFile=true -o artifacts/publish/win-x64
 ```
 
-## Project Structure
+## Project structure
 
-```
+```text
 src/
-  AppleMusicLyrics.App/              # WPF desktop application
-  AppleMusicLyrics.Core/             # Core business logic and models
-  AppleMusicLyrics.Infrastructure.Windows/  # Windows-specific integrations
+  AppleMusicLyrics.App/                    WPF desktop application
+  AppleMusicLyrics.Core/                   Core models and pure logic
+  AppleMusicLyrics.Infrastructure.Windows/ Windows integrations
 tests/
-  AppleMusicLyrics.Tests/            # Unit tests
+  AppleMusicLyrics.Tests/                  Unit tests
 ```
 
-## How It Works
+## Known limitations
 
-1. **Cache Scanning** - Monitors Apple Music's local lyric cache directory
-2. **Media Session** - Reads playback state from Windows Media Session API
-3. **TTML Parsing** - Parses Apple's TTML lyric format with timestamps
-4. **Synchronization** - Matches current playback position to lyric lines
-5. **Rendering** - Displays lyrics in a WPF overlay with smooth transitions
-
-## Known Limitations
-
-- Windows-only (uses Windows Media Session API)
-- Requires Apple Music to be installed and running
-- Only works with songs that have lyrics in Apple Music
-- Lyrics must be cached locally (play the song at least once)
-
-## Roadmap
-
-See [TODO.md](TODO.md) for planned features and improvements.
+- Windows-only.
+- Apple Music must be running for playback tracking.
+- Offline mode requires lyrics already present in Apple Music's local cache.
+- Layered transparent WPF windows can show driver-specific edge flicker while Pure Mode resizes; this requires hardware testing across systems.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit issues or pull requests.
+Issues and pull requests are welcome. Keep matching changes accuracy-first and avoid introducing per-frame media, disk, or network I/O.
 
 ## License
 
-[MIT License](LICENSE) - See LICENSE file for details
+Licensed under the [MIT License](LICENSE).
 
 ## Acknowledgments
 

@@ -6,15 +6,21 @@ using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using System.Globalization;
+using System.IO;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using AppleMusicLyrics.App.Services;
+using AppleMusicLyrics.Core.Abstractions;
 using AppleMusicLyrics.Core.Configuration;
+using AppleMusicLyrics.Core.Display;
 using AppleMusicLyrics.Core.Models;
 using AppleMusicLyrics.Core.Parsing;
 using AppleMusicLyrics.Core.Sync;
 using AppleMusicLyrics.Infrastructure.Windows.Cache;
+using AppleMusicLyrics.Infrastructure.Windows.Catalog;
 using AppleMusicLyrics.Infrastructure.Windows.Configuration;
+using AppleMusicLyrics.Infrastructure.Windows.Display;
+using AppleMusicLyrics.Infrastructure.Windows.External;
 using AppleMusicLyrics.Infrastructure.Windows.Interop;
 using AppleMusicLyrics.Infrastructure.Windows.Media;
 using Drawing = System.Drawing;
@@ -29,10 +35,14 @@ namespace AppleMusicLyrics.App;
 public partial class MainWindow : Window
 {
     private readonly LyricsRuntimeService _runtimeService;
+    private readonly GlobalMediaSessionProvider _playerProvider;
+    private readonly ITunesCatalogSongResolver? _catalogResolver;
+    private readonly LrcLibLyricsProvider? _lrcLibProvider;
     private readonly DispatcherTimer _refreshTimer;
     private readonly AppSettings _settings;
     private readonly IniSettingsStore _settingsStore;
     private readonly WindowInteropService _windowInteropService;
+    private readonly MonitorService _monitorService;
     private readonly Forms.NotifyIcon _notifyIcon;
     private readonly Forms.ToolStripMenuItem _showHideMenuItem;
     private readonly Forms.ToolStripMenuItem _clickThroughMenuItem;
@@ -42,10 +52,22 @@ public partial class MainWindow : Window
     private readonly Forms.ToolStripMenuItem _debugPanelMenuItem;
     private bool _sourceInitialized;
     private bool _isRefreshing;
+    private bool _runtimeRefreshFailed;
+    private bool _hasRuntimeSnapshot;
+    private bool _hasFrameLyricState;
+    private LyricsDocument? _lastFrameDocument;
+    private int? _lastFrameLyricIndex;
+    private bool _lastFramePlaying;
+    private RuntimeSnapshot? _pendingFrameSnapshot;
+    private bool _frameSnapshotApplyScheduled;
+    private readonly VisualFrameStatistics _visualFrameStatistics = new();
     private bool _isApplyingPureModeAutoSize;
+    private bool _isApplyingWindowPlacement;
+    private readonly WindowMessageCoordinator _windowMessageCoordinator = new();
     private bool _overlayHiddenByUser;
     private string? _lastLyricAnimationKey;
     private bool _isHovering;
+    private bool _isWindowDragging;
     private bool _lastHasLyrics;
     private bool _lastPlaying;
     private double _opacityAnimTarget = -1;
@@ -57,22 +79,15 @@ public partial class MainWindow : Window
     private System.Diagnostics.Stopwatch _heightAnimStopwatch = new();
     private bool _isAnimatingHeight;
     private double _heightAnimCenterY;
-    private double _widthAnimFrom;
-    private double _targetWidth;
-    private readonly RectangleGeometry _clipGeometry = new() { RadiusX = 16, RadiusY = 16 };
-    // PureMode keeps the HWND at a fixed, generous size and animates only the ShellBorder clip.
-    // Resizing a layered (transparent) window is never atomic with the WPF clip, so any HWND
-    // resize during a transition flashes; a fixed window + clip animation is flash-proof.
-    private double _pureWindowWidth;
-    private double _pureWindowHeight;
-    private double _lastCardWidth;
-    private double _lastCardHeight;
+    private PixelRect _pureBoundsAnimFrom;
+    private PixelRect _pureBoundsAnimTarget;
 
     public MainWindow()
     {
         _settingsStore = new IniSettingsStore(GetSettingsPath());
         _settings = _settingsStore.Load();
         _windowInteropService = new WindowInteropService();
+        _monitorService = new MonitorService();
 
         InitializeComponent();
         Icon = LoadAppIcon();
@@ -90,19 +105,33 @@ public partial class MainWindow : Window
         MouseLeave += OnMouseLeave;
 
         var parser = new TtmlLyricsParser();
-        var scanner = new AppleMusicCacheScanner(
-            parser,
-            startedAt: DateTimeOffset.UtcNow,
-            recentFileGraceSeconds: _settings.RecentFileGraceSeconds);
-        var playerProvider = new GlobalMediaSessionProvider();
+        var scanner = new AppleMusicCacheScanner(parser);
+        _playerProvider = new GlobalMediaSessionProvider(_settings.AllowNonAppleMediaSessions);
         var synchronizer = new LyricsSynchronizer();
         var playbackClock = new PlaybackClock();
+        _catalogResolver = _settings.CatalogLookupEnabled
+            ? new ITunesCatalogSongResolver(
+                _settings.CatalogStorefronts,
+                GetCatalogCachePath(),
+                _settings.CatalogLookupTimeoutSeconds)
+            : null;
+        _lrcLibProvider = _settings.ExternalLyricsEnabled
+            ? new LrcLibLyricsProvider(timeoutSeconds: _settings.ExternalLyricsTimeoutSeconds)
+            : null;
         _runtimeService = new LyricsRuntimeService(
             scanner,
-            playerProvider,
+            _playerProvider,
             synchronizer,
             playbackClock,
-            _settings.LyricsOffsetSeconds);
+            _settings.LyricsOffsetSeconds,
+            _catalogResolver)
+        {
+            ApplyNativeLyricOffset = _settings.ApplyNativeLyricOffset,
+            AllowLowConfidenceLyrics = _settings.AllowLowConfidenceLyrics,
+            ExternalLyricsProviders = _lrcLibProvider is null
+                ? Array.Empty<IExternalLyricsProvider>()
+                : [_lrcLibProvider],
+        };
 
         _refreshTimer = new DispatcherTimer
         {
@@ -114,37 +143,32 @@ public partial class MainWindow : Window
 
     private void OnRendering(object? sender, EventArgs e)
     {
+        var publishedFrameRate = e is RenderingEventArgs renderingEventArgs
+            && _visualFrameStatistics.RecordFrame(renderingEventArgs.RenderingTime);
+
         TickHeightAnimation();
 
-        // Keep the hover-fade hit region matched to the visible card (the fixed PureMode window
-        // is much larger than the card, so the raw window rect would over-trigger).
-        if (_mouseTracker is not null)
+        if (_runtimeRefreshFailed)
         {
-            UpdateMouseTrackerBounds();
-        }
-    }
+            if (publishedFrameRate)
+            {
+                TimingText.Text = $"Playback clock refresh failed | {FormatRenderRate()} | {FormatPollRate()}";
+            }
 
-    private void UpdateMouseTrackerBounds()
-    {
-        if (_mouseTracker is null)
+            return;
+        }
+
+        if (!_hasRuntimeSnapshot)
         {
             return;
         }
 
-        if (!_settings.PureMode || !ReferenceEquals(ShellBorder.Clip, _clipGeometry))
+        var snapshot = _runtimeService.GetFrameSnapshot();
+        QueueFrameSnapshot(snapshot);
+        if (publishedFrameRate)
         {
-            _mouseTracker.ClearBounds();
-            return;
+            UpdateTimingText(snapshot);
         }
-
-        var dpi = VisualTreeHelper.GetDpi(this);
-        const double shellMargin = 6.0;
-        var card = _clipGeometry.Rect;
-        var left = (Left + shellMargin + card.X) * dpi.DpiScaleX;
-        var top = (Top + shellMargin + card.Y) * dpi.DpiScaleY;
-        var right = left + card.Width * dpi.DpiScaleX;
-        var bottom = top + card.Height * dpi.DpiScaleY;
-        _mouseTracker.SetBounds((int)left, (int)top, (int)right, (int)bottom);
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -166,53 +190,172 @@ public partial class MainWindow : Window
     {
         _sourceInitialized = true;
 
-        // Route hit-testing so only the visible card is interactive; the transparent margins
-        // of the fixed PureMode window pass clicks through to whatever is behind.
+        // Install the native message hook used for DPI, display-topology, and drag state.
         if (PresentationSource.FromVisual(this) is HwndSource source)
         {
             source.AddHook(WndProcHook);
         }
 
-        // Now that the screen is known, re-clamp the fixed PureMode window to it.
+        ApplyRestoredPlacement();
         if (_settings.PureMode)
         {
-            ApplyWindowBounds();
             RefreshLyricLayout();
         }
 
         ApplyClickThrough();
     }
 
-    private const int WM_NCHITTEST = 0x0084;
-    private static readonly IntPtr HTTRANSPARENT = new(-1);
+    private const int WM_DISPLAYCHANGE = 0x007E;
+    private const int WM_ENTERSIZEMOVE = 0x0231;
+    private const int WM_EXITSIZEMOVE = 0x0232;
+    private const int WM_DPICHANGED = 0x02E0;
 
     private IntPtr WndProcHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
-        if (msg != WM_NCHITTEST || !_settings.PureMode || !ReferenceEquals(ShellBorder.Clip, _clipGeometry))
+        switch (msg)
         {
-            return IntPtr.Zero;
-        }
+            case WM_DPICHANGED:
+                if (!_isApplyingWindowPlacement
+                    && _monitorService.TryReadSuggestedRect(lParam, out _))
+                {
+                    // PerMonitorV2 WPF owns DPI layout and applies the suggested physical RECT.
+                    // Recalculate the content-sized Pure Mode bounds after adopting the new DPI.
+                    CancelPureModeBoundsAnimation();
+                    QueuePureModeLayoutRefresh();
+                    QueueWindowStateCommit(reconcileDisplayTopology: false);
+                }
 
-        var pos = lParam.ToInt64();
-        double screenX = unchecked((short)(pos & 0xFFFF));
-        double screenY = unchecked((short)((pos >> 16) & 0xFFFF));
+                break;
 
-        var dpi = VisualTreeHelper.GetDpi(this);
-        var x = screenX / dpi.DpiScaleX;
-        var y = screenY / dpi.DpiScaleY;
+            case WM_DISPLAYCHANGE:
+                CancelPureModeBoundsAnimation();
+                QueueWindowStateCommit(reconcileDisplayTopology: true);
+                break;
 
-        const double shellMargin = 6.0;
-        var card = _clipGeometry.Rect;
-        var cardLeft = Left + shellMargin + card.X;
-        var cardTop = Top + shellMargin + card.Y;
+            case WM_ENTERSIZEMOVE:
+                CancelPureModeBoundsAnimation();
+                _windowMessageCoordinator.EnterSizeMove();
+                SetWindowDragging(true);
+                break;
 
-        if (x < cardLeft || x > cardLeft + card.Width || y < cardTop || y > cardTop + card.Height)
-        {
-            handled = true;
-            return HTTRANSPARENT;
+            case WM_EXITSIZEMOVE:
+                SetWindowDragging(false);
+                if (_windowMessageCoordinator.ExitSizeMove())
+                {
+                    ScheduleWindowStateCommit();
+                }
+
+                break;
         }
 
         return IntPtr.Zero;
+    }
+
+    private void ApplyNativeWindowRect(nint hwnd, PixelRect rect)
+    {
+        if (_isApplyingWindowPlacement)
+        {
+            return;
+        }
+
+        _isApplyingWindowPlacement = true;
+        try
+        {
+            _monitorService.SetWindowRect(hwnd, rect);
+        }
+        finally
+        {
+            _isApplyingWindowPlacement = false;
+        }
+    }
+
+    private void QueueWindowStateCommit(bool reconcileDisplayTopology)
+    {
+        if (_windowMessageCoordinator.RequestCommit(reconcileDisplayTopology))
+        {
+            ScheduleWindowStateCommit();
+        }
+    }
+
+    private void ScheduleWindowStateCommit()
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (!_sourceInitialized)
+            {
+                return;
+            }
+
+            var request = _windowMessageCoordinator.TakeScheduledCommit();
+            if (request == WindowStateCommitRequest.None)
+            {
+                return;
+            }
+
+            var shouldPersist = request != WindowStateCommitRequest.ReconcileDisplayTopologyAndPersist
+                || ReconcileDisplayTopology();
+            if (shouldPersist)
+            {
+                PersistCurrentSettings();
+            }
+        }, DispatcherPriority.Loaded);
+    }
+
+    private bool ReconcileDisplayTopology()
+    {
+        var monitors = _monitorService.GetMonitors();
+        if (monitors.Count == 0)
+        {
+            return false;
+        }
+
+        var hwnd = new WindowInteropHelper(this).Handle;
+        var currentRect = _monitorService.GetWindowRect(hwnd);
+        var pureModeSize = _settings.PureMode ? GetDesiredPureModeCardSize() : default;
+        var desiredWidth = _settings.PureMode
+            ? pureModeSize.Width
+            : GetCurrentLogicalSize(ActualWidth, Width, _settings.WindowWidth);
+        var desiredHeight = _settings.PureMode
+            ? pureModeSize.Height
+            : GetCurrentLogicalSize(ActualHeight, Height, _settings.WindowHeight);
+        var placement = WindowPlacementService.Resolve(
+            monitors,
+            _settings.PureMode ? _settings.PureModeMonitorId : _settings.WindowMonitorId,
+            _settings.PureMode ? _settings.PureModeRelativeCenterX : _settings.WindowRelativeCenterX,
+            _settings.PureMode ? _settings.PureModeRelativeCenterY : _settings.WindowRelativeCenterY,
+            desiredWidth,
+            desiredHeight,
+            currentRect);
+
+        Width = placement.WidthDip;
+        Height = placement.HeightDip;
+        if (_settings.PureMode)
+        {
+            _settings.PureModeMonitorId = placement.Monitor.DeviceName;
+            _settings.PureModeRelativeCenterX = placement.RelativeCenterX;
+            _settings.PureModeRelativeCenterY = placement.RelativeCenterY;
+            UpdateTextMaxWidths(placement.WidthDip);
+        }
+        else
+        {
+            _settings.WindowMonitorId = placement.Monitor.DeviceName;
+            _settings.WindowRelativeCenterX = placement.RelativeCenterX;
+            _settings.WindowRelativeCenterY = placement.RelativeCenterY;
+        }
+
+        _settings.WindowPlacementVersion = 1;
+        ApplyNativeWindowRect(hwnd, placement.WindowRectPx);
+        return true;
+    }
+
+    private static double GetCurrentLogicalSize(double actual, double requested, double fallback)
+    {
+        if (double.IsFinite(actual) && actual > 0)
+        {
+            return actual;
+        }
+
+        return double.IsFinite(requested) && requested > 0 ? requested : fallback;
     }
 
     private async void OnRefreshTick(object? sender, EventArgs e)
@@ -231,14 +374,19 @@ public partial class MainWindow : Window
         try
         {
             var snapshot = await _runtimeService.SnapshotAsync();
+            _runtimeRefreshFailed = false;
+            _hasRuntimeSnapshot = true;
             ApplySnapshot(snapshot);
             UpdateOverlayVisibility(snapshot);
         }
         catch (Exception ex)
         {
+            _runtimeRefreshFailed = true;
+            _pendingFrameSnapshot = null;
+            _lastLyricAnimationKey = null;
             SubtitleText.Text = "Failed to refresh runtime state.";
             PlayerText.Text = "Check Apple Music and media session availability.";
-            TimingText.Text = "Playback clock refresh failed";
+            TimingText.Text = $"Playback clock refresh failed | {FormatRenderRate()} | {FormatPollRate()}";
             StatusText.Text = "Runtime error";
             PathText.Text = ex.Message;
             CurrentLyricText.Text = "Refresh failed.";
@@ -253,9 +401,73 @@ public partial class MainWindow : Window
 
     private void ApplySnapshot(RuntimeSnapshot snapshot)
     {
+        // A completed poll is newer and more authoritative than any visual-frame update that
+        // is still queued behind rendering. Dropping the queued snapshot also prevents a stale
+        // lyric from being applied after this poll has already advanced the UI.
+        _pendingFrameSnapshot = null;
         UpdatePlayerSection(snapshot);
         UpdateLyricSection(snapshot);
+        RememberFrameLyricState(snapshot);
         UpdateTrayState();
+    }
+
+    private void QueueFrameSnapshot(RuntimeSnapshot snapshot)
+    {
+        var isPlaying = snapshot.Player?.Playing ?? false;
+        if (_hasFrameLyricState
+            && ReferenceEquals(_lastFrameDocument, snapshot.Document)
+            && _lastFrameLyricIndex == snapshot.ActiveLyric.CurrentIndex
+            && _lastFramePlaying == isPlaying)
+        {
+            return;
+        }
+
+        // CompositionTarget.Rendering runs inside WPF's render pass. Text measurement, the
+        // outgoing-lyric snapshot, and layout invalidation must not run there or the current
+        // frame misses its presentation deadline. Keep only the newest request and apply it
+        // right after the render pass yields, at the same priority the height animation uses.
+        _pendingFrameSnapshot = snapshot;
+        if (_frameSnapshotApplyScheduled)
+        {
+            return;
+        }
+
+        _frameSnapshotApplyScheduled = true;
+        Dispatcher.BeginInvoke(ApplyPendingFrameSnapshot, DispatcherPriority.Loaded);
+    }
+
+    private void ApplyPendingFrameSnapshot()
+    {
+        _frameSnapshotApplyScheduled = false;
+        var snapshot = _pendingFrameSnapshot;
+        _pendingFrameSnapshot = null;
+        if (snapshot is not null)
+        {
+            ApplyFrameSnapshot(snapshot);
+        }
+    }
+
+    private void ApplyFrameSnapshot(RuntimeSnapshot snapshot)
+    {
+        var isPlaying = snapshot.Player?.Playing ?? false;
+        if (_hasFrameLyricState
+            && ReferenceEquals(_lastFrameDocument, snapshot.Document)
+            && _lastFrameLyricIndex == snapshot.ActiveLyric.CurrentIndex
+            && _lastFramePlaying == isPlaying)
+        {
+            return;
+        }
+
+        UpdateLyricSection(snapshot);
+        RememberFrameLyricState(snapshot);
+    }
+
+    private void RememberFrameLyricState(RuntimeSnapshot snapshot)
+    {
+        _lastFrameDocument = snapshot.Document;
+        _lastFrameLyricIndex = snapshot.ActiveLyric.CurrentIndex;
+        _lastFramePlaying = snapshot.Player?.Playing ?? false;
+        _hasFrameLyricState = true;
     }
 
     private void UpdatePlayerSection(RuntimeSnapshot snapshot)
@@ -265,7 +477,7 @@ public partial class MainWindow : Window
             Title = "Apple Music Lyrics";
             SubtitleText.Text = "Waiting for Apple Music session";
             PlayerText.Text = "No active media session";
-            TimingText.Text = "No playback clock data";
+            UpdateTimingText(snapshot);
             return;
         }
 
@@ -274,31 +486,53 @@ public partial class MainWindow : Window
         var title = snapshot.Player.Title ?? "Unknown Title";
         Title = $"{artist} - {title}";
         PlayerText.Text = $"{status}: {artist} - {title}";
-        TimingText.Text = $"raw {TimeParser.FormatTimestamp(snapshot.RawPositionSeconds ?? 0)} | est {TimeParser.FormatTimestamp(snapshot.EstimatedPositionSeconds ?? 0)}";
+        UpdateTimingText(snapshot);
         SubtitleText.Text = snapshot.Player.Album is { Length: > 0 }
             ? $"{artist} | {snapshot.Player.Album}"
             : artist;
     }
 
+    private void UpdateTimingText(RuntimeSnapshot snapshot)
+    {
+        var clockText = snapshot.Player is null
+            ? "No playback clock data"
+            : $"raw {TimeParser.FormatTimestamp(snapshot.RawPositionSeconds ?? 0)} | est {TimeParser.FormatTimestamp(snapshot.EstimatedPositionSeconds ?? 0)}";
+        TimingText.Text = $"{clockText} | {FormatRenderRate()} | {FormatPollRate()}";
+    }
+
+    private string FormatRenderRate()
+    {
+        return _visualFrameStatistics.FramesPerSecond is double framesPerSecond
+            ? $"render {framesPerSecond.ToString("F1", CultureInfo.InvariantCulture)} fps"
+            : "render measuring";
+    }
+
+    private string FormatPollRate()
+    {
+        var pollsPerSecond = 1.0 / Math.Max(0.001, _refreshTimer.Interval.TotalSeconds);
+        return $"poll {pollsPerSecond.ToString("F1", CultureInfo.InvariantCulture)} Hz";
+    }
+
     private void UpdateLyricSection(RuntimeSnapshot snapshot)
     {
+        var resolutionLabel = FormatResolutionLabel(snapshot.Resolution);
         if (snapshot.Document is null)
         {
-            StatusText.Text = "Waiting for cache";
-            PathText.Text = "Play a song with timed lyrics in Apple Music.";
+            StatusText.Text = resolutionLabel;
+            PathText.Text = snapshot.Resolution.Summary;
             SetLyrics(
                 previousText: string.Empty,
-                currentText: snapshot.Player is null
-                    ? "Waiting for Apple Music session..."
-                    : "Waiting for lyric cache file...",
-                nextText: "Timed lyrics will appear here once a cache file is created.",
+                currentText: GetResolutionPlaceholder(snapshot.Resolution),
+                nextText: snapshot.Resolution.Status == LyricsResolutionStatus.FetchingExternal
+                    ? "The current track will be checked again automatically."
+                    : "Open the debug panel for the current match decision.",
                 isPlaying: snapshot.Player?.Playing ?? false,
                 animate: false);
             return;
         }
 
-        StatusText.Text = $"{snapshot.Document.Lines.Count} lines";
-        PathText.Text = snapshot.Document.SourceFile;
+        StatusText.Text = $"{snapshot.Document.Lines.Count} lines | {resolutionLabel}";
+        PathText.Text = $"{snapshot.Resolution.Summary} | {snapshot.Document.SourceFile}";
 
         var currentText = snapshot.ActiveLyric.CurrentLine?.Text
             ?? snapshot.ActiveLyric.NextLine?.Text
@@ -311,6 +545,41 @@ public partial class MainWindow : Window
             snapshot.ActiveLyric.NextLine?.Text,
             snapshot.Player?.Playing ?? false,
             animate: snapshot.ActiveLyric.CurrentLine is not null);
+    }
+
+    private static string FormatResolutionLabel(LyricsResolution resolution)
+    {
+        var status = resolution.Status switch
+        {
+            LyricsResolutionStatus.NoPlayer => "No player",
+            LyricsResolutionStatus.WaitingForMetadata => "Waiting for metadata",
+            LyricsResolutionStatus.SearchingLocal => "Searching cache",
+            LyricsResolutionStatus.VerifyingCatalog => "Verifying catalog",
+            LyricsResolutionStatus.FetchingExternal => "Fetching external",
+            LyricsResolutionStatus.Resolved => "Lyrics resolved",
+            LyricsResolutionStatus.Unavailable => "Lyrics unavailable",
+            LyricsResolutionStatus.Error => "Resolution error",
+            _ => resolution.Status.ToString(),
+        };
+
+        return resolution.Confidence == LyricsResolutionConfidence.None
+            ? status
+            : $"{status} ({resolution.Confidence.ToString().ToLowerInvariant()})";
+    }
+
+    private static string GetResolutionPlaceholder(LyricsResolution resolution)
+    {
+        return resolution.Status switch
+        {
+            LyricsResolutionStatus.NoPlayer => "Waiting for Apple Music session...",
+            LyricsResolutionStatus.WaitingForMetadata => "Waiting for track metadata...",
+            LyricsResolutionStatus.SearchingLocal => "Searching the Apple Music lyric cache...",
+            LyricsResolutionStatus.VerifyingCatalog => "Verifying the matching song...",
+            LyricsResolutionStatus.FetchingExternal => "Looking for lyrics from external providers...",
+            LyricsResolutionStatus.Unavailable => "No verified timed lyrics found.",
+            LyricsResolutionStatus.Error => "Lyrics resolution failed.",
+            _ => "Waiting for timed lyrics...",
+        };
     }
 
     private void SetLyrics(
@@ -342,9 +611,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        // True crossfade: freeze the outgoing lyrics into a snapshot that fades OUT while the
-        // new lyrics fade IN on top of it. The old text is always visible until the new text
-        // has appeared, so there is never an empty (dark) card between the two lines.
+        // Freeze the outgoing lyrics so the original crossfade remains visually unchanged:
+        // old lyrics fade out while the new lyrics fade in from transparent and move upward.
+        // This work now runs after the render callback, so it no longer blocks the boundary frame.
         SnapshotLyricGhost();
         ApplyLyricContent(previousText, currentText, nextText, isPlaying);
         RefreshLyricLayout();
@@ -352,7 +621,6 @@ public partial class MainWindow : Window
         var easing = new CubicEase { EasingMode = EasingMode.EaseOut };
         var duration = TimeSpan.FromMilliseconds(LyricFadeDurationMs);
 
-        // Incoming lyrics fade in (+ subtle upward slide on the current line)
         LyricPanel.BeginAnimation(OpacityProperty, null);
         LyricPanel.Opacity = 0.0;
         LyricPanel.BeginAnimation(OpacityProperty,
@@ -360,7 +628,7 @@ public partial class MainWindow : Window
         CurrentLyricTransform.BeginAnimation(TranslateTransform.YProperty,
             new DoubleAnimation(10, 0, duration) { EasingFunction = easing });
 
-        // Outgoing snapshot fades out over the same window
+        // Outgoing snapshot fades out over the same window.
         var ghostOut = new DoubleAnimation(0.0, duration)
         {
             EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
@@ -394,7 +662,18 @@ public partial class MainWindow : Window
 
     private void UpdateLyricRowHeights(bool showPrevious, bool showNext)
     {
-        if (_settings.PureMode || _settings.TwoLineMode)
+        if (_settings.TwoLineMode && !_settings.SingleLineMode)
+        {
+            // In two-line layout the next line sits in an Auto row. When there is no next line
+            // (the final lyric) that row must collapse to zero height — otherwise the empty
+            // TextBlock still reserves a full line of font leading and, because ContentRoot is
+            // vertically centered, pushes the current line visibly above center.
+            NextLyricRow.Height = showNext ? GridLength.Auto : new GridLength(0);
+            PreviousLyricRow.Height = new GridLength(0);
+            return;
+        }
+
+        if (_settings.PureMode)
         {
             return;
         }
@@ -428,88 +707,65 @@ public partial class MainWindow : Window
         _heightAnimFrom = Height;
         _targetHeight = targetHeight;
         _heightAnimCenterY = Top + Height / 2.0;
-        _widthAnimFrom = Width;
-        _targetWidth = Width; // no width change in normal mode
         _heightAnimStopwatch.Restart();
         _isAnimatingHeight = true;
     }
 
     private const double WindowAnimDurationMs = 240.0;
     private const double LyricFadeDurationMs = 360.0;
-    private const double PureModeMaxWindowWidth = 1400.0;
-    private const double PureModeMaxWindowHeight = 560.0;
-
-    // Fixed HWND size used in PureMode, clamped to the current screen so it never exceeds it.
-    private System.Windows.Size GetPureModeWindowSize()
-    {
-        var w = PureModeMaxWindowWidth;
-        var h = PureModeMaxWindowHeight;
-        if (_sourceInitialized)
-        {
-            var screen = GetCurrentScreenBounds();
-            w = Math.Min(w, screen.Width);
-            h = Math.Min(h, screen.Height);
-        }
-        return new System.Windows.Size(w, h);
-    }
+    private const double PureModeMaxCardWidth = 1400.0;
+    private const double PureModeMaxCardHeight = 560.0;
 
     private void TickHeightAnimation()
     {
         if (!_isAnimatingHeight)
+        {
             return;
+        }
 
         var progress = Math.Min(1.0, _heightAnimStopwatch.Elapsed.TotalMilliseconds / WindowAnimDurationMs);
         var eased = EaseInOutCubic(progress);
 
         if (_settings.PureMode)
         {
-            // The HWND is fixed; only the rounded ShellBorder clip animates between the old
-            // and new card size. This is a pure WPF composition change (no DWM resize), so it
-            // is always presented atomically — no flash. The clip stays applied at the end so
-            // the card keeps its size (clearing it would expose the full fixed-size border).
-            ApplyRevealClip(eased);
-
-            if (progress >= 1.0)
+            if (_isWindowDragging || !_sourceInitialized)
             {
-                _isAnimatingHeight = false;
-            }
-        }
-        else
-        {
-            // Normal mode: animate window height directly
-            var newHeight = _heightAnimFrom + (_targetHeight - _heightAnimFrom) * eased;
-
-            if (progress >= 1.0)
-            {
-                _isAnimatingHeight = false;
-                ShellBorder.Clip = null;
-                Height = _targetHeight;
-                Top = _heightAnimCenterY - _targetHeight / 2.0;
+                CancelPureModeBoundsAnimation();
                 return;
             }
 
-            Height = newHeight;
-            Top = _heightAnimCenterY - newHeight / 2.0;
+            // The card is centered inside the HWND, so its on-screen text position follows the
+            // window rect. Update the rect on every composition frame: skipping frames makes the
+            // window advance in coarse steps and the centered lyrics visibly jitter.
+            var hwnd = new WindowInteropHelper(this).Handle;
+            var frameRect = WindowBoundsGeometry.Interpolate(
+                _pureBoundsAnimFrom,
+                _pureBoundsAnimTarget,
+                eased);
+            ApplyNativeWindowRect(hwnd, frameRect);
+
+            if (progress >= 1.0)
+            {
+                _isAnimatingHeight = false;
+                _heightAnimStopwatch.Stop();
+                CaptureCurrentPlacement();
+            }
+
+            return;
         }
-    }
 
-    // Sets the ShellBorder reveal clip for a given eased progress (0 = old visual bounds,
-    // 1 = new visual bounds), centered within the current (max-sized) border container.
-    private void ApplyRevealClip(double eased)
-    {
-        const double shellMargin = 6.0;
-        var containerW = Math.Max(0, Width - shellMargin * 2);
-        var containerH = Math.Max(0, Height - shellMargin * 2);
-        var fromW = Math.Max(8, _widthAnimFrom - shellMargin * 2);
-        var fromH = Math.Max(8, _heightAnimFrom - shellMargin * 2);
-        var toW = Math.Max(8, _targetWidth - shellMargin * 2);
-        var toH = Math.Max(8, _targetHeight - shellMargin * 2);
+        // Normal mode keeps its existing vertically centered height animation.
+        var newHeight = _heightAnimFrom + (_targetHeight - _heightAnimFrom) * eased;
+        if (progress >= 1.0)
+        {
+            _isAnimatingHeight = false;
+            Height = _targetHeight;
+            Top = _heightAnimCenterY - _targetHeight / 2.0;
+            return;
+        }
 
-        var curW = fromW + (toW - fromW) * eased;
-        var curH = fromH + (toH - fromH) * eased;
-        var x = Math.Max(0, (containerW - curW) / 2.0);
-        var y = Math.Max(0, (containerH - curH) / 2.0);
-        _clipGeometry.Rect = new Rect(x, y, Math.Min(curW, containerW), Math.Min(curH, containerH));
+        Height = newHeight;
+        Top = _heightAnimCenterY - newHeight / 2.0;
     }
 
     private static double EaseInOutCubic(double t)
@@ -619,28 +875,79 @@ public partial class MainWindow : Window
         RefreshOverlayOpacity();
     }
 
-    // Single source of truth for the window opacity. The overlay fades fully out when paused
-    // or when there are no lyrics, dims while hovered (so you can see through it), and is
-    // otherwise shown at the configured opacity.
+    // Single source of truth for the window opacity. Automatic fade rules stay authoritative;
+    // Pure Mode drag opacity then overrides hover dimming, followed by the base opacity.
     private double ResolveTargetOpacity()
     {
-        if ((_settings.AutoHideNoLyrics && !_lastHasLyrics) ||
-            (_settings.FadeWhenPaused && !_lastPlaying))
-        {
-            return 0.0;
-        }
-
-        if (_isHovering && _settings.HoverFadeEnabled)
-        {
-            return Math.Clamp(_settings.HoverFadeMinOpacity, 0.0, 1.0);
-        }
-
-        return Math.Clamp(_settings.OverlayOpacity, 0.2, 1.0);
+        return OverlayOpacityResolver.Resolve(
+            _settings,
+            _lastHasLyrics,
+            _lastPlaying,
+            _isHovering,
+            _isWindowDragging);
     }
 
     private void RefreshOverlayOpacity()
     {
         AnimateOverlayOpacity(ResolveTargetOpacity());
+    }
+
+    private void SetWindowDragging(bool isDragging)
+    {
+        if (_isWindowDragging == isDragging)
+        {
+            return;
+        }
+
+        _isWindowDragging = isDragging;
+        if (_settings.PureMode)
+        {
+            if (isDragging)
+            {
+                CancelPureModeBoundsAnimation();
+            }
+            else
+            {
+                QueuePureModeLayoutRefresh();
+            }
+        }
+
+        RefreshOverlayOpacity();
+    }
+
+    private void CancelPureModeBoundsAnimation()
+    {
+        if (!_settings.PureMode || !_isAnimatingHeight)
+        {
+            return;
+        }
+
+        _isAnimatingHeight = false;
+        _heightAnimStopwatch.Stop();
+    }
+
+    private void QueuePureModeLayoutRefresh()
+    {
+        if (!_settings.PureMode || !_sourceInitialized)
+        {
+            return;
+        }
+
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (_settings.PureMode && !_isWindowDragging)
+            {
+                RefreshLyricLayout();
+            }
+        }, DispatcherPriority.Loaded);
+    }
+
+    private System.Windows.Size GetDesiredPureModeCardSize()
+    {
+        var measured = MeasurePureModeWindowSize();
+        return new System.Windows.Size(
+            Math.Clamp(measured.Width, 180.0, PureModeMaxCardWidth),
+            Math.Clamp(measured.Height, 70.0, PureModeMaxCardHeight));
     }
 
     private void AnimateOverlayOpacity(double targetOpacity)
@@ -671,12 +978,14 @@ public partial class MainWindow : Window
         PersistCurrentSettings();
         _notifyIcon.Visible = false;
         _notifyIcon.Dispose();
+        _catalogResolver?.Dispose();
+        _lrcLibProvider?.Dispose();
     }
 
     private void OnWindowSizeChanged(object sender, SizeChangedEventArgs e)
     {
-        // In PureMode the HWND is a fixed size; text widths are driven by the card measurement
-        // in ApplyPureModeAutoSize, so the window's own size changes must not touch them.
+        // Pure Mode applies its content-sized native bounds in one operation; WM_SIZE must not
+        // feed that change back into text measurement and start a recursive layout pass.
         if (_settings.PureMode || _isApplyingPureModeAutoSize || _isAnimatingHeight)
         {
             return;
@@ -698,15 +1007,15 @@ public partial class MainWindow : Window
 
     private void OnWindowLocationChanged(object? sender, EventArgs e)
     {
-        if (_isApplyingPureModeAutoSize || _isAnimatingHeight)
+        if (_isApplyingPureModeAutoSize || _isApplyingWindowPlacement || _isAnimatingHeight)
         {
             return;
         }
 
         if (_settings.PureMode && WindowState == WindowState.Normal)
         {
-            _settings.PureModeWindowX = (int)Math.Round(Left + Width / 2.0);
-            _settings.PureModeWindowY = (int)Math.Round(Top + Height / 2.0);
+            _settings.PureModeWindowX = (int)Math.Round(Left + GetCurrentLogicalSize(ActualWidth, Width, 180) / 2.0);
+            _settings.PureModeWindowY = (int)Math.Round(Top + GetCurrentLogicalSize(ActualHeight, Height, 70) / 2.0);
         }
     }
 
@@ -763,6 +1072,102 @@ public partial class MainWindow : Window
         NextLyricText.FontSize = contextFontSize;
     }
 
+    private void ApplyRestoredPlacement()
+    {
+        if (!_sourceInitialized)
+        {
+            return;
+        }
+
+        var monitors = _monitorService.GetMonitors();
+        if (monitors.Count == 0)
+        {
+            return;
+        }
+
+        var pureModeSize = _settings.PureMode ? GetDesiredPureModeCardSize() : default;
+        var desiredWidth = _settings.PureMode
+            ? pureModeSize.Width
+            : Math.Max(_settings.WindowWidth, _settings.MinWindowWidth);
+        var desiredHeight = _settings.PureMode
+            ? pureModeSize.Height
+            : Math.Max(_settings.WindowHeight, _settings.MinWindowHeight);
+        var legacyLeft = _settings.PureMode
+            ? _settings.PureModeWindowX - desiredWidth / 2.0
+            : _settings.WindowX;
+        var legacyTop = _settings.PureMode
+            ? _settings.PureModeWindowY - desiredHeight / 2.0
+            : _settings.WindowY;
+        var legacyRect = new PixelRect(
+            (int)Math.Round(legacyLeft),
+            (int)Math.Round(legacyTop),
+            (int)Math.Round(legacyLeft + desiredWidth),
+            (int)Math.Round(legacyTop + desiredHeight));
+
+        var placement = WindowPlacementService.Resolve(
+            monitors,
+            _settings.PureMode ? _settings.PureModeMonitorId : _settings.WindowMonitorId,
+            _settings.PureMode ? _settings.PureModeRelativeCenterX : _settings.WindowRelativeCenterX,
+            _settings.PureMode ? _settings.PureModeRelativeCenterY : _settings.WindowRelativeCenterY,
+            desiredWidth,
+            desiredHeight,
+            legacyRect);
+
+        Width = placement.WidthDip;
+        Height = placement.HeightDip;
+        if (_settings.PureMode)
+        {
+            _settings.PureModeMonitorId = placement.Monitor.DeviceName;
+            _settings.PureModeRelativeCenterX = placement.RelativeCenterX;
+            _settings.PureModeRelativeCenterY = placement.RelativeCenterY;
+            UpdateTextMaxWidths(placement.WidthDip);
+        }
+        else
+        {
+            _settings.WindowMonitorId = placement.Monitor.DeviceName;
+            _settings.WindowRelativeCenterX = placement.RelativeCenterX;
+            _settings.WindowRelativeCenterY = placement.RelativeCenterY;
+        }
+
+        _settings.WindowPlacementVersion = 1;
+        var handle = new WindowInteropHelper(this).Handle;
+        ApplyNativeWindowRect(handle, placement.WindowRectPx);
+    }
+
+    private void CaptureCurrentPlacement()
+    {
+        if (!_sourceInitialized || WindowState != WindowState.Normal)
+        {
+            return;
+        }
+
+        var handle = new WindowInteropHelper(this).Handle;
+        var monitors = _monitorService.GetMonitors();
+        var rect = _monitorService.GetWindowRect(handle);
+        if (monitors.Count == 0 || rect.Width <= 0 || rect.Height <= 0)
+        {
+            return;
+        }
+
+        var monitor = _monitorService.GetMonitorForWindow(handle, monitors)
+            ?? WindowPlacementService.FindMonitorForRect(monitors, rect);
+        var captured = WindowPlacementService.Capture(monitor, rect);
+        if (_settings.PureMode)
+        {
+            _settings.PureModeMonitorId = captured.MonitorId;
+            _settings.PureModeRelativeCenterX = captured.RelativeCenterX;
+            _settings.PureModeRelativeCenterY = captured.RelativeCenterY;
+        }
+        else
+        {
+            _settings.WindowMonitorId = captured.MonitorId;
+            _settings.WindowRelativeCenterX = captured.RelativeCenterX;
+            _settings.WindowRelativeCenterY = captured.RelativeCenterY;
+        }
+
+        _settings.WindowPlacementVersion = 1;
+    }
+
     private void ApplyWindowBounds()
     {
         MinWidth = _settings.PureMode ? 180 : _settings.MinWindowWidth;
@@ -770,21 +1175,15 @@ public partial class MainWindow : Window
 
         if (_settings.PureMode)
         {
-            // PureMode: fixed, generous HWND sized once. The visible card is produced by the
-            // ShellBorder clip and animates within this window, so the HWND never resizes
-            // during lyric changes (which would flash). Position so the window CENTER sits on
-            // the saved center point.
-            var size = GetPureModeWindowSize();
-            _pureWindowWidth = size.Width;
-            _pureWindowHeight = size.Height;
+            // Pure Mode uses the measured card size as the actual HWND size. Keeping the
+            // saved center fixed prevents lyric-length changes from walking the window.
+            var size = GetDesiredPureModeCardSize();
             var centerX = Math.Max(_settings.PureModeWindowX, -32000);
             var centerY = Math.Max(_settings.PureModeWindowY, -32000);
             Width = size.Width;
             Height = size.Height;
             Left = centerX - size.Width / 2.0;
             Top = centerY - size.Height / 2.0;
-            _lastCardWidth = 0;
-            _lastCardHeight = 0;
         }
         else
         {
@@ -808,9 +1207,8 @@ public partial class MainWindow : Window
 
         ShellBorder.Padding = _settings.PureMode ? new Thickness(6) : new Thickness(12);
         ShellBorder.Margin = _settings.PureMode ? new Thickness(6) : new Thickness(14);
-        // In PureMode the HWND is fixed and large; the content must size to itself and centre
-        // (not stretch to fill) so it stays compact and aligned with the centred reveal clip.
-        // Otherwise Auto rows pack to the top and the clip — centred — misses them.
+        ShellBorder.Clip = null;
+        // Pure Mode content sizes to the real card HWND; normal mode stretches to its window.
         ContentRoot.HorizontalAlignment = _settings.PureMode ? System.Windows.HorizontalAlignment.Center : System.Windows.HorizontalAlignment.Stretch;
         ContentRoot.VerticalAlignment = _settings.PureMode ? System.Windows.VerticalAlignment.Center : System.Windows.VerticalAlignment.Stretch;
         LyricPanel.Margin = _settings.PureMode ? new Thickness(0, 2, 0, 2) : new Thickness(0, 8, 0, 6);
@@ -878,7 +1276,10 @@ public partial class MainWindow : Window
 
         UpdateTrayState();
         ApplyClickThrough();
-        UpdateTextMaxWidths(Width);
+        var layoutWidth = _settings.PureMode
+            ? GetCurrentLogicalSize(ActualWidth, Width, PureModeMaxCardWidth)
+            : Width;
+        UpdateTextMaxWidths(layoutWidth);
         RefreshLyricLayout();
     }
 
@@ -938,7 +1339,19 @@ public partial class MainWindow : Window
             return;
         }
 
-        DragMove();
+        if (_settings.PureMode)
+        {
+            SetWindowDragging(true);
+        }
+
+        try
+        {
+            DragMove();
+        }
+        finally
+        {
+            SetWindowDragging(false);
+        }
     }
 
     private void ResizeThumb_OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -1004,15 +1417,16 @@ public partial class MainWindow : Window
         ApplySettings(settingsWindow.Settings, persist: true);
     }
 
-    private void SetPureMode(bool enabled)
+    private void SetPureMode(bool enabled, bool persist = true)
     {
-        // Save current position before switching mode
+        // Save both legacy coordinates and per-monitor placement before switching mode.
+        CaptureCurrentPlacement();
         if (WindowState == WindowState.Normal)
         {
             if (_settings.PureMode)
             {
-                _settings.PureModeWindowX = (int)Math.Round(Left + Width / 2.0);
-                _settings.PureModeWindowY = (int)Math.Round(Top + Height / 2.0);
+                _settings.PureModeWindowX = (int)Math.Round(Left + GetCurrentLogicalSize(ActualWidth, Width, 180) / 2.0);
+                _settings.PureModeWindowY = (int)Math.Round(Top + GetCurrentLogicalSize(ActualHeight, Height, 70) / 2.0);
             }
             else
             {
@@ -1023,10 +1437,20 @@ public partial class MainWindow : Window
             }
         }
 
+        CancelPureModeBoundsAnimation();
         _settings.PureMode = enabled;
+        if (!enabled)
+        {
+            SetWindowDragging(false);
+        }
+
         ApplyWindowBounds();
+        ApplyRestoredPlacement();
         ApplyAppearanceSettings();
-        PersistCurrentSettings();
+        if (persist)
+        {
+            PersistCurrentSettings();
+        }
     }
 
     private void SetClickThrough(bool enabled)
@@ -1069,19 +1493,38 @@ public partial class MainWindow : Window
 
     private void ApplySettings(AppSettings sourceSettings, bool persist)
     {
-        // Save current position before applying settings
         var currentLeft = Left;
         var currentTop = Top;
         var currentWidth = Width;
         var currentHeight = Height;
+        var currentPureMode = _settings.PureMode;
+        var requestedPureMode = sourceSettings.PureMode;
 
+        CancelPureModeBoundsAnimation();
         CopySettings(sourceSettings, _settings);
+        // Keep the source mode active until SetPureMode captures its placement. The settings
+        // dialog carries both modes' saved anchors, so the target placement remains available.
+        _settings.PureMode = currentPureMode;
+
+        _playerProvider.AllowNonAppleMediaSessions = _settings.AllowNonAppleMediaSessions;
         _runtimeService.LyricsOffsetSeconds = _settings.LyricsOffsetSeconds;
+        _runtimeService.ApplyNativeLyricOffset = _settings.ApplyNativeLyricOffset;
+        _runtimeService.AllowLowConfidenceLyrics = _settings.AllowLowConfidenceLyrics;
+        _refreshTimer.Interval = TimeSpan.FromSeconds(Math.Clamp(_settings.PlayerPollInterval, 0.05, 1.0));
 
-        // Apply appearance settings but preserve position
+        if (requestedPureMode != currentPureMode)
+        {
+            SetPureMode(requestedPureMode, persist);
+            return;
+        }
+
+        if (!_settings.PureMode)
+        {
+            SetWindowDragging(false);
+        }
+
+        // Apply appearance settings but preserve the active mode's current placement.
         ApplyAppearanceSettings();
-
-        // Restore position (don't reset to saved settings position)
         Left = currentLeft;
         Top = currentTop;
         if (!_settings.PureMode)
@@ -1098,13 +1541,14 @@ public partial class MainWindow : Window
 
     private void PersistCurrentSettings()
     {
+        CaptureCurrentPlacement();
         if (WindowState == WindowState.Normal)
         {
             if (_settings.PureMode)
             {
                 // PureMode: save center point — ApplyWindowBounds starts at Width=0 so Left=center
-                _settings.PureModeWindowX = (int)Math.Round(Left + Width / 2.0);
-                _settings.PureModeWindowY = (int)Math.Round(Top + Height / 2.0);
+                _settings.PureModeWindowX = (int)Math.Round(Left + GetCurrentLogicalSize(ActualWidth, Width, 180) / 2.0);
+                _settings.PureModeWindowY = (int)Math.Round(Top + GetCurrentLogicalSize(ActualHeight, Height, 70) / 2.0);
             }
             else
             {
@@ -1132,60 +1576,54 @@ public partial class MainWindow : Window
 
     private void ApplyPureModeAutoSize()
     {
-        if (_isApplyingPureModeAutoSize)
+        if (_isApplyingPureModeAutoSize || !_sourceInitialized || _isWindowDragging)
         {
             return;
         }
 
-        // Measure the card (content + chrome) the lyrics need, clamped to the fixed window.
-        var targetSize = MeasurePureModeWindowSize();
-        var cardWidth = Math.Clamp(targetSize.Width, 144, _pureWindowWidth);
-        var cardHeight = Math.Clamp(targetSize.Height, 70, _pureWindowHeight);
-
         _isApplyingPureModeAutoSize = true;
         try
         {
-            UpdateTextMaxWidths(cardWidth);
-            ApplyAdaptiveFontSizes(cardWidth, cardHeight);
-
-            // Already animating toward this exact card size — let it finish.
-            if (_isAnimatingHeight
-                && Math.Abs(_targetWidth - cardWidth) < 2
-                && Math.Abs(_targetHeight - cardHeight) < 2)
+            var hwnd = new WindowInteropHelper(this).Handle;
+            var currentRect = _monitorService.GetWindowRect(hwnd);
+            var monitors = _monitorService.GetMonitors();
+            if (currentRect.Width <= 0 || currentRect.Height <= 0 || monitors.Count == 0)
             {
                 return;
             }
 
-            // No meaningful change and nothing in flight — just make sure the clip is correct.
-            if (!_isAnimatingHeight
-                && Math.Abs(_lastCardWidth - cardWidth) < 2
-                && Math.Abs(_lastCardHeight - cardHeight) < 2
-                && ReferenceEquals(ShellBorder.Clip, _clipGeometry))
+            // Anchor on the live window center. Round-tripping through the stored
+            // monitor-relative center re-quantizes the position on every lyric, which shifts the
+            // card by a pixel or two each line and reads as jitter.
+            var monitor = _monitorService.GetMonitorForWindow(hwnd, monitors)
+                ?? WindowPlacementService.FindMonitorForRect(monitors, currentRect);
+            var requestedSize = GetDesiredPureModeCardSize();
+            var targetRect = WindowBoundsGeometry.ResizeAroundCenter(
+                currentRect,
+                monitor,
+                requestedSize.Width,
+                requestedSize.Height);
+            var targetWidthDip = targetRect.Width / monitor.ScaleX;
+            var targetHeightDip = targetRect.Height / monitor.ScaleY;
+
+            UpdateTextMaxWidths(targetWidthDip);
+            ApplyAdaptiveFontSizes(targetWidthDip, targetHeightDip);
+            ShellBorder.Clip = null;
+
+            if (Math.Abs(currentRect.Left - targetRect.Left) <= 1
+                && Math.Abs(currentRect.Top - targetRect.Top) <= 1
+                && Math.Abs(currentRect.Right - targetRect.Right) <= 1
+                && Math.Abs(currentRect.Bottom - targetRect.Bottom) <= 1)
             {
+                CancelPureModeBoundsAnimation();
+                ApplyNativeWindowRect(hwnd, targetRect);
                 return;
             }
 
-            // Start (or restart) the clip reveal from the CURRENT visible card size so the
-            // transition is continuous even if a previous one is still running.
-            const double shellMargin = 6.0;
-            var fromW = _lastCardWidth > 0 ? _lastCardWidth : cardWidth;
-            var fromH = _lastCardHeight > 0 ? _lastCardHeight : cardHeight;
-            if (_isAnimatingHeight && ReferenceEquals(ShellBorder.Clip, _clipGeometry))
-            {
-                fromW = _clipGeometry.Rect.Width + shellMargin * 2;
-                fromH = _clipGeometry.Rect.Height + shellMargin * 2;
-            }
-
-            _widthAnimFrom = fromW;
-            _heightAnimFrom = fromH;
-            _targetWidth = cardWidth;
-            _targetHeight = cardHeight;
-            _lastCardWidth = cardWidth;
-            _lastCardHeight = cardHeight;
-
-            ApplyRevealClip(0.0);
-            ShellBorder.Clip = _clipGeometry;
-
+            // A new lyric can interrupt an active transition. The actual HWND rect is always
+            // the new start, so restarting cannot jump back to an earlier target.
+            _pureBoundsAnimFrom = currentRect;
+            _pureBoundsAnimTarget = targetRect;
             _heightAnimStopwatch.Restart();
             _isAnimatingHeight = true;
         }
@@ -1208,8 +1646,8 @@ public partial class MainWindow : Window
         var extraWidthPadding = chromeWidth;
         var extraHeightPadding = chromeHeight + panelHeightPadding;
 
-        var maxContentWidth = 1400 - extraWidthPadding;
-        var maxContentHeight = 520 - extraHeightPadding;
+        var maxContentWidth = PureModeMaxCardWidth - extraWidthPadding;
+        var maxContentHeight = (PureModeMaxCardHeight - 40) - extraHeightPadding;
         var minContentWidth = 120;
 
         var currentFontSize = _settings.MaxCurrentFontSize;
@@ -1292,6 +1730,14 @@ public partial class MainWindow : Window
             totalHeight += currentMarginBottom;
             totalHeight += MeasureText(NextLyricText.Text, NextLyricText, contextFontSize, contentWidth, 2).Height;
         }
+        else if (_settings.TwoLineMode)
+        {
+            // Two-line mode with no next line (the final lyric): the next row collapses to zero
+            // (see UpdateLyricRowHeights), so only the current line's own bottom margin counts.
+            // Its top margin is 0 in two-line layout; mirroring that here keeps the measured card
+            // height equal to the rendered height so the line stays vertically centered.
+            totalHeight += currentMarginBottom;
+        }
         else
         {
             if (showPrevious)
@@ -1356,62 +1802,6 @@ public partial class MainWindow : Window
         CurrentLyricText.MaxWidth = currentMaxWidth;
         PreviousLyricText.MaxWidth = contextMaxWidth;
         NextLyricText.MaxWidth = contextMaxWidth;
-    }
-
-    private Rect GetWorkingArea()
-    {
-        if (_sourceInitialized)
-        {
-            var handle = new WindowInteropHelper(this).Handle;
-            var screen = Forms.Screen.FromHandle(handle);
-            var dpiScale = GetDpiScaleFactor();
-
-            // WinForms uses pixel coordinates, WPF uses device-independent units (DIPs)
-            // Convert pixel coordinates to DIPs by dividing by DPI scale
-            return new Rect(
-                screen.WorkingArea.Left / dpiScale,
-                screen.WorkingArea.Top / dpiScale,
-                screen.WorkingArea.Width / dpiScale,
-                screen.WorkingArea.Height / dpiScale);
-        }
-
-        return new Rect(
-            SystemParameters.WorkArea.Left,
-            SystemParameters.WorkArea.Top,
-            SystemParameters.WorkArea.Width,
-            SystemParameters.WorkArea.Height);
-    }
-
-    private double GetDpiScaleFactor()
-    {
-        if (_sourceInitialized)
-        {
-            var dpi = VisualTreeHelper.GetDpi(this);
-            return dpi.DpiScaleX;
-        }
-        return 1.0;
-    }
-
-    private Rect GetCurrentScreenBounds()
-    {
-        if (_sourceInitialized)
-        {
-            var handle = new WindowInteropHelper(this).Handle;
-            var screen = Forms.Screen.FromHandle(handle);
-            var dpiScale = GetDpiScaleFactor();
-
-            return new Rect(
-                screen.Bounds.Left / dpiScale,
-                screen.Bounds.Top / dpiScale,
-                screen.Bounds.Width / dpiScale,
-                screen.Bounds.Height / dpiScale);
-        }
-
-        // Default to primary screen bounds
-        return new Rect(
-            0, 0,
-            SystemParameters.PrimaryScreenWidth,
-            SystemParameters.PrimaryScreenHeight);
     }
 
     private void UpdateTrayState()
@@ -1594,7 +1984,43 @@ public partial class MainWindow : Window
 
     private static string GetSettingsPath()
     {
-        return IOPath.Combine(AppContext.BaseDirectory, "settings.ini");
+        return GetWritableDataPath("settings.ini");
+    }
+
+    private static string GetCatalogCachePath()
+    {
+        return GetWritableDataPath("catalog-cache.json");
+    }
+
+    private static string GetWritableDataPath(string fileName)
+    {
+        var legacyPath = IOPath.Combine(AppContext.BaseDirectory, fileName);
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(localAppData))
+        {
+            return legacyPath;
+        }
+
+        var dataDirectory = IOPath.Combine(localAppData, "AppleMusicLyrics");
+        var targetPath = IOPath.Combine(dataDirectory, fileName);
+        try
+        {
+            Directory.CreateDirectory(dataDirectory);
+            if (!File.Exists(targetPath) && File.Exists(legacyPath))
+            {
+                File.Copy(legacyPath, targetPath);
+            }
+
+            return targetPath;
+        }
+        catch (IOException)
+        {
+            return legacyPath;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return legacyPath;
+        }
     }
 
     private static void CopySettings(AppSettings source, AppSettings target)
@@ -1605,14 +2031,28 @@ public partial class MainWindow : Window
         target.CliRenderInterval = copy.CliRenderInterval;
         target.UiRefreshInterval = copy.UiRefreshInterval;
         target.LyricsOffsetSeconds = copy.LyricsOffsetSeconds;
+        target.ApplyNativeLyricOffset = copy.ApplyNativeLyricOffset;
         target.PreviewLineCount = copy.PreviewLineCount;
-        target.RecentFileGraceSeconds = copy.RecentFileGraceSeconds;
+        target.AllowNonAppleMediaSessions = copy.AllowNonAppleMediaSessions;
+        target.AllowLowConfidenceLyrics = copy.AllowLowConfidenceLyrics;
+        target.CatalogLookupEnabled = copy.CatalogLookupEnabled;
+        target.CatalogStorefronts = copy.CatalogStorefronts;
+        target.CatalogLookupTimeoutSeconds = copy.CatalogLookupTimeoutSeconds;
+        target.ExternalLyricsEnabled = copy.ExternalLyricsEnabled;
+        target.ExternalLyricsTimeoutSeconds = copy.ExternalLyricsTimeoutSeconds;
         target.WindowX = copy.WindowX;
         target.WindowY = copy.WindowY;
         target.WindowWidth = copy.WindowWidth;
         target.WindowHeight = copy.WindowHeight;
         target.PureModeWindowX = copy.PureModeWindowX;
         target.PureModeWindowY = copy.PureModeWindowY;
+        target.WindowPlacementVersion = copy.WindowPlacementVersion;
+        target.WindowMonitorId = copy.WindowMonitorId;
+        target.WindowRelativeCenterX = copy.WindowRelativeCenterX;
+        target.WindowRelativeCenterY = copy.WindowRelativeCenterY;
+        target.PureModeMonitorId = copy.PureModeMonitorId;
+        target.PureModeRelativeCenterX = copy.PureModeRelativeCenterX;
+        target.PureModeRelativeCenterY = copy.PureModeRelativeCenterY;
         target.MinWindowWidth = copy.MinWindowWidth;
         target.MinWindowHeight = copy.MinWindowHeight;
         target.MaxCurrentFontSize = copy.MaxCurrentFontSize;
@@ -1629,9 +2069,11 @@ public partial class MainWindow : Window
         target.TwoLineMode = copy.TwoLineMode;
         target.ShowDebugPanel = copy.ShowDebugPanel;
         target.AutoHideNoLyrics = copy.AutoHideNoLyrics;
+        target.FadeWhenPaused = copy.FadeWhenPaused;
         target.PureMode = copy.PureMode;
         target.ClickThrough = copy.ClickThrough;
         target.OverlayOpacity = copy.OverlayOpacity;
+        target.PureModeDragOpacity = copy.PureModeDragOpacity;
         target.BackgroundAlpha = copy.BackgroundAlpha;
         target.HoverFadeEnabled = copy.HoverFadeEnabled;
         target.HoverFadeDuration = copy.HoverFadeDuration;

@@ -64,6 +64,7 @@ jobs:
             Remove-Item $zipPath -Force
           }
 
+          Copy-Item LICENSE, README.md, RELEASE_NOTES.md -Destination .\artifacts\publish\win-x64
           Compress-Archive -Path .\artifacts\publish\win-x64\* -DestinationPath $zipPath
           "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 

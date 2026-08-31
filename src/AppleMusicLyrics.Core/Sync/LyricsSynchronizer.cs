@@ -4,17 +4,28 @@ namespace AppleMusicLyrics.Core.Sync;
 
 public sealed class LyricsSynchronizer
 {
+    /// <param name="offsetSeconds">
+    /// The user's calibration for how far SMTC's reported position lags the audible audio.
+    /// </param>
+    /// <param name="applyNativeOffset">
+    /// Whether to honour the <c>lyricOffset</c> Apple ships inside the TTML, which corrects the
+    /// lyric timings for the particular master being played. Only a minority of documents carry one.
+    /// </param>
     public ActiveLyricState Resolve(
         LyricsDocument? document,
         PlayerState? player,
-        double offsetSeconds = 0.0)
+        double offsetSeconds = 0.0,
+        bool applyNativeOffset = true)
     {
         if (document is null || player is null || document.Lines.Count == 0)
         {
             return new ActiveLyricState(null, null, null, null);
         }
 
-        var position = Math.Max(0, player.Position + offsetSeconds);
+        // lyricOffset shifts the lyric timeline, so shifting the playback position the other way
+        // compares the two on the same axis.
+        var nativeOffset = applyNativeOffset ? document.NativeOffsetSeconds : 0.0;
+        var position = Math.Max(0, player.Position + offsetSeconds - nativeOffset);
         var lines = document.Lines;
 
         if (position < lines[0].Begin)
