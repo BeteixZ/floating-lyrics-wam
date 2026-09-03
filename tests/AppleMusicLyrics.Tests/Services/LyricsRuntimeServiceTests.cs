@@ -1,7 +1,10 @@
 using AppleMusicLyrics.App.Services;
 using AppleMusicLyrics.Core.Abstractions;
 using AppleMusicLyrics.Core.Models;
+using AppleMusicLyrics.Core.Parsing;
 using AppleMusicLyrics.Core.Sync;
+using AppleMusicLyrics.Infrastructure.Windows.Cache;
+using AppleMusicLyrics.Infrastructure.Windows.Catalog;
 using Xunit;
 
 namespace AppleMusicLyrics.Tests.Services;
@@ -314,12 +317,12 @@ public sealed class LyricsRuntimeServiceTests
     public async Task SnapshotAsync_HoldsBackDurationFallbackWhenCatalogLookupFails()
     {
         var closest = BuildDocument("AP_111", 181.0, "closest by duration");
-        var further = BuildDocument("AP_222", 185.0, "further away");
+        var ambiguous = BuildDocument("AP_222", 181.2, "ambiguous candidate");
         var runtime = new LyricsRuntimeService(
             new CandidateLyricsProvider(
             [
                 new LyricsMatch(closest, 80, 1.0),
-                new LyricsMatch(further, 25, 5.0),
+                new LyricsMatch(ambiguous, 70, 1.2),
             ]),
             new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true)),
             new LyricsSynchronizer(),
@@ -337,12 +340,12 @@ public sealed class LyricsRuntimeServiceTests
     public async Task SnapshotAsync_CanUseDurationFallbackWhenOptedIn()
     {
         var closest = BuildDocument("AP_111", 181.0, "closest by duration");
-        var further = BuildDocument("AP_222", 185.0, "further away");
+        var ambiguous = BuildDocument("AP_222", 181.2, "ambiguous candidate");
         var runtime = new LyricsRuntimeService(
             new CandidateLyricsProvider(
             [
                 new LyricsMatch(closest, 80, 1.0),
-                new LyricsMatch(further, 25, 5.0),
+                new LyricsMatch(ambiguous, 70, 1.2),
             ]),
             new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true)),
             new LyricsSynchronizer(),
@@ -356,6 +359,156 @@ public sealed class LyricsRuntimeServiceTests
 
         Assert.Equal("AP_111", snapshot.Document!.LyricsId);
         Assert.Equal(LyricsResolutionConfidence.Low, snapshot.Resolution.Confidence);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_AcceptsSingleCandidateWithinMediumWindowWhenCatalogLookupFails()
+    {
+        var singleMedium = BuildDocument("AP_111", 182.0, "single candidate with medium delta");
+        var runtime = new LyricsRuntimeService(
+            new CandidateLyricsProvider(
+            [
+                new LyricsMatch(singleMedium, 60, 2.0, HasContentMatch: true),
+            ]),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true)),
+            new LyricsSynchronizer(),
+            new PlaybackClock(),
+            catalogResolver: new StubCatalogResolver([]));
+
+        var snapshot = await runtime.SnapshotAsync();
+
+        Assert.NotNull(snapshot.Document);
+        Assert.Equal("AP_111", snapshot.Document.LyricsId);
+        Assert.Equal(LyricsResolutionStatus.Resolved, snapshot.Resolution.Status);
+        Assert.Equal(LyricsResolutionConfidence.Medium, snapshot.Resolution.Confidence);
+        Assert.Equal(LyricsResolutionSource.AppleMusicCache, snapshot.Resolution.Source);
+        Assert.Contains("medium duration window", snapshot.Resolution.Summary, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_AcceptsClearWinnerCandidateWhenCatalogLookupFails()
+    {
+        var best = BuildDocument("AP_111", 181.0, "clear winner");
+        var farBehind = BuildDocument("AP_222", 185.0, "far behind");
+        var runtime = new LyricsRuntimeService(
+            new CandidateLyricsProvider(
+            [
+                new LyricsMatch(best, 80, 1.0),
+                new LyricsMatch(farBehind, 25, 5.0),
+            ]),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true)),
+            new LyricsSynchronizer(),
+            new PlaybackClock(),
+            catalogResolver: new StubCatalogResolver([]));
+
+        var snapshot = await runtime.SnapshotAsync();
+
+        Assert.NotNull(snapshot.Document);
+        Assert.Equal("AP_111", snapshot.Document.LyricsId);
+        Assert.Equal(LyricsResolutionStatus.Resolved, snapshot.Resolution.Status);
+        Assert.Equal(LyricsResolutionConfidence.Medium, snapshot.Resolution.Confidence);
+        Assert.Equal(LyricsResolutionSource.AppleMusicCache, snapshot.Resolution.Source);
+        Assert.Contains("significant score lead", snapshot.Resolution.Summary, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_HoldsBackSingleCandidateOutsideMediumWindow()
+    {
+        var singleOutside = BuildDocument("AP_111", 184.5, "single candidate outside medium window");
+        var runtime = new LyricsRuntimeService(
+            new CandidateLyricsProvider(
+            [
+                new LyricsMatch(singleOutside, 40, 4.5),
+            ]),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true)),
+            new LyricsSynchronizer(),
+            new PlaybackClock(),
+            catalogResolver: new StubCatalogResolver([]));
+
+        var snapshot = await runtime.SnapshotAsync();
+
+        Assert.Null(snapshot.Document);
+        Assert.Equal(LyricsResolutionStatus.Unavailable, snapshot.Resolution.Status);
+        Assert.Equal(LyricsResolutionConfidence.Low, snapshot.Resolution.Confidence);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_HoldsBackSingleCandidateWithinMediumWindowWithoutContentMatch()
+    {
+        var singleWithoutContent = BuildDocument("AP_111", 182.0, "single candidate without content match");
+        var runtime = new LyricsRuntimeService(
+            new CandidateLyricsProvider(
+            [
+                new LyricsMatch(singleWithoutContent, 60, 2.0, HasContentMatch: false),
+            ]),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true)),
+            new LyricsSynchronizer(),
+            new PlaybackClock(),
+            catalogResolver: new StubCatalogResolver([]));
+
+        var snapshot = await runtime.SnapshotAsync();
+
+        Assert.Null(snapshot.Document);
+        Assert.Equal(LyricsResolutionStatus.Unavailable, snapshot.Resolution.Status);
+        Assert.Equal(LyricsResolutionConfidence.Low, snapshot.Resolution.Confidence);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_PrefersExternalProviderOverUnverifiedDurationMatch()
+    {
+        var unverifiedLocal = BuildDocument("AP_WRONG", 181.9, "wrong song with similar duration");
+        var verifiedExternal = BuildDocument("LRCLIB_RIGHT", 180.0, "correct lyrics from external provider");
+        var externalProvider = new StubExternalProvider(verifiedExternal);
+
+        var runtime = new LyricsRuntimeService(
+            new CandidateLyricsProvider(
+            [
+                new LyricsMatch(unverifiedLocal, 60, 1.9, HasContentMatch: false),
+            ]),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true)),
+            new LyricsSynchronizer(),
+            new PlaybackClock(),
+            catalogResolver: new StubCatalogResolver([]))
+        {
+            ExternalLyricsProviders = [externalProvider],
+        };
+
+        var first = await runtime.SnapshotAsync();
+        await Task.Delay(50);
+        var second = await runtime.SnapshotAsync();
+
+        Assert.NotNull(second.Document);
+        Assert.Equal("LRCLIB_RIGHT", second.Document.LyricsId);
+        Assert.Equal(LyricsResolutionConfidence.Medium, second.Resolution.Confidence);
+        Assert.Equal(LyricsResolutionSource.ExternalProvider, second.Resolution.Source);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_CorrectlyResolvesCupcakkeGoGetEm()
+    {
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser());
+        var player = new PlayerState(
+            Title: "Go Get 'em",
+            Artist: "cupcakKe",
+            Album: "The BakKery",
+            Position: 20.0,
+            Duration: 148.0,
+            Playing: true,
+            SourceAppId: "AppleInc.AppleMusicWin_nzyj5cx40ttqa!App"
+        );
+
+        var runtime = new LyricsRuntimeService(
+            scanner,
+            new StubPlayerProvider(player),
+            new LyricsSynchronizer(),
+            new PlaybackClock());
+
+        var snap = await runtime.SnapshotAsync();
+        Assert.NotNull(snap.Document);
+        Assert.Equal("MX_42529556-45061221", snap.Document.LyricsId);
+        Assert.Equal(LyricsResolutionStatus.Resolved, snap.Resolution.Status);
+        Assert.Equal(LyricsResolutionConfidence.Medium, snap.Resolution.Confidence);
+        Assert.Contains(snap.Document.Lines, l => l.Text.Contains("go get 'em", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

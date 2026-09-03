@@ -1254,22 +1254,11 @@ public partial class MainWindow : Window
         var alpha = (byte)Math.Clamp(_settings.BackgroundAlpha ?? (_settings.PureMode ? 72 : 200), 0, 255);
         ShellBorder.Background = new SolidColorBrush(MediaColor.FromArgb(alpha, 20, 20, 22));
 
-        try
-        {
-            var fontFamilyName = string.IsNullOrWhiteSpace(_settings.FontFamily) ? "Segoe UI" : _settings.FontFamily;
-            var fontFamily = new MediaFontFamily(fontFamilyName);
-            CurrentLyricText.FontFamily = fontFamily;
-            PreviousLyricText.FontFamily = fontFamily;
-            NextLyricText.FontFamily = fontFamily;
-            SubtitleText.FontFamily = fontFamily;
-        }
-        catch (ArgumentException)
-        {
-            CurrentLyricText.FontFamily = new MediaFontFamily("Segoe UI");
-            PreviousLyricText.FontFamily = new MediaFontFamily("Segoe UI");
-            NextLyricText.FontFamily = new MediaFontFamily("Segoe UI");
-            SubtitleText.FontFamily = new MediaFontFamily("Segoe UI");
-        }
+        var fontFamily = FontFamilyResolver.Resolve(_settings.FontFamily);
+        CurrentLyricText.FontFamily = fontFamily;
+        PreviousLyricText.FontFamily = fontFamily;
+        NextLyricText.FontFamily = fontFamily;
+        SubtitleText.FontFamily = fontFamily;
 
         CurrentLyricGlowEffect.Color = ParseColorOrFallback(_settings.GlowColor, Colors.White);
         CurrentLyricGlowEffect.Opacity = Math.Clamp(_settings.GlowOpacity, 0.0, 1.0);
@@ -1610,6 +1599,17 @@ public partial class MainWindow : Window
             ApplyAdaptiveFontSizes(targetWidthDip, targetHeightDip);
             ShellBorder.Clip = null;
 
+            if (currentRect.Left == targetRect.Left
+                && currentRect.Top == targetRect.Top
+                && currentRect.Right == targetRect.Right
+                && currentRect.Bottom == targetRect.Bottom)
+            {
+                CancelPureModeBoundsAnimation();
+                return;
+            }
+
+            // Differences of 1 pixel or less do not warrant a visible animated transition;
+            // apply the target rect immediately to avoid a jarring snap.
             if (Math.Abs(currentRect.Left - targetRect.Left) <= 1
                 && Math.Abs(currentRect.Top - targetRect.Top) <= 1
                 && Math.Abs(currentRect.Right - targetRect.Right) <= 1
@@ -1920,7 +1920,7 @@ public partial class MainWindow : Window
         double maxHeight,
         bool singleLine)
     {
-        var fontFamily = CurrentLyricText.FontFamily ?? new MediaFontFamily("Segoe UI");
+        var fontFamily = CurrentLyricText.FontFamily ?? FontFamilyResolver.Resolve(_settings.FontFamily);
         var typeface = new Typeface(
             fontFamily,
             CurrentLyricText.FontStyle,

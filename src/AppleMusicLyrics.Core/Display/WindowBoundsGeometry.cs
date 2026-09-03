@@ -25,8 +25,18 @@ public static class WindowBoundsGeometry
             (int)Math.Round(Math.Max(1, targetHeightDip) * monitor.ScaleY),
             1,
             Math.Max(1, work.Height));
-        var left = (int)Math.Round(currentRect.CenterX - widthPx / 2.0);
-        var top = (int)Math.Round(currentRect.CenterY - heightPx / 2.0);
+
+        // Derive the new left/top by adjusting the current position for the change in size.
+        // Using the integer half-delta (widthDiff / 2 with truncation toward zero) avoids the
+        // rounding bias that occurs when re-deriving left from the half-pixel CenterX. The
+        // truncation is symmetric: growing by 1 pixel leaves left unchanged (the extra pixel
+        // goes to the right), and shrinking by 1 pixel also leaves left unchanged (the lost
+        // pixel comes from the right). Over thousands of resize cycles this prevents the
+        // accumulated sub-pixel drift that banker's rounding would otherwise produce.
+        var widthDiff = widthPx - currentRect.Width;
+        var heightDiff = heightPx - currentRect.Height;
+        var left = currentRect.Left - widthDiff / 2;
+        var top = currentRect.Top - heightDiff / 2;
         left = Math.Clamp(left, work.Left, work.Right - widthPx);
         top = Math.Clamp(top, work.Top, work.Bottom - heightPx);
 
@@ -56,12 +66,15 @@ public static class WindowBoundsGeometry
             return target;
         }
 
-        var centerX = Lerp(start.CenterX, target.CenterX, t);
-        var centerY = Lerp(start.CenterY, target.CenterY, t);
-        var width = Math.Max(1, (int)Math.Round(Lerp(start.Width, target.Width, t)));
-        var height = Math.Max(1, (int)Math.Round(Lerp(start.Height, target.Height, t)));
-        var left = (int)Math.Round(centerX - width / 2.0);
-        var top = (int)Math.Round(centerY - height / 2.0);
+        // Interpolate all four edges independently so the resulting rect converges
+        // monotonically to the target without the rounding bias that re-deriving left
+        // from an interpolated center + width would introduce.
+        var left = (int)Math.Round(Lerp(start.Left, target.Left, t));
+        var top = (int)Math.Round(Lerp(start.Top, target.Top, t));
+        var right = (int)Math.Round(Lerp(start.Right, target.Right, t));
+        var bottom = (int)Math.Round(Lerp(start.Bottom, target.Bottom, t));
+        var width = Math.Max(1, right - left);
+        var height = Math.Max(1, bottom - top);
         return new PixelRect(left, top, left + width, top + height);
     }
 

@@ -1,5 +1,6 @@
 using Windows.Media.Control;
 using AppleMusicLyrics.Core.Abstractions;
+using AppleMusicLyrics.Core.Matching;
 using AppleMusicLyrics.Core.Models;
 
 namespace AppleMusicLyrics.Infrastructure.Windows.Media;
@@ -80,10 +81,14 @@ public sealed class GlobalMediaSessionProvider : IPlayerSessionProvider
             var position = timeline.Position;
             var duration = end > start ? (end - start).TotalSeconds : 0;
 
+            var (cleanArtist, cleanAlbum) = MetadataMatching.ParseArtistAndAlbum(
+                mediaProperties?.Artist,
+                mediaProperties?.AlbumTitle);
+
             return new PlayerState(
                 Title: mediaProperties?.Title,
-                Artist: mediaProperties?.Artist,
-                Album: mediaProperties?.AlbumTitle,
+                Artist: cleanArtist,
+                Album: cleanAlbum,
                 Position: Math.Max(0, position.TotalSeconds),
                 Duration: Math.Max(0, duration),
                 Playing: playbackInfo?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing,

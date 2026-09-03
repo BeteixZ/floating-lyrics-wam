@@ -1,5 +1,23 @@
 # Release Notes
 
+## v0.4.0 - Lyric matching precision, SMTC parsing, and Pure Mode rendering polish
+
+This release significantly hardens lyric matching accuracy, fixes Windows SMTC artist/album concatenation issues, and resolves overlay artifacting in Pure Mode.
+
+### Highlights
+
+- **Bundled Optima Default Font**: Includes the elegant Optima font directly within the application package as the default typography, ensuring consistent cross-system aesthetics even if Optima is not installed on the host system.
+- **Modernized Default Settings**: Fresh installations now feature tuned defaults aligned with Apple Music aesthetics: Pure Mode enabled, Two-Line layout, pure white text with soft cyan (`#C5FEFE`) ambient glow, and calibrated hover opacity.
+- **SMTC Metadata Parsing**: Automatically splits combined `"Artist — Album"` strings produced by Apple Music for Windows into distinct artist and album components, dramatically improving iTunes catalog search and LRCLIB online resolution rates.
+- **Lyric Content Verification (`HasContentMatch`)**: Inspects lyric lines for verified song title phrases and censored lyric patterns (e.g. `**** now`), strictly within single lines rather than accumulating scattered common words across unrelated lines.
+- **Prioritized Content Matches**: Candidates that verifiably sing the song title are prioritized over unrelated songs that merely happen to have identical or close track lengths.
+- **Instrumental Outro Tolerance**: Safely accommodates songs with instrumental outros (up to 45s shorter lyric duration) only when the lyric content is verified against the song title.
+- **Confidence Policy Hardening**: Local duration-only candidates without catalog confirmation or lyric title verification are held back as `Low` confidence, allowing external providers (LRCLIB) to resolve the exact song.
+- **Pure Mode Rendering Cleanup**: Properly clears frozen snapshot brushes to eliminate ghost/double-rendered overlays when changing modes or transitioning between lyric lines.
+- **Safety Geometry Clamping**: Hardened monitor bounds clamping for Pure Mode positioning across heterogeneous display topologies.
+
+---
+
 ## v0.3.0 - Reliability, display, and rendering update
 
 This release focuses on accurate lyric selection and predictable overlay behavior across Windows display configurations.

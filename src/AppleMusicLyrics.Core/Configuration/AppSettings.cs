@@ -54,9 +54,9 @@ public sealed class AppSettings
 
     public int WindowY { get; set; } = 100;
 
-    public int WindowWidth { get; set; } = 800;
+    public int WindowWidth { get; set; } = 1336;
 
-    public int WindowHeight { get; set; } = 220;
+    public int WindowHeight { get; set; } = 296;
 
     // Pure mode window position and size (independent from normal mode)
     public int PureModeWindowX { get; set; } = 100;
@@ -89,15 +89,15 @@ public sealed class AppSettings
 
     public string CurrentLineColor { get; set; } = "#FFFFFF";
 
-    public string ContextLineColor { get; set; } = "#C8C8C8";
+    public string ContextLineColor { get; set; } = "#FFFFFF";
 
     public string PausedLineColor { get; set; } = "#AAAAAA";
 
-    public string GlowColor { get; set; } = "#FFFFFF";
+    public string GlowColor { get; set; } = "#C5FEFE";
 
-    public double GlowOpacity { get; set; } = 0.42;
+    public double GlowOpacity { get; set; } = 1.0;
 
-    public string FontFamily { get; set; } = "Segoe UI";
+    public string FontFamily { get; set; } = "Optima";
 
     public bool ShowPreviousLine { get; set; } = true;
 
@@ -105,7 +105,7 @@ public sealed class AppSettings
 
     public bool SingleLineMode { get; set; }
 
-    public bool TwoLineMode { get; set; }
+    public bool TwoLineMode { get; set; } = true;
 
     public bool ShowDebugPanel { get; set; }
 
@@ -113,15 +113,15 @@ public sealed class AppSettings
 
     public bool FadeWhenPaused { get; set; } = true;
 
-    public bool PureMode { get; set; }
+    public bool PureMode { get; set; } = true;
 
-    public bool ClickThrough { get; set; }
+    public bool ClickThrough { get; set; } = true;
 
     public double OverlayOpacity { get; set; } = 1.0;
 
-    public double PureModeDragOpacity { get; set; } = 0.8;
+    public double PureModeDragOpacity { get; set; } = 0.79;
 
-    public int? BackgroundAlpha { get; set; }
+    public int? BackgroundAlpha { get; set; } = 181;
 
     public bool HoverFadeEnabled { get; set; } = true;
 

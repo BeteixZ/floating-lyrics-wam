@@ -6,4 +6,4 @@ namespace AppleMusicLyrics.Core.Models;
 /// song length and the player's, and is only ever a hint: Apple reuses one lyrics document across
 /// several masters of the same song, so the two can legitimately disagree by several seconds.
 /// </summary>
-public sealed record LyricsMatch(LyricsDocument Document, int Score, double DurationDelta);
+public sealed record LyricsMatch(LyricsDocument Document, int Score, double DurationDelta, bool HasContentMatch = false);

@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace AppleMusicLyrics.Core.Matching;
 
 /// <summary>
@@ -56,5 +58,107 @@ public static class MetadataMatching
             || normalizedLeft.Contains(normalizedRight, StringComparison.Ordinal)
             ? partial
             : 0;
+    }
+
+    /// <summary>
+    /// Separates combined artist and album strings. Apple Music on Windows packages
+    /// "Artist — Album" (using em dash U+2014, en dash U+2013, or spaced hyphen) into the SMTC Artist
+    /// property and leaves AlbumTitle empty.
+    /// </summary>
+    public static (string Artist, string? Album) ParseArtistAndAlbum(string? rawArtist, string? rawAlbum)
+    {
+        if (string.IsNullOrWhiteSpace(rawArtist))
+        {
+            return (string.Empty, string.IsNullOrWhiteSpace(rawAlbum) ? null : rawAlbum.Trim());
+        }
+
+        var trimmedArtist = rawArtist.Trim();
+        var trimmedAlbum = string.IsNullOrWhiteSpace(rawAlbum) ? null : rawAlbum.Trim();
+
+        var delimiters = new[] { " — ", " – ", " —", "— ", "—", " –", "– ", "–", " - " };
+        foreach (var delimiter in delimiters)
+        {
+            var idx = trimmedArtist.IndexOf(delimiter, StringComparison.Ordinal);
+            if (idx > 0)
+            {
+                var artistPart = trimmedArtist[..idx].Trim();
+                var albumPart = trimmedArtist[(idx + delimiter.Length)..].Trim();
+
+                if (!string.IsNullOrEmpty(artistPart) && !string.IsNullOrEmpty(albumPart))
+                {
+                    return (artistPart, trimmedAlbum ?? albumPart);
+                }
+            }
+        }
+
+        return (trimmedArtist, trimmedAlbum);
+    }
+
+    /// <summary>
+    /// Tests whether the lyrics text contains sufficient evidence of the song title,
+    /// accounting for punctuation, spacing, and explicit words censored with asterisks (e.g. "****").
+    /// Evidence must occur within a single line rather than accumulating unrelated words across the entire document.
+    /// </summary>
+    public static bool DocumentContainsTitle(string? title, IEnumerable<string> lines)
+    {
+        var normalizedTitle = Normalize(title);
+        if (normalizedTitle.Length < 2)
+        {
+            return false;
+        }
+
+        var titleWords = (title ?? string.Empty)
+            .Split(new[] { ' ', '-', '—', '/', '(', ')', '[', ']', '\'', '"', ',', '.' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(Normalize)
+            .Where(w => w.Length >= 2)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        // For censored titles (e.g. "New Nigga Now" -> words: "new", "nigga", "now")
+        Regex? censoredPattern = null;
+        if (titleWords.Length >= 2)
+        {
+            var wordPatterns = titleWords.Select(w => "(?:" + Regex.Escape(w) + @"|\*{2,})").ToArray();
+            var fullPattern = string.Join(@"\s+", wordPatterns);
+            censoredPattern = new Regex(fullPattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        Regex? censoredSubPattern = null;
+        if (titleWords.Length >= 3)
+        {
+            var lastTwo = string.Join(@"\s+", titleWords.TakeLast(2).Select(w => "(?:" + Regex.Escape(w) + @"|\*{2,})"));
+            censoredSubPattern = new Regex(lastTwo, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        foreach (var line in lines)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            var normalizedLine = Normalize(line);
+            // 1. Direct normalized phrase in a single line (e.g. "I don't give a fuck, bitch, you better go, go get 'em" contains "gogetem")
+            if (normalizedLine.Contains(normalizedTitle, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            // 2. Censored line match in a single line (e.g. "A-E-I-O-U, **** now" matches "**** now")
+            if (line.Contains('*'))
+            {
+                if (censoredPattern != null && censoredPattern.IsMatch(line))
+                {
+                    return true;
+                }
+
+                if (censoredSubPattern != null && censoredSubPattern.IsMatch(line))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 }

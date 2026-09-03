@@ -86,7 +86,7 @@ public sealed class IniSettingsStoreTests : IDisposable
         Assert.True(settings.HoverFadeEnabled);
         Assert.Equal(0.3, settings.HoverFadeDuration);
         Assert.Equal(0.05, settings.HoverFadeMinOpacity);
-        Assert.Equal(0.8, settings.PureModeDragOpacity);
+        Assert.Equal(0.79, settings.PureModeDragOpacity);
     }
 
     [Fact]

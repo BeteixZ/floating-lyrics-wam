@@ -380,6 +380,27 @@ public sealed class LyricsRuntimeService
 
         if (plausible.Length > 0)
         {
+            var bestCandidate = plausible[0];
+            if (LyricsMatchPolicy.IsMediumConfidenceSingle(plausible))
+            {
+                return ResolvedSelection(
+                    candidates,
+                    bestCandidate,
+                    LyricsResolutionConfidence.Medium,
+                    LyricsResolutionSource.AppleMusicCache,
+                    "Selected the only local candidate within the medium duration window.");
+            }
+
+            if (LyricsMatchPolicy.HasClearWinner(plausible))
+            {
+                return ResolvedSelection(
+                    candidates,
+                    bestCandidate,
+                    LyricsResolutionConfidence.Medium,
+                    LyricsResolutionSource.AppleMusicCache,
+                    "Selected the best local candidate with a significant score lead.");
+            }
+
             return LowConfidenceSelection(
                 candidates,
                 plausible[0],

@@ -76,7 +76,8 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
         }
 
         return matches
-            .OrderByDescending(match => match.Score)
+            .OrderByDescending(match => match.HasContentMatch)
+            .ThenByDescending(match => match.Score)
             .ThenBy(match => match.DurationDelta)
             .ThenByDescending(match => match.Document.UpdatedAt)
             .ToArray();
@@ -230,8 +231,26 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
             return null;
         }
 
+        var hasTitleMatch = ScoreTitle(player.Title, document) > 0;
         var durationDelta = GetDurationDelta(player, document);
-        var durationScore = durationDelta switch
+
+        // Without verified title content, candidate duration must strictly be within standard tolerance
+        if (!hasTitleMatch && durationDelta > LyricsMatchPolicy.DurationToleranceSeconds)
+        {
+            return null;
+        }
+
+        // When the lyrics document contains verified title content and ends before the audio finishes,
+        // the difference is an instrumental outro (common in pop/rap/rock).
+        var documentDuration = document.DurationSeconds
+            ?? (document.Lines.Count > 0 ? document.Lines.Max(line => line.End) : 0.0);
+        var isOutro = hasTitleMatch && player.Duration > 0
+            && documentDuration <= player.Duration
+            && durationDelta <= 45.0;
+
+        var effectiveDelta = isOutro ? Math.Min(durationDelta, LyricsMatchPolicy.MediumDurationDeltaSeconds) : durationDelta;
+
+        var durationScore = effectiveDelta switch
         {
             <= 0.35 => 100,
             <= 0.75 => 92,
@@ -242,15 +261,13 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
             _ => 0,
         };
 
-        // Weak evidence — most songs never say their own title in the opening lines — so it breaks
-        // ties without being able to outrank a whole duration bucket.
-        var titleScore = ScoreTitle(player.Title, document);
+        var titleScore = hasTitleMatch ? 60 : 0;
         if (durationScore == 0 && titleScore == 0)
         {
             return null;
         }
 
-        return new LyricsMatch(document, durationScore + titleScore, durationDelta);
+        return new LyricsMatch(document, durationScore + titleScore, isOutro ? effectiveDelta : durationDelta, HasContentMatch: hasTitleMatch);
     }
 
     public static double GetDurationDelta(PlayerState player, LyricsDocument document)
@@ -270,19 +287,9 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
 
     private static int ScoreTitle(string? title, LyricsDocument document)
     {
-        var normalizedTitle = NormalizeText(title);
-        if (string.IsNullOrWhiteSpace(normalizedTitle))
+        if (MetadataMatching.DocumentContainsTitle(title, document.Lines.Select(line => line.Text)))
         {
-            return 0;
-        }
-
-        foreach (var line in document.Lines.Take(16))
-        {
-            var normalizedLine = NormalizeText(line.Text);
-            if (normalizedLine.Contains(normalizedTitle, StringComparison.Ordinal))
-            {
-                return 8;
-            }
+            return 15;
         }
 
         return 0;

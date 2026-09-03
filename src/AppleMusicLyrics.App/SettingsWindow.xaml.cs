@@ -34,6 +34,11 @@ public partial class SettingsWindow : Window
             .OrderBy(font => font, StringComparer.CurrentCultureIgnoreCase)
             .ToList();
 
+        if (!fontFamilies.Contains("Optima", StringComparer.OrdinalIgnoreCase))
+        {
+            fontFamilies.Insert(0, "Optima");
+        }
+
         FontFamilyComboBox.ItemsSource = fontFamilies;
     }
 
