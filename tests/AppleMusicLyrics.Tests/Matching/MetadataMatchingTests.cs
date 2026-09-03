@@ -49,4 +49,30 @@ public sealed class MetadataMatchingTests
         Assert.True(MetadataMatching.DocumentContainsTitle("Rolling in the Deep", lines));
         Assert.False(MetadataMatching.DocumentContainsTitle("Someone Like You", lines));
     }
+
+    [Fact]
+    public void DocumentContainsTitle_RejectsScatteredWordsAcrossDifferentLines()
+    {
+        var lines = new[]
+        {
+            "Gotta get it, get it, feel it, bust it",
+            "Said you finna go, boy, so go 'head",
+            "Remember what we had together",
+        };
+
+        // "go", "get", and "em" (in "remember") appear in different lines, but NOT together in the same line
+        Assert.False(MetadataMatching.DocumentContainsTitle("Go Get 'em", lines));
+    }
+
+    [Fact]
+    public void DocumentContainsTitle_MatchesPhraseInSameLine()
+    {
+        var lines = new[]
+        {
+            "Haha-haha-haha-haha-haha",
+            "I don't give a fuck, bitch, you better go, go get 'em",
+        };
+
+        Assert.True(MetadataMatching.DocumentContainsTitle("Go Get 'em", lines));
+    }
 }

@@ -486,7 +486,17 @@ public sealed class LyricsRuntimeServiceTests
     [Fact]
     public async Task SnapshotAsync_CorrectlyResolvesCupcakkeGoGetEm()
     {
-        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser());
+        var alienPussy = BuildDocument("MX_42528812-45061175", 147.92, "Ba-da-da-da, alien pussy");
+        var goGetEm = BuildDocument("MX_42529556-45061221", 140.21, "I don't give a fuck, bitch, you better go, go get 'em");
+
+        // AppleMusicCacheScanner ranks HasContentMatch=true first with score 120 vs 100
+        var matches = new[]
+        {
+            new LyricsMatch(goGetEm, Score: 120, DurationDelta: 3.00, HasContentMatch: true),
+            new LyricsMatch(alienPussy, Score: 100, DurationDelta: 0.08, HasContentMatch: false),
+        };
+
+        var lyricsProvider = new CandidateLyricsProvider(matches);
         var player = new PlayerState(
             Title: "Go Get 'em",
             Artist: "cupcakKe",
@@ -498,7 +508,7 @@ public sealed class LyricsRuntimeServiceTests
         );
 
         var runtime = new LyricsRuntimeService(
-            scanner,
+            lyricsProvider,
             new StubPlayerProvider(player),
             new LyricsSynchronizer(),
             new PlaybackClock());
