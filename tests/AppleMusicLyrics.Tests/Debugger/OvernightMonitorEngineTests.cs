@@ -266,7 +266,7 @@ public sealed class OvernightMonitorEngineTests
                 ],
                 DurationSeconds: 180);
 
-            var tcs = new TaskCompletionSource<LyricsDocument?>();
+            var tcs = new TaskCompletionSource<LyricsDocument?>(TaskCreationOptions.RunContinuationsAsynchronously);
             var externalProvider = new DeferredExternalLyricsProvider("LRCLIB", tcs.Task);
 
             var groundTruthVerifier = new StubGroundTruthVerifier(
@@ -292,12 +292,17 @@ public sealed class OvernightMonitorEngineTests
                 stabilizationDelay: TimeSpan.FromMilliseconds(5),
                 pollInterval: TimeSpan.FromMilliseconds(5),
                 resolutionTimeout: TimeSpan.FromMilliseconds(500),
-                resolutionPollInterval: TimeSpan.FromMilliseconds(20));
+                resolutionPollInterval: TimeSpan.FromMilliseconds(20),
+                timeProvider: new FixedTimeProvider());
 
-            // Start step asynchronously while external fetch is pending
-            var stepTask = Task.Run(() => engine.StepAsync());
+            // Keep the resolution clock fixed: this tests completion, not wall-clock timeout.
+            // Cancellation still bounds the test if the pipeline stops making progress.
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var stepTask = engine.StepAsync(timeout.Token);
 
-            await Task.Delay(60);
+            await externalProvider.Started.WaitAsync(timeout.Token);
+            Assert.False(stepTask.IsCompleted);
+            Assert.Empty(logger.Records);
 
             // Complete external provider with matching lyrics
             tcs.SetResult(document);
@@ -610,6 +615,9 @@ public sealed class OvernightMonitorEngineTests
     private sealed class DeferredExternalLyricsProvider : IExternalLyricsProvider
     {
         private readonly Task<LyricsDocument?> _task;
+        private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Started => _started.Task;
 
         public DeferredExternalLyricsProvider(string name, Task<LyricsDocument?> task)
         {
@@ -621,7 +629,13 @@ public sealed class OvernightMonitorEngineTests
 
         public Task<LyricsDocument?> FetchAsync(PlayerState player, CancellationToken cancellationToken = default)
         {
+            _started.TrySetResult();
             return _task.WaitAsync(cancellationToken);
         }
+    }
+
+    private sealed class FixedTimeProvider : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => DateTimeOffset.UnixEpoch;
     }
 }
