@@ -14,8 +14,13 @@ public sealed class ITunesCatalogSongResolverTests
     {
         Assert.Equal("AP_1892545101", CatalogLyricsId.FromCatalogId(1892545101));
         Assert.Equal(1892545101, CatalogLyricsId.ToCatalogId("AP_1892545101"));
+        Assert.Equal(6808333042, CatalogLyricsId.ToCatalogId("AP_6808333042-en"));
+        Assert.Equal(6808333042, CatalogLyricsId.ToCatalogId("AP_6808333042-zh-Hant"));
+        Assert.True(CatalogLyricsId.Matches("AP_6808333042-en", "AP_6808333042"));
+        Assert.False(CatalogLyricsId.Matches("AP_6808333042-en", "AP_6808333048"));
         Assert.Null(CatalogLyricsId.ToCatalogId("1892545101"));
         Assert.Null(CatalogLyricsId.ToCatalogId("AP_not-a-number"));
+        Assert.Null(CatalogLyricsId.ToCatalogId("AP_6808333042-"));
         Assert.Null(CatalogLyricsId.ToCatalogId(null));
     }
 

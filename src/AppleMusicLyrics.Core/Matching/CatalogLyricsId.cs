@@ -24,8 +24,29 @@ public static class CatalogLyricsId
             return null;
         }
 
+        var value = lyricsId.AsSpan(Prefix.Length);
+        var suffixIndex = value.IndexOf('-');
+        if (suffixIndex >= 0)
+        {
+            var suffix = value[(suffixIndex + 1)..];
+            if (suffixIndex == 0 || suffix.IsEmpty)
+            {
+                return null;
+            }
+
+            foreach (var character in suffix)
+            {
+                if (!char.IsLetterOrDigit(character) && character != '-')
+                {
+                    return null;
+                }
+            }
+
+            value = value[..suffixIndex];
+        }
+
         return long.TryParse(
-            lyricsId.AsSpan(Prefix.Length),
+            value,
             NumberStyles.None,
             CultureInfo.InvariantCulture,
             out var catalogId)
@@ -35,7 +56,15 @@ public static class CatalogLyricsId
 
     public static bool Matches(string? lyricsId, string? otherLyricsId)
     {
-        return !string.IsNullOrWhiteSpace(lyricsId)
-            && string.Equals(lyricsId, otherLyricsId, StringComparison.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(lyricsId) || string.IsNullOrWhiteSpace(otherLyricsId))
+        {
+            return false;
+        }
+
+        var catalogId = ToCatalogId(lyricsId);
+        var otherCatalogId = ToCatalogId(otherLyricsId);
+        return catalogId.HasValue && otherCatalogId.HasValue
+            ? catalogId.Value == otherCatalogId.Value
+            : string.Equals(lyricsId, otherLyricsId, StringComparison.OrdinalIgnoreCase);
     }
 }

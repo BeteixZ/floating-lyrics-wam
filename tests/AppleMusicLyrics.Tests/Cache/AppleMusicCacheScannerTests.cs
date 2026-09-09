@@ -64,6 +64,43 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
     }
 
     [Fact]
+    public async Task RepeatedQueriesWithinTtl_ReuseTheFileIndex()
+    {
+        _ = CreateLyricsFile("ttmlLyrics-1.json", "AP_1", minutesAgo: 0);
+        var time = new ManualTimeProvider();
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), roots: [_root], timeProvider: time)
+        {
+            FileIndexTtl = TimeSpan.FromMinutes(1),
+        };
+
+        _ = await scanner.GetLatestLyricsAsync();
+        _ = await scanner.GetLatestLyricsAsync();
+
+        Assert.Equal(1, scanner.IndexRefreshCount);
+    }
+
+    [Fact]
+    public async Task ExpiredIndex_DiscoversNewAndDeletedFiles()
+    {
+        var oldPath = CreateLyricsFile("ttmlLyrics-old.json", "old", minutesAgo: 1, text: "old");
+        var time = new ManualTimeProvider();
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), roots: [_root], timeProvider: time)
+        {
+            FileIndexTtl = TimeSpan.FromSeconds(1),
+        };
+
+        Assert.Equal("old", (await scanner.GetLatestLyricsAsync())?.LyricsId);
+        File.Delete(oldPath);
+        _ = CreateLyricsFile("ttmlLyrics-new.json", "new", minutesAgo: 0, text: "new");
+        time.Advance(TimeSpan.FromSeconds(2));
+
+        var refreshed = await scanner.GetLatestLyricsAsync();
+
+        Assert.Equal("new", refreshed?.LyricsId);
+        Assert.Equal(2, scanner.IndexRefreshCount);
+    }
+
+    [Fact]
     public async Task FindCandidatesAsync_PrefersCachedSongThatMatchesPlayerDurationAndTitle()
     {
         _ = CreateLyricsFile(
@@ -125,6 +162,43 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
         var candidates = await scanner.FindCandidatesAsync(player);
 
         Assert.Empty(candidates);
+    }
+
+    [Fact]
+    public async Task FindCandidatesAsync_StrongTitleDoesNotHideLargeDurationMismatch()
+    {
+        _ = CreateLyricsFile(
+            "ttmlLyrics-wrong.json",
+            "AP_wrong",
+            minutesAgo: 0,
+            text: "This is definitely Rolling in the Deep",
+            bodyDuration: "2:20.000");
+
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), roots: [_root]);
+        var player = new PlayerState("Rolling in the Deep", "Artist", "Album", 0, 180.0, true);
+
+        var candidates = await scanner.FindCandidatesAsync(player);
+
+        Assert.Empty(candidates);
+    }
+
+    [Fact]
+    public async Task FindCandidatesAsync_SingleWordTitleRemainsWeakEvidence()
+    {
+        _ = CreateLyricsFile(
+            "ttmlLyrics-ocean.json",
+            "AP_ocean",
+            minutesAgo: 0,
+            text: "I crossed the ocean once",
+            bodyDuration: "3:00.000");
+
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), roots: [_root]);
+        var player = new PlayerState("Ocean", "Artist", "Album", 0, 180.0, true);
+
+        var candidate = Assert.Single(await scanner.FindCandidatesAsync(player));
+        Assert.False(candidate.HasContentMatch);
+        Assert.Equal(TitleEvidenceStrength.Weak, candidate.TitleEvidence);
+        Assert.Equal(0, candidate.DurationDelta);
     }
 
     [Fact]
@@ -191,5 +265,14 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
         {
             Directory.Delete(_root, recursive: true);
         }
+    }
+
+    private sealed class ManualTimeProvider : TimeProvider
+    {
+        private DateTimeOffset _utcNow = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+
+        public override DateTimeOffset GetUtcNow() => _utcNow;
+
+        public void Advance(TimeSpan amount) => _utcNow += amount;
     }
 }

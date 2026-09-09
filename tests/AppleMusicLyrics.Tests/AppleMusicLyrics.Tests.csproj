@@ -16,7 +16,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\AppleMusicLyrics.App\AppleMusicLyrics.App.csproj" />
+    <ProjectReference Include="..\..\src\AppleMusicLyrics.Application\AppleMusicLyrics.Application.csproj" />
     <ProjectReference Include="..\..\src\AppleMusicLyrics.Core\AppleMusicLyrics.Core.csproj" />
+    <ProjectReference Include="..\..\src\AppleMusicLyrics.Debugger\AppleMusicLyrics.Debugger.csproj" />
     <ProjectReference Include="..\..\src\AppleMusicLyrics.Infrastructure.Windows\AppleMusicLyrics.Infrastructure.Windows.csproj" />
   </ItemGroup>
 </Project>

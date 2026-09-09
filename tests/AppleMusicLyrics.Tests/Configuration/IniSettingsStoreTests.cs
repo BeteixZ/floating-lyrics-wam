@@ -225,6 +225,27 @@ public sealed class IniSettingsStoreTests : IDisposable
     }
 
     [Fact]
+    public void Load_IgnoresRetiredAndUnknownKeys()
+    {
+        var path = Path.Combine(_root, "settings.ini");
+        File.WriteAllLines(
+            path,
+            [
+                "[apple_music_lyrics]",
+                "LyricsPollInterval=1.5",
+                "CliRenderInterval=0.1",
+                "UiRefreshInterval=0.05",
+                "PreviewLineCount=8",
+                "FutureSetting=preserved-by-a-newer-version",
+                "PlayerPollInterval=0.4",
+            ]);
+
+        var loaded = new IniSettingsStore(path).Load();
+
+        Assert.Equal(0.4, loaded.PlayerPollInterval);
+    }
+
+    [Fact]
     public void SaveLoadAndClone_PreserveOnlineAndNativeOffsetSettings()
     {
         var path = Path.Combine(_root, "settings.ini");
@@ -237,6 +258,7 @@ public sealed class IniSettingsStoreTests : IDisposable
             CatalogLookupTimeoutSeconds = 4.5,
             ExternalLyricsEnabled = false,
             ExternalLyricsTimeoutSeconds = 8.5,
+            PersistExternalLyricsCache = true,
         };
 
         store.Save(settings);
@@ -248,6 +270,8 @@ public sealed class IniSettingsStoreTests : IDisposable
         Assert.Equal(4.5, clone.CatalogLookupTimeoutSeconds);
         Assert.False(clone.ExternalLyricsEnabled);
         Assert.Equal(8.5, clone.ExternalLyricsTimeoutSeconds);
+        Assert.True(clone.PersistExternalLyricsCache);
+        Assert.False(new AppSettings().PersistExternalLyricsCache);
         Assert.Empty(Directory.GetFiles(_root, "*.tmp"));
     }
 

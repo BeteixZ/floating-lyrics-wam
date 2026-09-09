@@ -6,7 +6,7 @@ A lightweight Windows desktop app that displays synchronized Apple Music lyrics 
 
 ![Demo](.github/assets/demo.gif)
 
-![Version](https://img.shields.io/badge/version-0.4.0-blue)
+![Version](https://img.shields.io/badge/version-0.5.0-blue)
 ![.NET](https://img.shields.io/badge/.NET-10.0-purple)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 
@@ -40,7 +40,7 @@ Settings and the catalog lookup cache are stored in `%LOCALAPPDATA%\AppleMusicLy
 
 ## Usage
 
-Use the tray icon to show/hide the overlay, open Settings, switch display modes, or toggle click-through behavior. Drag the visible card to move it. Normal mode and Pure Mode retain independent positions.
+Use the tray icon to show/hide the overlay, open Settings, switch display modes, or toggle click-through behavior. In both Normal mode and Pure Mode, enabling Click through lets mouse input pass through to the window underneath, including while hovering. Disable Click through to interact with and drag the visible card. Normal mode and Pure Mode retain independent positions.
 
 Important settings include:
 
@@ -48,7 +48,7 @@ Important settings include:
 - **Apply native timing correction**: honors Apple Music's TTML `lyricOffset` metadata.
 - **Compatibility mode**: allows non-Apple media sessions; disabled by default to prevent another player or browser from taking over.
 - **Low-confidence candidates**: trades matching accuracy for coverage; disabled by default.
-- **Online lyrics**: enables Apple catalog verification and LRCLIB fallback. Changes to these two providers require an app restart.
+- **Online lyrics**: enables Apple catalog verification and LRCLIB fallback. An optional, disabled-by-default setting keeps completed LRCLIB results across restarts. These changes require an app restart.
 - **Pure mode drag opacity**: controls visibility while repositioning the card.
 - **Debug panel**: shows lyric-resolution evidence plus measured render FPS and player polling rate.
 
@@ -59,7 +59,7 @@ Important settings include:
 Both online options are enabled by default and can be disabled in Settings for fully offline operation.
 
 - **Apple iTunes Search API**: when local candidates are ambiguous, the app sends title and artist to verify the Apple catalog song ID.
-- **LRCLIB**: when Apple Music has no verified local lyrics, the app sends title, artist, album, and duration for exact lookup, with title/artist search fallback.
+- **LRCLIB**: when Apple Music has no verified local lyrics, the app sends title, artist, album, and duration for exact lookup, with title/artist search fallback. Synchronized lyrics are used when available; plain-only lyrics are displayed with an approximate evenly projected timeline and identified as `lrclib-plain` in diagnostics. If persistent LRCLIB caching is enabled, completed results are stored in `%LOCALAPPDATA%\AppleMusicLyrics\lrclib-cache.json`; no-lyrics results expire after seven days.
 
 Requests run in cancellable background operations with bounded retries. The app does not upload lyric cache files. Advanced storefront and timeout values remain available in `%LOCALAPPDATA%\AppleMusicLyrics\settings.ini`.
 
@@ -105,7 +105,9 @@ dotnet publish src/AppleMusicLyrics.App/AppleMusicLyrics.App.csproj -c Release -
 ```text
 src/
   AppleMusicLyrics.App/                    WPF desktop application
+  AppleMusicLyrics.Application/            Runtime orchestration and use cases
   AppleMusicLyrics.Core/                   Core models and pure logic
+  AppleMusicLyrics.Debugger/               Overnight diagnostic monitor
   AppleMusicLyrics.Infrastructure.Windows/ Windows integrations
 tests/
   AppleMusicLyrics.Tests/                  Unit tests

@@ -45,7 +45,7 @@ Building a production-quality Windows lyrics app that matches LyricsX in visual 
 - [ ] Implement settings search/filter
 
 ### Performance
-- [ ] Optimize cache scanning performance
+- [x] Optimize cache scanning performance
 - [ ] Reduce memory footprint
 - [ ] Improve startup time
 - [ ] Add lazy loading for large lyric files
@@ -54,7 +54,7 @@ Building a production-quality Windows lyrics app that matches LyricsX in visual 
 ## Low Priority
 
 ### Advanced Features
-- [ ] Support for multiple monitor setups
+- [x] Support for multiple monitor setups
 - [ ] Add mini-player controls in overlay
 - [ ] Implement lyric search/jump
 - [ ] Add romanization support for non-Latin scripts
@@ -78,7 +78,7 @@ Building a production-quality Windows lyrics app that matches LyricsX in visual 
 ## Technical Debt
 
 ### Code Quality
-- [ ] Refactor MainWindow.xaml.cs (currently 1152 lines)
+- [ ] Continue decomposing MainWindow.xaml.cs (polling, tray, placement, presentation, and composition have been extracted)
 - [ ] Extract reusable UI components
 - [ ] Improve separation of concerns
 - [ ] Add XML documentation comments
@@ -92,9 +92,9 @@ Building a production-quality Windows lyrics app that matches LyricsX in visual 
 - [ ] Add proper logging framework
 
 ### Testing
-- [ ] Add tests for TTML parser
-- [ ] Add tests for synchronization logic
-- [ ] Add tests for cache scanner
+- [x] Add tests for TTML parser
+- [x] Add tests for synchronization logic
+- [x] Add tests for cache scanner
 - [ ] Add UI automation tests
 - [ ] Add performance regression tests
 

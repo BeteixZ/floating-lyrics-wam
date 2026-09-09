@@ -459,6 +459,10 @@
                         Content="Use LRCLIB fallback"
                         ToolTip="Sends title, artist, album, and duration to LRCLIB when Apple Music has no usable cached lyrics. Restart required."
                         IsChecked="{Binding Settings.ExternalLyricsEnabled, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" />
+              <CheckBox Style="{StaticResource ToggleStyle}"
+                        Content="Keep LRCLIB results between app restarts"
+                        ToolTip="Stores completed LRCLIB lyric and no-lyrics results in Local AppData. Restart required."
+                        IsChecked="{Binding Settings.PersistExternalLyricsCache, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" />
               <TextBlock Margin="0,8,0,0"
                          Foreground="{StaticResource SecondaryTextBrush}"
                          FontSize="11.5"

@@ -19,23 +19,37 @@ namespace AppleMusicLyrics.Infrastructure.Windows.External;
 public sealed class LrcLibLyricsProvider : IExternalLyricsProvider, IDisposable
 {
     private const string BaseUrl = "https://lrclib.net/api";
+    private const int MaxCacheEntries = 512;
+    // Version 3 invalidates plain-only entries cached before synchronized search results were
+    // preferred over an exact endpoint's stale plain text. LRCLIB entry 115521 for Ethel Cain's
+    // "Family Tree (Intro)" is one real example whose plain text belongs partly to another song.
+    private const int PersistentCacheVersion = 3;
+    private static readonly TimeSpan PersistentMissLifetime = TimeSpan.FromDays(7);
 
     // The service asks clients to identify themselves rather than pretend to be a browser.
     private const string UserAgent = "AppleMusicLyrics (https://github.com/IzaiahZhang/AppleMusicLyrics)";
 
     private readonly HttpClient _httpClient;
     private readonly LrcLyricsParser _parser;
-    private readonly Dictionary<string, LyricsDocument?> _cache = new(StringComparer.Ordinal);
+    private readonly string? _persistentCachePath;
+    private readonly Dictionary<string, CacheEntry> _cache = new(StringComparer.Ordinal);
+    private readonly Queue<string> _cacheInsertionOrder = new();
+    private readonly object _cacheLock = new();
 
     public LrcLibLyricsProvider(
         LrcLyricsParser? parser = null,
         double timeoutSeconds = 6.0,
-        HttpMessageHandler? messageHandler = null)
+        HttpMessageHandler? messageHandler = null,
+        string? persistentCachePath = null)
     {
         _parser = parser ?? new LrcLyricsParser();
+        _persistentCachePath = string.IsNullOrWhiteSpace(persistentCachePath)
+            ? null
+            : persistentCachePath;
         _httpClient = messageHandler is null ? new HttpClient() : new HttpClient(messageHandler, disposeHandler: false);
         _httpClient.Timeout = TimeSpan.FromSeconds(Math.Clamp(timeoutSeconds, 1.0, 30.0));
         _httpClient.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", UserAgent);
+        LoadPersistentCache();
     }
 
     public string Name => "LRCLIB";
@@ -48,18 +62,137 @@ public sealed class LrcLibLyricsProvider : IExternalLyricsProvider, IDisposable
         }
 
         var key = BuildCacheKey(player);
-        if (_cache.TryGetValue(key, out var cached))
+        lock (_cacheLock)
         {
-            return cached;
+            if (_cache.TryGetValue(key, out var cached)
+                && (cached.Document is not null
+                    || DateTimeOffset.UtcNow - cached.CachedAt <= PersistentMissLifetime))
+            {
+                return cached.Document;
+            }
         }
 
-        var document = await FetchExactAsync(player, cancellationToken).ConfigureAwait(false)
-            ?? await FetchBySearchAsync(player, cancellationToken).ConfigureAwait(false);
+        var exact = await FetchExactAsync(player, cancellationToken).ConfigureAwait(false);
+        var document = exact;
+        if (exact is null || IsProjectedPlainLyrics(exact))
+        {
+            // LRCLIB's exact endpoint can select an old plain-only revision even when search has a
+            // correctly timed row for the same recording. Search in that case and prefer its
+            // synchronized result, retaining the exact plain text only as a last resort.
+            document = await FetchBySearchAsync(player, cancellationToken).ConfigureAwait(false)
+                ?? exact;
+        }
 
         // A completed lookup with no synchronized lyrics is definitive and may be cached. Network
         // failures throw before this point and are retried by LyricsRuntimeService instead.
-        _cache[key] = document;
+        RememberCompletedLookup(key, document);
         return document;
+    }
+
+    private void RememberCompletedLookup(string key, LyricsDocument? document)
+    {
+        lock (_cacheLock)
+        {
+            if (!_cache.ContainsKey(key))
+            {
+                while (_cache.Count >= MaxCacheEntries && _cacheInsertionOrder.TryDequeue(out var oldest))
+                {
+                    _cache.Remove(oldest);
+                }
+
+                _cacheInsertionOrder.Enqueue(key);
+            }
+
+            _cache[key] = new CacheEntry(document, DateTimeOffset.UtcNow);
+            SavePersistentCache();
+        }
+    }
+
+    private void LoadPersistentCache()
+    {
+        if (_persistentCachePath is null || !File.Exists(_persistentCachePath))
+        {
+            return;
+        }
+
+        try
+        {
+            var json = File.ReadAllText(_persistentCachePath);
+            var persisted = JsonSerializer.Deserialize<PersistentCacheFile>(json);
+            if (persisted is null || persisted.Version != PersistentCacheVersion)
+            {
+                return;
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            foreach (var entry in persisted.Entries
+                .Where(entry => !string.IsNullOrWhiteSpace(entry.Key))
+                .Where(entry => entry.Document is not null || now - entry.CachedAt <= PersistentMissLifetime)
+                .OrderByDescending(entry => entry.CachedAt)
+                .Take(MaxCacheEntries)
+                .Reverse())
+            {
+                _cache[entry.Key] = new CacheEntry(entry.Document, entry.CachedAt);
+                _cacheInsertionOrder.Enqueue(entry.Key);
+            }
+        }
+        catch (IOException)
+        {
+            // A cache is an optimization. A locked or partially written file must not prevent
+            // online lyrics from being queried normally.
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+        catch (JsonException)
+        {
+        }
+    }
+
+    private void SavePersistentCache()
+    {
+        if (_persistentCachePath is null)
+        {
+            return;
+        }
+
+        var directory = Path.GetDirectoryName(_persistentCachePath);
+        var temporaryPath = $"{_persistentCachePath}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+
+            var persisted = new PersistentCacheFile(
+                PersistentCacheVersion,
+                _cache.Select(pair => new PersistentCacheEntry(
+                    pair.Key,
+                    pair.Value.Document,
+                    pair.Value.CachedAt)).ToList());
+            File.WriteAllText(temporaryPath, JsonSerializer.Serialize(persisted));
+            File.Move(temporaryPath, _persistentCachePath, overwrite: true);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(temporaryPath);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
     }
 
     private async Task<LyricsDocument?> FetchExactAsync(PlayerState player, CancellationToken cancellationToken)
@@ -116,7 +249,7 @@ public sealed class LrcLibLyricsProvider : IExternalLyricsProvider, IDisposable
 
         foreach (var result in json.RootElement.EnumerateArray())
         {
-            if (!HasSyncedLyrics(result))
+            if (!HasUsableLyrics(result))
             {
                 continue;
             }
@@ -125,6 +258,13 @@ public sealed class LrcLibLyricsProvider : IExternalLyricsProvider, IDisposable
             if (score == int.MinValue)
             {
                 continue;
+            }
+
+            // Prefer a synchronized row among otherwise comparable recordings without letting a
+            // poor version match beat a substantially closer plain-lyrics row.
+            if (HasSyncedLyrics(result))
+            {
+                score += 5;
             }
 
             // Equal scores are settled by whichever length is closer, so the pick does not come
@@ -205,13 +345,6 @@ public sealed class LrcLibLyricsProvider : IExternalLyricsProvider, IDisposable
             return null;
         }
 
-        var synced = TryGetString(result, "syncedLyrics");
-        if (string.IsNullOrWhiteSpace(synced))
-        {
-            // Plain lyrics carry no timing, and this app has nothing to do with untimed text.
-            return null;
-        }
-
         double? duration = result.TryGetProperty("duration", out var durationElement)
             && durationElement.ValueKind == JsonValueKind.Number
             && durationElement.TryGetDouble(out var durationValue)
@@ -223,13 +356,66 @@ public sealed class LrcLibLyricsProvider : IExternalLyricsProvider, IDisposable
             ? idValue.ToString(System.Globalization.CultureInfo.InvariantCulture)
             : "unknown";
 
-        var document = _parser.Parse(
-            synced,
-            sourceFile: $"lrclib:{id}",
-            lyricsId: $"LRCLIB_{id}",
-            durationSeconds: duration);
+        var synced = TryGetString(result, "syncedLyrics");
+        var document = !string.IsNullOrWhiteSpace(synced)
+            ? _parser.Parse(
+                synced,
+                sourceFile: $"lrclib:{id}",
+                lyricsId: $"LRCLIB_{id}",
+                durationSeconds: duration)
+            : CreatePlainLyricsDocument(TryGetString(result, "plainLyrics"), id, duration);
+
+        if (MetadataMatching.IsRepetitiveVocalizationOnly(
+            TryGetString(result, "trackName"),
+            document.Lines.Select(line => line.Text)))
+        {
+            return null;
+        }
 
         return document.Lines.Count > 0 ? document : null;
+    }
+
+    private static LyricsDocument CreatePlainLyricsDocument(
+        string? plainLyrics,
+        string id,
+        double? durationSeconds)
+    {
+        var texts = (plainLyrics ?? string.Empty)
+            .Split('\n')
+            .Select(line => line.Trim('\r', ' ', '\t'))
+            .Where(line => line.Length > 0)
+            .ToArray();
+        if (texts.Length == 0)
+        {
+            return new LyricsDocument(
+                $"LRCLIB_{id}",
+                "plain",
+                $"lrclib-plain:{id}",
+                DateTimeOffset.UtcNow,
+                []);
+        }
+
+        // Untimed text cannot be synchronized exactly. Evenly projecting it over the recording is
+        // deliberately simple and deterministic: users get readable progressive lyrics while the
+        // source label makes the approximation visible in diagnostics.
+        var projectedDuration = durationSeconds is > 0
+            ? durationSeconds.Value
+            : texts.Length * 8.0;
+        var secondsPerLine = projectedDuration / texts.Length;
+        var lines = texts
+            .Select((text, index) => new LyricsLine(
+                Begin: index * secondsPerLine,
+                End: (index + 1) * secondsPerLine,
+                Text: text))
+            .ToArray();
+
+        return new LyricsDocument(
+            LyricsId: $"LRCLIB_{id}",
+            Status: "plain",
+            SourceFile: $"lrclib-plain:{id}",
+            UpdatedAt: DateTimeOffset.UtcNow,
+            Lines: lines,
+            DurationSeconds: durationSeconds);
     }
 
     private static bool HasSyncedLyrics(JsonElement result)
@@ -237,6 +423,19 @@ public sealed class LrcLibLyricsProvider : IExternalLyricsProvider, IDisposable
         return result.TryGetProperty("syncedLyrics", out var synced)
             && synced.ValueKind == JsonValueKind.String
             && !string.IsNullOrWhiteSpace(synced.GetString());
+    }
+
+    private static bool IsProjectedPlainLyrics(LyricsDocument document)
+    {
+        return document.SourceFile.StartsWith("lrclib-plain:", StringComparison.Ordinal);
+    }
+
+    private static bool HasUsableLyrics(JsonElement result)
+    {
+        return HasSyncedLyrics(result)
+            || (result.TryGetProperty("plainLyrics", out var plain)
+                && plain.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(plain.GetString()));
     }
 
     private static string? TryGetString(JsonElement element, string propertyName)
@@ -260,4 +459,13 @@ public sealed class LrcLibLyricsProvider : IExternalLyricsProvider, IDisposable
     {
         _httpClient.Dispose();
     }
+
+    private sealed record CacheEntry(LyricsDocument? Document, DateTimeOffset CachedAt);
+
+    private sealed record PersistentCacheFile(int Version, List<PersistentCacheEntry> Entries);
+
+    private sealed record PersistentCacheEntry(
+        string Key,
+        LyricsDocument? Document,
+        DateTimeOffset CachedAt);
 }

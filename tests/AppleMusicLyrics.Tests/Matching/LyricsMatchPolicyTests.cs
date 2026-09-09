@@ -39,7 +39,7 @@ public sealed class LyricsMatchPolicyTests
     }
 
     [Fact]
-    public void IsConfidentSingle_ReturnsTrueOnlyForSingleCandidateWithinConfidentDelta()
+    public void IsConfidentSingle_ReturnsTrueForContentMatchedSingleWithinConfidentDelta()
     {
         var confident = CreateMatch("1", 180, 0.9, 100);
         Assert.True(LyricsMatchPolicy.IsConfidentSingle([confident]));
@@ -56,6 +56,14 @@ public sealed class LyricsMatchPolicyTests
             CreateMatch("2", 180, 0.8, 90),
         };
         Assert.False(LyricsMatchPolicy.IsConfidentSingle(multiple));
+    }
+
+    [Fact]
+    public void IsConfidentSingle_ReturnsFalseWhenCloseDurationHasNoContentMatch()
+    {
+        var durationOnly = CreateMatch("1", 180, 0.0, 100, hasContentMatch: false);
+
+        Assert.False(LyricsMatchPolicy.IsConfidentSingle([durationOnly]));
     }
 
     [Fact]
@@ -104,6 +112,18 @@ public sealed class LyricsMatchPolicyTests
         {
             CreateMatch("1", 180, 1.0, 80),
             CreateMatch("2", 180, 1.2, 70),
+        };
+
+        Assert.False(LyricsMatchPolicy.HasClearWinner(candidates));
+    }
+
+    [Fact]
+    public void HasClearWinner_ReturnsFalseWhenLeadIsOnlyDurationEvidence()
+    {
+        var candidates = new[]
+        {
+            CreateMatch("1", 180, 0.2, 100, hasContentMatch: false),
+            CreateMatch("2", 180, 5.0, 25, hasContentMatch: false),
         };
 
         Assert.False(LyricsMatchPolicy.HasClearWinner(candidates));

@@ -1,5 +1,17 @@
 # Release Notes
 
+## v0.5.0 - More reliable lyrics, optional caching, and diagnostic tools
+
+- Tightens local lyric content matching and catalog ID handling to reduce incorrect song matches.
+- Improves LRCLIB selection to prefer synchronized lyrics, with an approximate timeline fallback for plain lyrics.
+- Adds opt-in persistent LRCLIB caching in Settings; cached no-lyrics results expire after seven days.
+- Makes Click through independently controllable in both Normal mode and Pure Mode.
+- Separates runtime orchestration into an Application project and extracts polling, tray, placement, and presentation components.
+- Improves cache scanning and adds an overnight diagnostic monitor with online lyric comparison and report logging.
+- Expands regression coverage and adds formatting verification and coverage artifacts to CI.
+
+---
+
 ## v0.4.0 - Lyric matching precision, SMTC parsing, and Pure Mode rendering polish
 
 This release significantly hardens lyric matching accuracy, fixes Windows SMTC artist/album concatenation issues, and resolves overlay artifacting in Pure Mode.

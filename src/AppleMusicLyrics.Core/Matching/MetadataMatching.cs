@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using AppleMusicLyrics.Core.Models;
 
 namespace AppleMusicLyrics.Core.Matching;
 
@@ -8,6 +9,16 @@ namespace AppleMusicLyrics.Core.Matching;
 /// </summary>
 public static class MetadataMatching
 {
+    private static readonly Regex EvidenceTokenPattern = new(
+        @"[\p{L}\p{N}]+|\*{2,}",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly HashSet<string> VocalizationTokens = new(StringComparer.Ordinal)
+    {
+        "ah", "aha", "eh", "ha", "hey", "hm", "hmm", "la", "me", "mm", "mmm",
+        "na", "oh", "ooh", "uh", "uhh", "woo", "yeah", "yo", "you",
+    };
+
     /// <summary>
     /// Strips everything that is not a letter or digit and lowercases the rest, so punctuation and
     /// spacing differences stop mattering.
@@ -95,40 +106,19 @@ public static class MetadataMatching
     }
 
     /// <summary>
-    /// Tests whether the lyrics text contains sufficient evidence of the song title,
-    /// accounting for punctuation, spacing, and explicit words censored with asterisks (e.g. "****").
-    /// Evidence must occur within a single line rather than accumulating unrelated words across the entire document.
+    /// Classifies title evidence while retaining word boundaries. A single-word title is only weak
+    /// evidence because ordinary lyric prose frequently contains words such as "ocean", "home",
+    /// "me", or "you". Multi-word titles must occur as a contiguous phrase in one line.
     /// </summary>
-    public static bool DocumentContainsTitle(string? title, IEnumerable<string> lines)
+    public static TitleEvidenceStrength GetTitleEvidence(string? title, IEnumerable<string> lines)
     {
-        var normalizedTitle = Normalize(title);
-        if (normalizedTitle.Length < 2)
+        var titleTokens = TokenizeForEvidence(title, includeCensoredWildcard: false);
+        if (titleTokens.Count == 0)
         {
-            return false;
+            return TitleEvidenceStrength.None;
         }
 
-        var titleWords = (title ?? string.Empty)
-            .Split(new[] { ' ', '-', '—', '/', '(', ')', '[', ']', '\'', '"', ',', '.' }, StringSplitOptions.RemoveEmptyEntries)
-            .Select(Normalize)
-            .Where(w => w.Length >= 2)
-            .Distinct(StringComparer.Ordinal)
-            .ToArray();
-
-        // For censored titles (e.g. "New Nigga Now" -> words: "new", "nigga", "now")
-        Regex? censoredPattern = null;
-        if (titleWords.Length >= 2)
-        {
-            var wordPatterns = titleWords.Select(w => "(?:" + Regex.Escape(w) + @"|\*{2,})").ToArray();
-            var fullPattern = string.Join(@"\s+", wordPatterns);
-            censoredPattern = new Regex(fullPattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        }
-
-        Regex? censoredSubPattern = null;
-        if (titleWords.Length >= 3)
-        {
-            var lastTwo = string.Join(@"\s+", titleWords.TakeLast(2).Select(w => "(?:" + Regex.Escape(w) + @"|\*{2,})"));
-            censoredSubPattern = new Regex(lastTwo, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-        }
+        var best = TitleEvidenceStrength.None;
 
         foreach (var line in lines)
         {
@@ -137,28 +127,119 @@ public static class MetadataMatching
                 continue;
             }
 
-            var normalizedLine = Normalize(line);
-            // 1. Direct normalized phrase in a single line (e.g. "I don't give a fuck, bitch, you better go, go get 'em" contains "gogetem")
-            if (normalizedLine.Contains(normalizedTitle, StringComparison.Ordinal))
+            var lineTokens = TokenizeForEvidence(line, includeCensoredWildcard: true);
+            if (ContainsTokenPhrase(lineTokens, titleTokens))
             {
-                return true;
+                return titleTokens.Count == 1
+                    ? TitleEvidenceStrength.Weak
+                    : TitleEvidenceStrength.Strong;
             }
 
-            // 2. Censored line match in a single line (e.g. "A-E-I-O-U, **** now" matches "**** now")
-            if (line.Contains('*'))
+            // Some providers censor only the distinctive end of a longer title. Preserve this as
+            // weak evidence for diagnostics, but never let it select a cache file by itself.
+            if (titleTokens.Count >= 3 &&
+                ContainsTokenPhrase(lineTokens, titleTokens.TakeLast(2).ToArray()))
             {
-                if (censoredPattern != null && censoredPattern.IsMatch(line))
-                {
-                    return true;
-                }
+                best = TitleEvidenceStrength.Weak;
+            }
+        }
 
-                if (censoredSubPattern != null && censoredSubPattern.IsMatch(line))
+        return best;
+    }
+
+    public static bool DocumentContainsTitle(string? title, IEnumerable<string> lines)
+    {
+        return GetTitleEvidence(title, lines) != TitleEvidenceStrength.None;
+    }
+
+    private static IReadOnlyList<string> TokenizeForEvidence(string? value, bool includeCensoredWildcard)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return Array.Empty<string>();
+        }
+
+        return EvidenceTokenPattern.Matches(value)
+            .Select(match => match.Value.StartsWith('*') && includeCensoredWildcard
+                ? "*"
+                : match.Value.ToLowerInvariant())
+            .Where(token => includeCensoredWildcard || token != "*")
+            .ToArray();
+    }
+
+    private static bool ContainsTokenPhrase(IReadOnlyList<string> lineTokens, IReadOnlyList<string> titleTokens)
+    {
+        if (titleTokens.Count == 0 || lineTokens.Count < titleTokens.Count)
+        {
+            return false;
+        }
+
+        for (var start = 0; start <= lineTokens.Count - titleTokens.Count; start++)
+        {
+            var matched = true;
+            for (var offset = 0; offset < titleTokens.Count; offset++)
+            {
+                var lineToken = lineTokens[start + offset];
+                if (lineToken != "*" && !string.Equals(lineToken, titleTokens[offset], StringComparison.Ordinal))
                 {
-                    return true;
+                    matched = false;
+                    break;
                 }
+            }
+
+            if (matched)
+            {
+                return true;
             }
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Detects long synchronized documents that contain only a handful of repeated pronouns or
+    /// vocal sounds. Community databases sometimes publish these as ordinary lyrics even when a
+    /// track has no substantive lyric text (for example, a dozen repetitions of "Me, meyou").
+    /// The thresholds are deliberately narrow so short choruses and normally repetitive songs are
+    /// not rejected merely for reusing words.
+    /// </summary>
+    public static bool IsRepetitiveVocalizationOnly(string? title, IEnumerable<string> lines)
+    {
+        var nonEmptyLines = lines
+            .Where(line => !string.IsNullOrWhiteSpace(line))
+            .Select(line => line.Trim())
+            .ToArray();
+        if (nonEmptyLines.Length < 8)
+        {
+            return false;
+        }
+
+        var uniqueLines = nonEmptyLines
+            .Select(Normalize)
+            .Where(line => line.Length > 0)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (uniqueLines.Length > 4)
+        {
+            return false;
+        }
+
+        var tokens = nonEmptyLines
+            .SelectMany(line => line.Split(
+                new[] { ' ', '\t', ',', '.', '!', '?', ';', ':', '\'', '"', '(', ')', '[', ']', '—', '-', '–', '/', '\\' },
+                StringSplitOptions.RemoveEmptyEntries))
+            .Select(Normalize)
+            .Where(token => token.Length > 0)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (tokens.Length == 0 || tokens.Length > 4)
+        {
+            return false;
+        }
+
+        var normalizedTitle = Normalize(title);
+        return tokens.All(token =>
+            VocalizationTokens.Contains(token) ||
+            (normalizedTitle.Length > 0 && string.Equals(token, normalizedTitle, StringComparison.Ordinal)));
     }
 }

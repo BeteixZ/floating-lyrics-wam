@@ -13,6 +13,7 @@ namespace AppleMusicLyrics.Infrastructure.Windows.Catalog;
 /// </summary>
 public sealed class ITunesCatalogSongResolver : ICatalogSongResolver, IDisposable
 {
+    private const int MaxCacheEntries = 2048;
     public const string DefaultStorefronts = "us,cn,jp,gb";
 
     private readonly HttpClient _httpClient;
@@ -64,6 +65,10 @@ public sealed class ITunesCatalogSongResolver : ICatalogSongResolver, IDisposabl
             }
 
             var lyricsIds = resolved.ToArray();
+            if (_cache.Count >= MaxCacheEntries)
+            {
+                _cache.Remove(_cache.Keys.First());
+            }
             _cache[key] = lyricsIds;
             SaveCache();
             return lyricsIds;
@@ -244,6 +249,11 @@ public sealed class ITunesCatalogSongResolver : ICatalogSongResolver, IDisposabl
             {
                 _cache[key] = value;
             }
+
+            while (_cache.Count > MaxCacheEntries)
+            {
+                _cache.Remove(_cache.Keys.First());
+            }
         }
         catch (Exception)
         {
@@ -266,7 +276,19 @@ public sealed class ITunesCatalogSongResolver : ICatalogSongResolver, IDisposabl
                 Directory.CreateDirectory(directory);
             }
 
-            File.WriteAllText(_cachePath, JsonSerializer.Serialize(_cache));
+            var temporaryPath = _cachePath + ".tmp";
+            try
+            {
+                File.WriteAllText(temporaryPath, JsonSerializer.Serialize(_cache));
+                File.Move(temporaryPath, _cachePath, overwrite: true);
+            }
+            finally
+            {
+                if (File.Exists(temporaryPath))
+                {
+                    File.Delete(temporaryPath);
+                }
+            }
         }
         catch (Exception)
         {

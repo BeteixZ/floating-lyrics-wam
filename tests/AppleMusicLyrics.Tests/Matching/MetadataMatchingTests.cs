@@ -75,4 +75,57 @@ public sealed class MetadataMatchingTests
 
         Assert.True(MetadataMatching.DocumentContainsTitle("Go Get 'em", lines));
     }
+
+    [Theory]
+    [InlineData("Ocean", "I crossed the ocean once")]
+    [InlineData("Home", "I am going home")]
+    [InlineData("You", "I will always love you")]
+    [InlineData("Me", "Stay with me")]
+    public void GetTitleEvidence_SingleWordTitleIsOnlyWeak(string title, string line)
+    {
+        Assert.Equal(
+            AppleMusicLyrics.Core.Models.TitleEvidenceStrength.Weak,
+            MetadataMatching.GetTitleEvidence(title, [line]));
+    }
+
+    [Fact]
+    public void GetTitleEvidence_DoesNotJoinWordsOrMatchInsideAnotherWord()
+    {
+        Assert.Equal(
+            AppleMusicLyrics.Core.Models.TitleEvidenceStrength.None,
+            MetadataMatching.GetTitleEvidence("Meyou", ["Now you turn me into a nebula"]));
+        Assert.Equal(
+            AppleMusicLyrics.Core.Models.TitleEvidenceStrength.None,
+            MetadataMatching.GetTitleEvidence("Eple", ["All the people gather around"]));
+    }
+
+    [Fact]
+    public void GetTitleEvidence_ContiguousMultiWordPhraseIsStrong()
+    {
+        Assert.Equal(
+            AppleMusicLyrics.Core.Models.TitleEvidenceStrength.Strong,
+            MetadataMatching.GetTitleEvidence("Rolling in the Deep", ["We could have had it all, rolling in the deep"]));
+    }
+
+    [Fact]
+    public void IsRepetitiveVocalizationOnly_DetectsMeyouCommunityTranscript()
+    {
+        var lines = new[]
+        {
+            "Me, meyou", "Me, meyou", "Me, meyou", "Me, meyou, you",
+            "Me, meyou", "Meyou, meyou", "Me, meyou", "Me, meyou",
+            "Me, meyou", "Me, meyou", "Meyou, meyou", "Me, meyou, ooh",
+            "Me, meyou",
+        };
+
+        Assert.True(MetadataMatching.IsRepetitiveVocalizationOnly("Meyou", lines));
+    }
+
+    [Fact]
+    public void IsRepetitiveVocalizationOnly_KeepsNormallyRepetitiveLyrics()
+    {
+        var lines = Enumerable.Repeat("Around the world", 12);
+
+        Assert.False(MetadataMatching.IsRepetitiveVocalizationOnly("Around the World", lines));
+    }
 }

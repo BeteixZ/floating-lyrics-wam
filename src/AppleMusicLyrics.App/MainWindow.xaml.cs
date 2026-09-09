@@ -10,6 +10,10 @@ using System.IO;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using AppleMusicLyrics.App.Services;
+using AppleMusicLyrics.App.Controllers;
+using AppleMusicLyrics.App.Composition;
+using AppleMusicLyrics.App.Presentation;
+using AppleMusicLyrics.Application.Services;
 using AppleMusicLyrics.Core.Abstractions;
 using AppleMusicLyrics.Core.Configuration;
 using AppleMusicLyrics.Core.Display;
@@ -23,8 +27,6 @@ using AppleMusicLyrics.Infrastructure.Windows.Display;
 using AppleMusicLyrics.Infrastructure.Windows.External;
 using AppleMusicLyrics.Infrastructure.Windows.Interop;
 using AppleMusicLyrics.Infrastructure.Windows.Media;
-using Drawing = System.Drawing;
-using Forms = System.Windows.Forms;
 using IOPath = System.IO.Path;
 using MediaColor = System.Windows.Media.Color;
 using MediaColorConverter = System.Windows.Media.ColorConverter;
@@ -38,20 +40,14 @@ public partial class MainWindow : Window
     private readonly GlobalMediaSessionProvider _playerProvider;
     private readonly ITunesCatalogSongResolver? _catalogResolver;
     private readonly LrcLibLyricsProvider? _lrcLibProvider;
-    private readonly DispatcherTimer _refreshTimer;
+    private readonly RuntimePollingController _runtimePollingController;
     private readonly AppSettings _settings;
     private readonly IniSettingsStore _settingsStore;
     private readonly WindowInteropService _windowInteropService;
-    private readonly MonitorService _monitorService;
-    private readonly Forms.NotifyIcon _notifyIcon;
-    private readonly Forms.ToolStripMenuItem _showHideMenuItem;
-    private readonly Forms.ToolStripMenuItem _clickThroughMenuItem;
-    private readonly Forms.ToolStripMenuItem _pureModeMenuItem;
-    private readonly Forms.ToolStripMenuItem _singleLineMenuItem;
-    private readonly Forms.ToolStripMenuItem _twoLineMenuItem;
-    private readonly Forms.ToolStripMenuItem _debugPanelMenuItem;
+    private readonly WindowPlacementCoordinator _windowPlacementCoordinator;
+    private readonly TrayIconController _trayIconController;
     private bool _sourceInitialized;
-    private bool _isRefreshing;
+    private bool _isClosed;
     private bool _runtimeRefreshFailed;
     private bool _hasRuntimeSnapshot;
     private bool _hasFrameLyricState;
@@ -84,14 +80,28 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
-        _settingsStore = new IniSettingsStore(GetSettingsPath());
-        _settings = _settingsStore.Load();
+        var composition = AppCompositionRoot.Create();
+        _settingsStore = composition.SettingsStore;
+        _settings = composition.Settings;
+        _playerProvider = composition.PlayerProvider;
+        _catalogResolver = composition.CatalogResolver;
+        _lrcLibProvider = composition.ExternalLyricsProvider;
+        _runtimeService = composition.RuntimeService;
         _windowInteropService = new WindowInteropService();
-        _monitorService = new MonitorService();
+        _windowPlacementCoordinator = new WindowPlacementCoordinator();
 
         InitializeComponent();
         Icon = LoadAppIcon();
-        (_notifyIcon, _showHideMenuItem, _clickThroughMenuItem, _pureModeMenuItem, _singleLineMenuItem, _twoLineMenuItem, _debugPanelMenuItem) = CreateNotifyIcon();
+        _trayIconController = new TrayIconController(
+            Dispatcher,
+            ToggleOverlayVisibility,
+            () => SetClickThrough(!_settings.ClickThrough),
+            () => SetPureMode(!_settings.PureMode),
+            () => SetSingleLineMode(!_settings.SingleLineMode),
+            () => SetTwoLineMode(!_settings.TwoLineMode),
+            () => SetDebugPanelVisibility(!_settings.ShowDebugPanel),
+            OpenSettingsWindow,
+            Close);
         ApplyWindowBounds();
         ApplyAppearanceSettings();
 
@@ -104,40 +114,11 @@ public partial class MainWindow : Window
         MouseEnter += OnMouseEnter;
         MouseLeave += OnMouseLeave;
 
-        var parser = new TtmlLyricsParser();
-        var scanner = new AppleMusicCacheScanner(parser);
-        _playerProvider = new GlobalMediaSessionProvider(_settings.AllowNonAppleMediaSessions);
-        var synchronizer = new LyricsSynchronizer();
-        var playbackClock = new PlaybackClock();
-        _catalogResolver = _settings.CatalogLookupEnabled
-            ? new ITunesCatalogSongResolver(
-                _settings.CatalogStorefronts,
-                GetCatalogCachePath(),
-                _settings.CatalogLookupTimeoutSeconds)
-            : null;
-        _lrcLibProvider = _settings.ExternalLyricsEnabled
-            ? new LrcLibLyricsProvider(timeoutSeconds: _settings.ExternalLyricsTimeoutSeconds)
-            : null;
-        _runtimeService = new LyricsRuntimeService(
-            scanner,
-            _playerProvider,
-            synchronizer,
-            playbackClock,
-            _settings.LyricsOffsetSeconds,
-            _catalogResolver)
-        {
-            ApplyNativeLyricOffset = _settings.ApplyNativeLyricOffset,
-            AllowLowConfidenceLyrics = _settings.AllowLowConfidenceLyrics,
-            ExternalLyricsProviders = _lrcLibProvider is null
-                ? Array.Empty<IExternalLyricsProvider>()
-                : [_lrcLibProvider],
-        };
-
-        _refreshTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromSeconds(Math.Clamp(_settings.PlayerPollInterval, 0.05, 1.0)),
-        };
-        _refreshTimer.Tick += OnRefreshTick;
+        _runtimePollingController = new RuntimePollingController(
+            _runtimeService,
+            TimeSpan.FromSeconds(Math.Clamp(_settings.PlayerPollInterval, 0.05, 1.0)),
+            ApplyRuntimeSnapshot,
+            HandleRuntimeError);
         CompositionTarget.Rendering += OnRendering;
     }
 
@@ -182,8 +163,11 @@ public partial class MainWindow : Window
             RefreshLyricLayout();
         }
 
-        await RefreshSnapshotAsync();
-        _refreshTimer.Start();
+        await _runtimePollingController.StartAsync();
+        if (_isClosed)
+        {
+            return;
+        }
     }
 
     private void OnSourceInitialized(object? sender, EventArgs e)
@@ -216,7 +200,7 @@ public partial class MainWindow : Window
         {
             case WM_DPICHANGED:
                 if (!_isApplyingWindowPlacement
-                    && _monitorService.TryReadSuggestedRect(lParam, out _))
+                    && _windowPlacementCoordinator.TryReadSuggestedRect(lParam, out _))
                 {
                     // PerMonitorV2 WPF owns DPI layout and applies the suggested physical RECT.
                     // Recalculate the content-sized Pure Mode bounds after adopting the new DPI.
@@ -261,7 +245,7 @@ public partial class MainWindow : Window
         _isApplyingWindowPlacement = true;
         try
         {
-            _monitorService.SetWindowRect(hwnd, rect);
+            _windowPlacementCoordinator.SetWindowRect(hwnd, rect);
         }
         finally
         {
@@ -303,14 +287,14 @@ public partial class MainWindow : Window
 
     private bool ReconcileDisplayTopology()
     {
-        var monitors = _monitorService.GetMonitors();
+        var monitors = _windowPlacementCoordinator.GetMonitors();
         if (monitors.Count == 0)
         {
             return false;
         }
 
         var hwnd = new WindowInteropHelper(this).Handle;
-        var currentRect = _monitorService.GetWindowRect(hwnd);
+        var currentRect = _windowPlacementCoordinator.GetWindowRect(hwnd);
         var pureModeSize = _settings.PureMode ? GetDesiredPureModeCardSize() : default;
         var desiredWidth = _settings.PureMode
             ? pureModeSize.Width
@@ -318,32 +302,20 @@ public partial class MainWindow : Window
         var desiredHeight = _settings.PureMode
             ? pureModeSize.Height
             : GetCurrentLogicalSize(ActualHeight, Height, _settings.WindowHeight);
-        var placement = WindowPlacementService.Resolve(
-            monitors,
-            _settings.PureMode ? _settings.PureModeMonitorId : _settings.WindowMonitorId,
-            _settings.PureMode ? _settings.PureModeRelativeCenterX : _settings.WindowRelativeCenterX,
-            _settings.PureMode ? _settings.PureModeRelativeCenterY : _settings.WindowRelativeCenterY,
+        var placement = _windowPlacementCoordinator.Resolve(
+            _settings,
+            _settings.PureMode,
             desiredWidth,
             desiredHeight,
             currentRect);
 
         Width = placement.WidthDip;
         Height = placement.HeightDip;
+        WindowPlacementCoordinator.StoreAnchor(_settings, _settings.PureMode, placement);
         if (_settings.PureMode)
         {
-            _settings.PureModeMonitorId = placement.Monitor.DeviceName;
-            _settings.PureModeRelativeCenterX = placement.RelativeCenterX;
-            _settings.PureModeRelativeCenterY = placement.RelativeCenterY;
             UpdateTextMaxWidths(placement.WidthDip);
         }
-        else
-        {
-            _settings.WindowMonitorId = placement.Monitor.DeviceName;
-            _settings.WindowRelativeCenterX = placement.RelativeCenterX;
-            _settings.WindowRelativeCenterY = placement.RelativeCenterY;
-        }
-
-        _settings.WindowPlacementVersion = 1;
         ApplyNativeWindowRect(hwnd, placement.WindowRectPx);
         return true;
     }
@@ -358,45 +330,27 @@ public partial class MainWindow : Window
         return double.IsFinite(requested) && requested > 0 ? requested : fallback;
     }
 
-    private async void OnRefreshTick(object? sender, EventArgs e)
+    private void ApplyRuntimeSnapshot(RuntimeSnapshot snapshot)
     {
-        await RefreshSnapshotAsync();
+        _runtimeRefreshFailed = false;
+        _hasRuntimeSnapshot = true;
+        ApplySnapshot(snapshot);
+        UpdateOverlayVisibility(snapshot);
     }
 
-    private async Task RefreshSnapshotAsync()
+    private void HandleRuntimeError(Exception ex)
     {
-        if (_isRefreshing)
-        {
-            return;
-        }
-
-        _isRefreshing = true;
-        try
-        {
-            var snapshot = await _runtimeService.SnapshotAsync();
-            _runtimeRefreshFailed = false;
-            _hasRuntimeSnapshot = true;
-            ApplySnapshot(snapshot);
-            UpdateOverlayVisibility(snapshot);
-        }
-        catch (Exception ex)
-        {
-            _runtimeRefreshFailed = true;
-            _pendingFrameSnapshot = null;
-            _lastLyricAnimationKey = null;
-            SubtitleText.Text = "Failed to refresh runtime state.";
-            PlayerText.Text = "Check Apple Music and media session availability.";
-            TimingText.Text = $"Playback clock refresh failed | {FormatRenderRate()} | {FormatPollRate()}";
-            StatusText.Text = "Runtime error";
-            PathText.Text = ex.Message;
-            CurrentLyricText.Text = "Refresh failed.";
-            PreviousLyricText.Text = string.Empty;
-            NextLyricText.Text = "Check Apple Music, cache state, or media session access.";
-        }
-        finally
-        {
-            _isRefreshing = false;
-        }
+        _runtimeRefreshFailed = true;
+        _pendingFrameSnapshot = null;
+        _lastLyricAnimationKey = null;
+        SubtitleText.Text = "Failed to refresh runtime state.";
+        PlayerText.Text = "Check Apple Music and media session availability.";
+        TimingText.Text = $"Playback clock refresh failed | {FormatRenderRate()} | {FormatPollRate()}";
+        StatusText.Text = "Runtime error";
+        PathText.Text = ex.Message;
+        CurrentLyricText.Text = "Refresh failed.";
+        PreviousLyricText.Text = string.Empty;
+        NextLyricText.Text = "Check Apple Music, cache state, or media session access.";
     }
 
     private void ApplySnapshot(RuntimeSnapshot snapshot)
@@ -472,24 +426,11 @@ public partial class MainWindow : Window
 
     private void UpdatePlayerSection(RuntimeSnapshot snapshot)
     {
-        if (snapshot.Player is null)
-        {
-            Title = "Apple Music Lyrics";
-            SubtitleText.Text = "Waiting for Apple Music session";
-            PlayerText.Text = "No active media session";
-            UpdateTimingText(snapshot);
-            return;
-        }
-
-        var status = snapshot.Player.Playing ? "Playing" : "Paused";
-        var artist = snapshot.Player.Artist ?? "Unknown Artist";
-        var title = snapshot.Player.Title ?? "Unknown Title";
-        Title = $"{artist} - {title}";
-        PlayerText.Text = $"{status}: {artist} - {title}";
+        var presentation = OverlaySnapshotPresenter.CreatePlayer(snapshot);
+        Title = presentation.WindowTitle;
+        SubtitleText.Text = presentation.Subtitle;
+        PlayerText.Text = presentation.PlayerText;
         UpdateTimingText(snapshot);
-        SubtitleText.Text = snapshot.Player.Album is { Length: > 0 }
-            ? $"{artist} | {snapshot.Player.Album}"
-            : artist;
     }
 
     private void UpdateTimingText(RuntimeSnapshot snapshot)
@@ -509,77 +450,21 @@ public partial class MainWindow : Window
 
     private string FormatPollRate()
     {
-        var pollsPerSecond = 1.0 / Math.Max(0.001, _refreshTimer.Interval.TotalSeconds);
+        var pollsPerSecond = 1.0 / Math.Max(0.001, _runtimePollingController.Interval.TotalSeconds);
         return $"poll {pollsPerSecond.ToString("F1", CultureInfo.InvariantCulture)} Hz";
     }
 
     private void UpdateLyricSection(RuntimeSnapshot snapshot)
     {
-        var resolutionLabel = FormatResolutionLabel(snapshot.Resolution);
-        if (snapshot.Document is null)
-        {
-            StatusText.Text = resolutionLabel;
-            PathText.Text = snapshot.Resolution.Summary;
-            SetLyrics(
-                previousText: string.Empty,
-                currentText: GetResolutionPlaceholder(snapshot.Resolution),
-                nextText: snapshot.Resolution.Status == LyricsResolutionStatus.FetchingExternal
-                    ? "The current track will be checked again automatically."
-                    : "Open the debug panel for the current match decision.",
-                isPlaying: snapshot.Player?.Playing ?? false,
-                animate: false);
-            return;
-        }
-
-        StatusText.Text = $"{snapshot.Document.Lines.Count} lines | {resolutionLabel}";
-        PathText.Text = $"{snapshot.Resolution.Summary} | {snapshot.Document.SourceFile}";
-
-        var currentText = snapshot.ActiveLyric.CurrentLine?.Text
-            ?? snapshot.ActiveLyric.NextLine?.Text
-            ?? snapshot.Document.Lines.FirstOrDefault()?.Text
-            ?? "Lyrics file has no timed lines.";
-
+        var presentation = OverlaySnapshotPresenter.CreateLyrics(snapshot);
+        StatusText.Text = presentation.StatusText;
+        PathText.Text = presentation.PathText;
         SetLyrics(
-            snapshot.ActiveLyric.PreviousLine?.Text,
-            currentText,
-            snapshot.ActiveLyric.NextLine?.Text,
-            snapshot.Player?.Playing ?? false,
-            animate: snapshot.ActiveLyric.CurrentLine is not null);
-    }
-
-    private static string FormatResolutionLabel(LyricsResolution resolution)
-    {
-        var status = resolution.Status switch
-        {
-            LyricsResolutionStatus.NoPlayer => "No player",
-            LyricsResolutionStatus.WaitingForMetadata => "Waiting for metadata",
-            LyricsResolutionStatus.SearchingLocal => "Searching cache",
-            LyricsResolutionStatus.VerifyingCatalog => "Verifying catalog",
-            LyricsResolutionStatus.FetchingExternal => "Fetching external",
-            LyricsResolutionStatus.Resolved => "Lyrics resolved",
-            LyricsResolutionStatus.Unavailable => "Lyrics unavailable",
-            LyricsResolutionStatus.Error => "Resolution error",
-            _ => resolution.Status.ToString(),
-        };
-
-        return resolution.Confidence == LyricsResolutionConfidence.None
-            ? status
-            : $"{status} ({resolution.Confidence.ToString().ToLowerInvariant()})";
-    }
-
-    private static string GetResolutionPlaceholder(LyricsResolution resolution)
-    {
-        return resolution.Status switch
-        {
-            LyricsResolutionStatus.NoPlayer => "Waiting for Apple Music session...",
-            LyricsResolutionStatus.WaitingForMetadata => "Waiting for track metadata...",
-            LyricsResolutionStatus.SearchingLocal => "Searching the Apple Music lyric cache...",
-            LyricsResolutionStatus.VerifyingCatalog => "Verifying the matching song...",
-            LyricsResolutionStatus.FetchingExternal => "Looking for lyrics from external providers...",
-            LyricsResolutionStatus.Unavailable => "No verified timed lyrics found.",
-            LyricsResolutionStatus.Error => "Lyrics resolution failed.",
-            _ => "Waiting for timed lyrics...",
-        };
+            presentation.PreviousText,
+            presentation.CurrentText,
+            presentation.NextText,
+            presentation.IsPlaying,
+            presentation.Animate);
     }
 
     private void SetLyrics(
@@ -972,12 +857,13 @@ public partial class MainWindow : Window
 
     private void OnClosed(object? sender, EventArgs e)
     {
+        _isClosed = true;
         CompositionTarget.Rendering -= OnRendering;
-        _refreshTimer.Stop();
+        _runtimePollingController.Dispose();
         StopMouseTracker();
         PersistCurrentSettings();
-        _notifyIcon.Visible = false;
-        _notifyIcon.Dispose();
+        _trayIconController.Dispose();
+        _runtimeService.DisposeAsync().AsTask().GetAwaiter().GetResult();
         _catalogResolver?.Dispose();
         _lrcLibProvider?.Dispose();
     }
@@ -1079,7 +965,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var monitors = _monitorService.GetMonitors();
+        var monitors = _windowPlacementCoordinator.GetMonitors();
         if (monitors.Count == 0)
         {
             return;
@@ -1104,32 +990,20 @@ public partial class MainWindow : Window
             (int)Math.Round(legacyLeft + desiredWidth),
             (int)Math.Round(legacyTop + desiredHeight));
 
-        var placement = WindowPlacementService.Resolve(
-            monitors,
-            _settings.PureMode ? _settings.PureModeMonitorId : _settings.WindowMonitorId,
-            _settings.PureMode ? _settings.PureModeRelativeCenterX : _settings.WindowRelativeCenterX,
-            _settings.PureMode ? _settings.PureModeRelativeCenterY : _settings.WindowRelativeCenterY,
+        var placement = _windowPlacementCoordinator.Resolve(
+            _settings,
+            _settings.PureMode,
             desiredWidth,
             desiredHeight,
             legacyRect);
 
         Width = placement.WidthDip;
         Height = placement.HeightDip;
+        WindowPlacementCoordinator.StoreAnchor(_settings, _settings.PureMode, placement);
         if (_settings.PureMode)
         {
-            _settings.PureModeMonitorId = placement.Monitor.DeviceName;
-            _settings.PureModeRelativeCenterX = placement.RelativeCenterX;
-            _settings.PureModeRelativeCenterY = placement.RelativeCenterY;
             UpdateTextMaxWidths(placement.WidthDip);
         }
-        else
-        {
-            _settings.WindowMonitorId = placement.Monitor.DeviceName;
-            _settings.WindowRelativeCenterX = placement.RelativeCenterX;
-            _settings.WindowRelativeCenterY = placement.RelativeCenterY;
-        }
-
-        _settings.WindowPlacementVersion = 1;
         var handle = new WindowInteropHelper(this).Handle;
         ApplyNativeWindowRect(handle, placement.WindowRectPx);
     }
@@ -1142,30 +1016,12 @@ public partial class MainWindow : Window
         }
 
         var handle = new WindowInteropHelper(this).Handle;
-        var monitors = _monitorService.GetMonitors();
-        var rect = _monitorService.GetWindowRect(handle);
-        if (monitors.Count == 0 || rect.Width <= 0 || rect.Height <= 0)
+        var captured = _windowPlacementCoordinator.Capture(handle);
+        if (captured is null)
         {
             return;
         }
-
-        var monitor = _monitorService.GetMonitorForWindow(handle, monitors)
-            ?? WindowPlacementService.FindMonitorForRect(monitors, rect);
-        var captured = WindowPlacementService.Capture(monitor, rect);
-        if (_settings.PureMode)
-        {
-            _settings.PureModeMonitorId = captured.MonitorId;
-            _settings.PureModeRelativeCenterX = captured.RelativeCenterX;
-            _settings.PureModeRelativeCenterY = captured.RelativeCenterY;
-        }
-        else
-        {
-            _settings.WindowMonitorId = captured.MonitorId;
-            _settings.WindowRelativeCenterX = captured.RelativeCenterX;
-            _settings.WindowRelativeCenterY = captured.RelativeCenterY;
-        }
-
-        _settings.WindowPlacementVersion = 1;
+        WindowPlacementCoordinator.StoreAnchor(_settings, _settings.PureMode, captured);
     }
 
     private void ApplyWindowBounds()
@@ -1272,6 +1128,8 @@ public partial class MainWindow : Window
         RefreshLyricLayout();
     }
 
+    private bool IsClickThroughEnabled => _settings.ClickThrough;
+
     private void ApplyClickThrough()
     {
         if (!_sourceInitialized)
@@ -1280,13 +1138,13 @@ public partial class MainWindow : Window
         }
 
         var handle = new WindowInteropHelper(this).Handle;
-        _windowInteropService.SetClickThrough(handle, _settings.ClickThrough);
+        _windowInteropService.SetClickThrough(handle, IsClickThroughEnabled);
         UpdateMouseTracker(handle);
     }
 
     private void UpdateMouseTracker(nint hwnd)
     {
-        if (_settings.ClickThrough && _settings.HoverFadeEnabled)
+        if (IsClickThroughEnabled && _settings.HoverFadeEnabled)
         {
             if (_mouseTracker is null)
             {
@@ -1323,7 +1181,7 @@ public partial class MainWindow : Window
 
     private void ShellBorder_OnMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (_settings.ClickThrough)
+        if (IsClickThroughEnabled)
         {
             return;
         }
@@ -1499,7 +1357,7 @@ public partial class MainWindow : Window
         _runtimeService.LyricsOffsetSeconds = _settings.LyricsOffsetSeconds;
         _runtimeService.ApplyNativeLyricOffset = _settings.ApplyNativeLyricOffset;
         _runtimeService.AllowLowConfidenceLyrics = _settings.AllowLowConfidenceLyrics;
-        _refreshTimer.Interval = TimeSpan.FromSeconds(Math.Clamp(_settings.PlayerPollInterval, 0.05, 1.0));
+        _runtimePollingController.Interval = TimeSpan.FromSeconds(Math.Clamp(_settings.PlayerPollInterval, 0.05, 1.0));
 
         if (requestedPureMode != currentPureMode)
         {
@@ -1574,8 +1432,8 @@ public partial class MainWindow : Window
         try
         {
             var hwnd = new WindowInteropHelper(this).Handle;
-            var currentRect = _monitorService.GetWindowRect(hwnd);
-            var monitors = _monitorService.GetMonitors();
+            var currentRect = _windowPlacementCoordinator.GetWindowRect(hwnd);
+            var monitors = _windowPlacementCoordinator.GetMonitors();
             if (currentRect.Width <= 0 || currentRect.Height <= 0 || monitors.Count == 0)
             {
                 return;
@@ -1584,7 +1442,7 @@ public partial class MainWindow : Window
             // Anchor on the live window center. Round-tripping through the stored
             // monitor-relative center re-quantizes the position on every lyric, which shifts the
             // card by a pixel or two each line and reads as jitter.
-            var monitor = _monitorService.GetMonitorForWindow(hwnd, monitors)
+            var monitor = _windowPlacementCoordinator.GetMonitorForWindow(hwnd, monitors)
                 ?? WindowPlacementService.FindMonitorForRect(monitors, currentRect);
             var requestedSize = GetDesiredPureModeCardSize();
             var targetRect = WindowBoundsGeometry.ResizeAroundCenter(
@@ -1806,89 +1664,14 @@ public partial class MainWindow : Window
 
     private void UpdateTrayState()
     {
-        _showHideMenuItem.Text = IsVisible ? "Hide overlay" : "Show overlay";
-        _clickThroughMenuItem.Checked = _settings.ClickThrough;
-        _pureModeMenuItem.Checked = _settings.PureMode;
-        _singleLineMenuItem.Checked = _settings.SingleLineMode;
-        _twoLineMenuItem.Checked = _settings.TwoLineMode;
-        _debugPanelMenuItem.Checked = _settings.ShowDebugPanel;
-        _notifyIcon.Text = BuildTrayText();
-    }
-
-    private (Forms.NotifyIcon NotifyIcon, Forms.ToolStripMenuItem ShowHideMenuItem, Forms.ToolStripMenuItem ClickThroughMenuItem, Forms.ToolStripMenuItem PureModeMenuItem, Forms.ToolStripMenuItem SingleLineMenuItem, Forms.ToolStripMenuItem TwoLineMenuItem, Forms.ToolStripMenuItem DebugPanelMenuItem) CreateNotifyIcon()
-    {
-        var menu = new Forms.ContextMenuStrip();
-
-        var showHideMenuItem = new Forms.ToolStripMenuItem("Hide overlay");
-        showHideMenuItem.Click += (_, _) => Dispatcher.Invoke(ToggleOverlayVisibility);
-
-        var clickThroughMenuItem = new Forms.ToolStripMenuItem("Click through");
-        clickThroughMenuItem.Click += (_, _) => Dispatcher.Invoke(() => SetClickThrough(!_settings.ClickThrough));
-
-        var pureModeMenuItem = new Forms.ToolStripMenuItem("Pure mode");
-        pureModeMenuItem.Click += (_, _) => Dispatcher.Invoke(() => SetPureMode(!_settings.PureMode));
-
-        var singleLineMenuItem = new Forms.ToolStripMenuItem("Single-line mode");
-        singleLineMenuItem.Click += (_, _) => Dispatcher.Invoke(() => SetSingleLineMode(!_settings.SingleLineMode));
-
-        var twoLineMenuItem = new Forms.ToolStripMenuItem("Two-line mode");
-        twoLineMenuItem.Click += (_, _) => Dispatcher.Invoke(() => SetTwoLineMode(!_settings.TwoLineMode));
-
-        var debugPanelMenuItem = new Forms.ToolStripMenuItem("Show debug panel");
-        debugPanelMenuItem.Click += (_, _) => Dispatcher.Invoke(() => SetDebugPanelVisibility(!_settings.ShowDebugPanel));
-
-        var settingsMenuItem = new Forms.ToolStripMenuItem("Settings...");
-        settingsMenuItem.Click += (_, _) => Dispatcher.Invoke(OpenSettingsWindow);
-
-        var exitMenuItem = new Forms.ToolStripMenuItem("Exit");
-        exitMenuItem.Click += (_, _) => Dispatcher.Invoke(() =>
-        {
-            Close();
-        });
-
-        menu.Items.Add(showHideMenuItem);
-        menu.Items.Add(clickThroughMenuItem);
-        menu.Items.Add(pureModeMenuItem);
-        menu.Items.Add(singleLineMenuItem);
-        menu.Items.Add(twoLineMenuItem);
-        menu.Items.Add(debugPanelMenuItem);
-        menu.Items.Add(new Forms.ToolStripSeparator());
-        menu.Items.Add(settingsMenuItem);
-        menu.Items.Add(exitMenuItem);
-
-        var notifyIcon = new Forms.NotifyIcon
-        {
-            Icon = LoadAppIconForTray(),
-            Visible = true,
-            Text = BuildTrayText(),
-            ContextMenuStrip = menu,
-        };
-
-        notifyIcon.DoubleClick += (_, _) => Dispatcher.Invoke(ShowOverlay);
-        return (notifyIcon, showHideMenuItem, clickThroughMenuItem, pureModeMenuItem, singleLineMenuItem, twoLineMenuItem, debugPanelMenuItem);
-    }
-
-    private string BuildTrayText()
-    {
-        var baseText = CurrentLyricText.Text;
-        if (string.IsNullOrWhiteSpace(baseText))
-        {
-            return "Apple Music Lyrics";
-        }
-
-        baseText = baseText.Replace(Environment.NewLine, " ", StringComparison.Ordinal).Trim();
-        const string prefix = "Apple Music Lyrics - ";
-        const int maxLength = 63;
-        var available = maxLength - prefix.Length;
-        if (available <= 3)
-        {
-            return "Apple Music Lyrics";
-        }
-
-        var trimmed = baseText.Length <= available
-            ? baseText
-            : $"{baseText[..(available - 3)]}...";
-        return $"{prefix}{trimmed}";
+        _trayIconController.Update(
+            IsVisible,
+            _settings.ClickThrough,
+            _settings.PureMode,
+            _settings.SingleLineMode,
+            _settings.TwoLineMode,
+            _settings.ShowDebugPanel,
+            CurrentLyricText.Text);
     }
 
     private static System.Windows.Media.Brush CreateBrush(string colorValue, MediaColor fallbackColor)
@@ -1971,68 +1754,12 @@ public partial class MainWindow : Window
         }
     }
 
-    private static Drawing.Icon LoadAppIconForTray()
-    {
-        var stream = System.Windows.Application.GetResourceStream(
-            new Uri("pack://application:,,,/icon.ico", UriKind.Absolute))?.Stream;
-        if (stream is not null)
-        {
-            return new Drawing.Icon(stream, new Drawing.Size(16, 16));
-        }
-        return Drawing.SystemIcons.Application;
-    }
-
-    private static string GetSettingsPath()
-    {
-        return GetWritableDataPath("settings.ini");
-    }
-
-    private static string GetCatalogCachePath()
-    {
-        return GetWritableDataPath("catalog-cache.json");
-    }
-
-    private static string GetWritableDataPath(string fileName)
-    {
-        var legacyPath = IOPath.Combine(AppContext.BaseDirectory, fileName);
-        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (string.IsNullOrWhiteSpace(localAppData))
-        {
-            return legacyPath;
-        }
-
-        var dataDirectory = IOPath.Combine(localAppData, "AppleMusicLyrics");
-        var targetPath = IOPath.Combine(dataDirectory, fileName);
-        try
-        {
-            Directory.CreateDirectory(dataDirectory);
-            if (!File.Exists(targetPath) && File.Exists(legacyPath))
-            {
-                File.Copy(legacyPath, targetPath);
-            }
-
-            return targetPath;
-        }
-        catch (IOException)
-        {
-            return legacyPath;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return legacyPath;
-        }
-    }
-
     private static void CopySettings(AppSettings source, AppSettings target)
     {
         var copy = source.Clone();
-        target.LyricsPollInterval = copy.LyricsPollInterval;
         target.PlayerPollInterval = copy.PlayerPollInterval;
-        target.CliRenderInterval = copy.CliRenderInterval;
-        target.UiRefreshInterval = copy.UiRefreshInterval;
         target.LyricsOffsetSeconds = copy.LyricsOffsetSeconds;
         target.ApplyNativeLyricOffset = copy.ApplyNativeLyricOffset;
-        target.PreviewLineCount = copy.PreviewLineCount;
         target.AllowNonAppleMediaSessions = copy.AllowNonAppleMediaSessions;
         target.AllowLowConfidenceLyrics = copy.AllowLowConfidenceLyrics;
         target.CatalogLookupEnabled = copy.CatalogLookupEnabled;
@@ -2040,6 +1767,7 @@ public partial class MainWindow : Window
         target.CatalogLookupTimeoutSeconds = copy.CatalogLookupTimeoutSeconds;
         target.ExternalLyricsEnabled = copy.ExternalLyricsEnabled;
         target.ExternalLyricsTimeoutSeconds = copy.ExternalLyricsTimeoutSeconds;
+        target.PersistExternalLyricsCache = copy.PersistExternalLyricsCache;
         target.WindowX = copy.WindowX;
         target.WindowY = copy.WindowY;
         target.WindowWidth = copy.WindowWidth;

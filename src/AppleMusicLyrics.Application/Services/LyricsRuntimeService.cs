@@ -3,9 +3,9 @@ using AppleMusicLyrics.Core.Matching;
 using AppleMusicLyrics.Core.Models;
 using AppleMusicLyrics.Core.Sync;
 
-namespace AppleMusicLyrics.App.Services;
+namespace AppleMusicLyrics.Application.Services;
 
-public sealed class LyricsRuntimeService
+public sealed class LyricsRuntimeService : IAsyncDisposable
 {
     private const int MaxCatalogAttempts = 3;
     private const int MaxExternalAttempts = 3;
@@ -20,7 +20,7 @@ public sealed class LyricsRuntimeService
     private double _lyricsOffsetSeconds;
     private LyricsDocument? _currentDocument;
     private string? _sessionKey;
-    private DateTimeOffset _sessionChangedAt = DateTimeOffset.UtcNow;
+    private DateTimeOffset _sessionChangedAt;
     private DateTimeOffset _lastScanAt = DateTimeOffset.MinValue;
     private double? _lastRawPositionSeconds;
     private double _matchedAgainstDuration;
@@ -30,15 +30,17 @@ public sealed class LyricsRuntimeService
     private IReadOnlyList<string> _catalogLyricsIds = Array.Empty<string>();
     private Task<CatalogFetchResult>? _catalogFetch;
     private CancellationTokenSource? _catalogFetchCancellation;
-    private string? _catalogFetchSessionKey;
+    private int _trackGeneration;
+    private int _catalogFetchGeneration;
     private Task<ExternalFetchResult>? _externalFetch;
     private CancellationTokenSource? _externalFetchCancellation;
-    private string? _externalFetchSessionKey;
+    private int _externalFetchGeneration;
     private LyricsDocument? _externalDocument;
     private int _externalAttemptCount;
     private bool _externalLookupComplete;
     private DateTimeOffset _externalNextAttemptAt = DateTimeOffset.MinValue;
     private LyricsResolution _resolution = LyricsResolution.NoPlayer;
+    private bool _disposed;
 
     public LyricsRuntimeService(
         ILyricsDocumentProvider lyricsProvider,
@@ -56,6 +58,7 @@ public sealed class LyricsRuntimeService
         _lyricsOffsetSeconds = lyricsOffsetSeconds;
         _catalogResolver = catalogResolver;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _sessionChangedAt = _timeProvider.GetUtcNow();
         _frameBasis = new FrameBasis(CreateNoPlayerSnapshot(), _timeProvider.GetTimestamp());
     }
 
@@ -103,6 +106,7 @@ public sealed class LyricsRuntimeService
 
     public async Task<RuntimeSnapshot> SnapshotAsync(CancellationToken cancellationToken = default)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
         var rawPlayer = await _playerSessionProvider.GetCurrentPlayerStateAsync(cancellationToken).ConfigureAwait(false);
         if (rawPlayer is null)
         {
@@ -116,7 +120,10 @@ public sealed class LyricsRuntimeService
 
         // Apple's own cache is authoritative when it has the song, so an external source is only
         // consulted once the local search has come up empty.
-        document ??= ResolveExternalDocument(rawPlayer);
+        if (document is null && CanStartOrAdoptExternalLookup())
+        {
+            document = ResolveExternalDocument(rawPlayer);
+        }
 
         var estimatedPosition = _playbackClock.GetEstimatedPosition();
         if (rawPlayer.Duration > 0)
@@ -202,7 +209,8 @@ public sealed class LyricsRuntimeService
         if (!string.Equals(_sessionKey, currentSessionKey, StringComparison.Ordinal))
         {
             _playbackClock.Reset();
-            _sessionChangedAt = DateTimeOffset.UtcNow;
+            _trackGeneration++;
+            _sessionChangedAt = _timeProvider.GetUtcNow();
             sessionChanged = true;
         }
         else if (_lastRawPositionSeconds.HasValue && player.Position + 2.0 < _lastRawPositionSeconds.Value)
@@ -218,10 +226,15 @@ public sealed class LyricsRuntimeService
 
     private void ResetClockState()
     {
+        if (_sessionKey is not null)
+        {
+            _trackGeneration++;
+        }
+
         _playbackClock.Reset();
         _sessionKey = null;
         _lastRawPositionSeconds = null;
-        _sessionChangedAt = DateTimeOffset.UtcNow;
+        _sessionChangedAt = _timeProvider.GetUtcNow();
         _matchedAgainstDuration = 0;
         ResetCatalogLookup();
         CancelExternalFetch();
@@ -267,13 +280,13 @@ public sealed class LyricsRuntimeService
         {
             _currentDocument = null;
             ResetCatalogLookup();
-            _sessionChangedAt = DateTimeOffset.UtcNow;
+            _sessionChangedAt = _timeProvider.GetUtcNow();
             _resolution = CreateResolution(
                 LyricsResolutionStatus.SearchingLocal,
                 "Track duration changed; re-evaluating lyric candidates.");
         }
 
-        var now = DateTimeOffset.UtcNow;
+        var now = _timeProvider.GetUtcNow();
         var withinMatchWindow = now - _sessionChangedAt <= MatchWindow;
         if (_currentDocument is not null && !withinMatchWindow)
         {
@@ -319,7 +332,9 @@ public sealed class LyricsRuntimeService
             .Where(LyricsMatchPolicy.IsPlausible)
             .ToArray();
 
-        // One file, and it agrees closely on length: duration is sufficient evidence.
+        // One file, a close length, and title-bearing lyric content together are sufficient
+        // evidence. Duration alone is not: a stale or prefetched lyric can have nearly the same
+        // length as an instrumental track and must still go through catalog verification.
         if (LyricsMatchPolicy.IsConfidentSingle(plausible))
         {
             var selected = plausible[0];
@@ -336,12 +351,21 @@ public sealed class LyricsRuntimeService
         // runs off the poll and every result is scoped to the track generation that started it.
         var catalogFailureSummary = await UpdateCatalogLookupAsync(player, candidates, cancellationToken).ConfigureAwait(false);
 
+        // Do not turn an unverified duration score into a displayed lyric while the authoritative
+        // catalog lookup is still running. In production that lookup is genuinely asynchronous;
+        // falling through here used to replace VerifyingCatalog with a Medium result for one poll,
+        // which was enough to show another same-length song's cached lyrics.
+        if (_catalogFetch is not null)
+        {
+            return new CandidateSelection(null, _resolution);
+        }
+
         if (_catalogLyricsIds.Count > 0)
         {
             foreach (var lyricsId in _catalogLyricsIds)
             {
                 var hit = plausible.FirstOrDefault(candidate =>
-                    string.Equals(candidate.Document.LyricsId, lyricsId, StringComparison.OrdinalIgnoreCase));
+                    CatalogLyricsId.Matches(candidate.Document.LyricsId, lyricsId));
                 if (hit is not null)
                 {
                     return ResolvedSelection(
@@ -450,14 +474,14 @@ public sealed class LyricsRuntimeService
             return null;
         }
 
-        var now = DateTimeOffset.UtcNow;
+        var now = _timeProvider.GetUtcNow();
         if (_catalogAttemptCount >= MaxCatalogAttempts || now < _catalogNextAttemptAt)
         {
             return null;
         }
 
         _catalogAttemptCount++;
-        _catalogFetchSessionKey = _sessionKey;
+        _catalogFetchGeneration = _trackGeneration;
         _catalogFetchCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _resolution = CreateResolution(
             LyricsResolutionStatus.VerifyingCatalog,
@@ -497,7 +521,7 @@ public sealed class LyricsRuntimeService
             _catalogFetch = null;
         }
 
-        if (!string.Equals(_catalogFetchSessionKey, _sessionKey, StringComparison.Ordinal))
+        if (_catalogFetchGeneration != _trackGeneration)
         {
             return null;
         }
@@ -516,7 +540,7 @@ public sealed class LyricsRuntimeService
         }
         else
         {
-            _catalogNextAttemptAt = DateTimeOffset.UtcNow
+            _catalogNextAttemptAt = _timeProvider.GetUtcNow()
                 + GetRetryDelay(CatalogRetryBaseDelay, _catalogAttemptCount);
         }
 
@@ -552,6 +576,21 @@ public sealed class LyricsRuntimeService
     /// work on the player poll. Completed misses are final; transient failures retry at most three
     /// times and every result is scoped to the track generation that started it.
     /// </summary>
+    private bool CanStartOrAdoptExternalLookup()
+    {
+        if (ExternalLyricsProviders.Count == 0)
+        {
+            return false;
+        }
+
+        // No local candidates means no catalog attempt was needed. Once catalog verification did
+        // start, wait for it to reach a terminal answer before allowing a community source to
+        // replace an Apple-cache decision.
+        return _resolution.Status is LyricsResolutionStatus.Unavailable or LyricsResolutionStatus.FetchingExternal
+            && _catalogFetch is null
+            && (_catalogAttemptCount == 0 || _catalogLookupComplete);
+    }
+
     private LyricsDocument? ResolveExternalDocument(PlayerState player)
     {
         if (ExternalLyricsProviders.Count == 0)
@@ -562,7 +601,7 @@ public sealed class LyricsRuntimeService
         if (_externalFetch is { IsCompleted: true })
         {
             if (_externalFetch.Status == TaskStatus.RanToCompletion &&
-                string.Equals(_externalFetchSessionKey, _sessionKey, StringComparison.Ordinal))
+                _externalFetchGeneration == _trackGeneration)
             {
                 var result = _externalFetch.Result;
                 if (result.Document is not null)
@@ -573,11 +612,11 @@ public sealed class LyricsRuntimeService
                         LyricsResolutionStatus.Resolved,
                         LyricsResolutionConfidence.Medium,
                         LyricsResolutionSource.ExternalProvider,
-                        "An external lyric provider returned timed lyrics.");
+                        "An external lyric provider returned usable lyrics.");
                 }
                 else if (result.IsTransientFailure && _externalAttemptCount < MaxExternalAttempts)
                 {
-                    _externalNextAttemptAt = DateTimeOffset.UtcNow
+                    _externalNextAttemptAt = _timeProvider.GetUtcNow()
                         + GetRetryDelay(ExternalRetryBaseDelay, _externalAttemptCount);
                     _resolution = CarryCandidateEvidence(
                         LyricsResolutionStatus.FetchingExternal,
@@ -594,7 +633,7 @@ public sealed class LyricsRuntimeService
                         LyricsResolutionSource.None,
                         result.IsTransientFailure
                             ? $"External providers failed after {_externalAttemptCount} attempts. {result.Detail}"
-                            : "External lyric providers completed with no timed lyrics.");
+                            : "External lyric providers completed with no usable lyrics.");
                 }
             }
 
@@ -608,7 +647,7 @@ public sealed class LyricsRuntimeService
             return _externalDocument;
         }
 
-        var now = DateTimeOffset.UtcNow;
+        var now = _timeProvider.GetUtcNow();
         if (!_externalLookupComplete &&
             _externalFetch is null &&
             _externalAttemptCount < MaxExternalAttempts &&
@@ -617,7 +656,7 @@ public sealed class LyricsRuntimeService
             !string.IsNullOrWhiteSpace(player.Title))
         {
             _externalAttemptCount++;
-            _externalFetchSessionKey = _sessionKey;
+            _externalFetchGeneration = _trackGeneration;
             _externalFetchCancellation = new CancellationTokenSource();
             _resolution = CarryCandidateEvidence(
                 LyricsResolutionStatus.FetchingExternal,
@@ -676,7 +715,7 @@ public sealed class LyricsRuntimeService
         _externalFetchCancellation?.Dispose();
         _externalFetchCancellation = null;
         _externalFetch = null;
-        _externalFetchSessionKey = null;
+        _externalFetchGeneration = 0;
         _externalDocument = null;
         _externalAttemptCount = 0;
         _externalLookupComplete = false;
@@ -818,7 +857,7 @@ public sealed class LyricsRuntimeService
 
         if (catalogLyricsIds is { Count: > 0 } &&
             CatalogLyricsId.ToCatalogId(candidate.Document.LyricsId) is not null &&
-            !catalogLyricsIds.Contains(candidate.Document.LyricsId, StringComparer.OrdinalIgnoreCase))
+            !catalogLyricsIds.Any(lyricsId => CatalogLyricsId.Matches(candidate.Document.LyricsId, lyricsId)))
         {
             return "Rejected: catalog identified a different song.";
         }
@@ -832,7 +871,7 @@ public sealed class LyricsRuntimeService
         _catalogFetchCancellation?.Dispose();
         _catalogFetchCancellation = null;
         _catalogFetch = null;
-        _catalogFetchSessionKey = null;
+        _catalogFetchGeneration = 0;
         _catalogAttemptCount = 0;
         _catalogLookupComplete = false;
         _catalogNextAttemptAt = DateTimeOffset.MinValue;
@@ -896,4 +935,38 @@ public sealed class LyricsRuntimeService
         string? Detail);
 
     private sealed record CandidateSelection(LyricsDocument? Document, LyricsResolution Resolution);
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        var catalogFetch = _catalogFetch;
+        var externalFetch = _externalFetch;
+        _catalogFetchCancellation?.Cancel();
+        _externalFetchCancellation?.Cancel();
+
+        try
+        {
+            var pending = new Task?[] { catalogFetch, externalFetch }
+                .Where(task => task is not null)
+                .Cast<Task>()
+                .ToArray();
+            if (pending.Length > 0)
+            {
+                await Task.WhenAll(pending).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            ResetCatalogLookup();
+            CancelExternalFetch();
+        }
+    }
 }

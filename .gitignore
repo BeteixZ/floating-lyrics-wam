@@ -5,6 +5,7 @@ catalog-cache.json
 # Test output
 TestResults/
 *.trx
+logs/
 
 build_tmp/
 dist/

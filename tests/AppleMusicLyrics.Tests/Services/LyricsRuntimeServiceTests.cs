@@ -1,4 +1,4 @@
-using AppleMusicLyrics.App.Services;
+using AppleMusicLyrics.Application.Services;
 using AppleMusicLyrics.Core.Abstractions;
 using AppleMusicLyrics.Core.Models;
 using AppleMusicLyrics.Core.Parsing;
@@ -157,7 +157,8 @@ public sealed class LyricsRuntimeServiceTests
     {
         var matchedDocument = BuildDocument("rap-god", 363.521, "I'm beginning to feel like a Rap God, Rap God", begin: 25.0, end: 29.0);
 
-        var lyricsProvider = new CandidateLyricsProvider([new LyricsMatch(matchedDocument, 100, 0.0)]);
+        var lyricsProvider = new CandidateLyricsProvider(
+            [new LyricsMatch(matchedDocument, 100, 0.0, HasContentMatch: true)]);
         var playerProvider = new StubPlayerProvider(
             new PlayerState("Rap God", "Eminem", "The Marshall Mathers LP2", 26.0, 363.521, true));
         var runtime = new LyricsRuntimeService(
@@ -182,7 +183,8 @@ public sealed class LyricsRuntimeServiceTests
         var playing = BuildDocument("AP_playing", 200.0, "the song you are hearing");
         var prefetched = BuildDocument("AP_prefetched", 202.0, "the next song on the album");
 
-        var lyricsProvider = new CandidateLyricsProvider([new LyricsMatch(playing, 100, 0.0)]);
+        var lyricsProvider = new CandidateLyricsProvider(
+            [new LyricsMatch(playing, 100, 0.0, HasContentMatch: true)]);
         var playerProvider = new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 5.0, 200.0, true));
         var runtime = new LyricsRuntimeService(
             lyricsProvider,
@@ -234,6 +236,102 @@ public sealed class LyricsRuntimeServiceTests
 
         Assert.Equal("AP_222", snapshot.Document!.LyricsId);
         Assert.Equal(1, resolver.CallCount);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_DoesNotUseHoneyLyricsForLaFemmeDArgentInstrumental()
+    {
+        // Regression: an unrelated cached lyric used to be accepted immediately when it was the
+        // only file within one second of the active duration. An instrumental must not inherit
+        // that lyric merely because the two recordings happen to have nearly identical lengths.
+        var honey = BuildDocument("AP_mariah_honey", 428.0, "Oh honey, you can have me when you want me");
+        var resolver = new StubCatalogResolver(["AP_air_la_femme_dargent"]);
+        var runtime = new LyricsRuntimeService(
+            new CandidateLyricsProvider(
+            [
+                new LyricsMatch(honey, 100, 0.0, HasContentMatch: false),
+            ]),
+            new StubPlayerProvider(new PlayerState(
+                "La femme d'argent",
+                "Air",
+                "Moon Safari",
+                10.0,
+                428.0,
+                true)),
+            new LyricsSynchronizer(),
+            new PlaybackClock(),
+            catalogResolver: resolver);
+
+        var snapshot = await runtime.SnapshotAsync();
+
+        Assert.Null(snapshot.Document);
+        Assert.Null(snapshot.ActiveLyric.CurrentLine);
+        Assert.Equal(LyricsResolutionStatus.Unavailable, snapshot.Resolution.Status);
+        Assert.Equal(1, resolver.CallCount);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_CatalogVerifiesAppleLyricsIdWithLanguageSuffix()
+    {
+        // Current Apple Music cache format: Deja Vu is AP_6808333042-en while the public catalog
+        // correctly returns the language-neutral song id AP_6808333042.
+        var dejaVu = BuildDocument("AP_6808333042-en", 240.28, "Baby, seem like everywhere I go");
+        var runtime = new LyricsRuntimeService(
+            new CandidateLyricsProvider(
+            [
+                new LyricsMatch(dejaVu, 80, 1.28),
+            ]),
+            new StubPlayerProvider(new PlayerState(
+                "DEJA VU (feat. JAŸ-Z)",
+                "Beyoncé",
+                "B'DAY (20th ANNIVERSARY DELUXE EDITION)",
+                10.0,
+                239.0,
+                true)),
+            new LyricsSynchronizer(),
+            new PlaybackClock(),
+            catalogResolver: new StubCatalogResolver(["AP_6808333042"]));
+
+        var snapshot = await runtime.SnapshotAsync();
+
+        Assert.Equal("AP_6808333042-en", snapshot.Document!.LyricsId);
+        Assert.Equal(LyricsResolutionStatus.Resolved, snapshot.Resolution.Status);
+        Assert.Equal(LyricsResolutionConfidence.High, snapshot.Resolution.Confidence);
+        Assert.Equal(LyricsResolutionSource.CatalogVerifiedCache, snapshot.Resolution.Source);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_HoldsBackClearWinnerWhileCatalogLookupIsPending()
+    {
+        var durationWinner = BuildDocument("AP_111", 180.2, "Song");
+        var catalogWinner = BuildDocument("AP_222", 185.0, "right song");
+        var resolver = new PendingCatalogResolver();
+        var runtime = new LyricsRuntimeService(
+            new CandidateLyricsProvider(
+            [
+                new LyricsMatch(durationWinner, 160, 0.2, HasContentMatch: true),
+                new LyricsMatch(catalogWinner, 25, 5.0),
+            ]),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true)),
+            new LyricsSynchronizer(),
+            new PlaybackClock(),
+            catalogResolver: resolver);
+
+        var pending = await runtime.SnapshotAsync();
+
+        Assert.Null(pending.Document);
+        Assert.Equal(LyricsResolutionStatus.VerifyingCatalog, pending.Resolution.Status);
+
+        resolver.Complete(["AP_222"]);
+        RuntimeSnapshot resolved = pending;
+        for (var attempt = 0; attempt < 10 && resolved.Document is null; attempt++)
+        {
+            await Task.Yield();
+            resolved = await runtime.SnapshotAsync();
+        }
+
+        Assert.Equal("AP_222", resolved.Document!.LyricsId);
+        Assert.Equal(LyricsResolutionSource.CatalogVerifiedCache, resolved.Resolution.Source);
     }
 
     [Fact]
@@ -386,7 +484,7 @@ public sealed class LyricsRuntimeServiceTests
     }
 
     [Fact]
-    public async Task SnapshotAsync_AcceptsClearWinnerCandidateWhenCatalogLookupFails()
+    public async Task SnapshotAsync_HoldsBackDurationOnlyClearWinnerWhenCatalogLookupFails()
     {
         var best = BuildDocument("AP_111", 181.0, "clear winner");
         var farBehind = BuildDocument("AP_222", 185.0, "far behind");
@@ -403,12 +501,9 @@ public sealed class LyricsRuntimeServiceTests
 
         var snapshot = await runtime.SnapshotAsync();
 
-        Assert.NotNull(snapshot.Document);
-        Assert.Equal("AP_111", snapshot.Document.LyricsId);
-        Assert.Equal(LyricsResolutionStatus.Resolved, snapshot.Resolution.Status);
-        Assert.Equal(LyricsResolutionConfidence.Medium, snapshot.Resolution.Confidence);
-        Assert.Equal(LyricsResolutionSource.AppleMusicCache, snapshot.Resolution.Source);
-        Assert.Contains("significant score lead", snapshot.Resolution.Summary, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(snapshot.Document);
+        Assert.Equal(LyricsResolutionStatus.Unavailable, snapshot.Resolution.Status);
+        Assert.Equal(LyricsResolutionConfidence.Low, snapshot.Resolution.Confidence);
     }
 
     [Fact]
@@ -526,7 +621,8 @@ public sealed class LyricsRuntimeServiceTests
     {
         var only = BuildDocument("AP_111", 180.2, "the only candidate");
 
-        var lyricsProvider = new CandidateLyricsProvider([new LyricsMatch(only, 100, 0.2)]);
+        var lyricsProvider = new CandidateLyricsProvider(
+            [new LyricsMatch(only, 100, 0.2, HasContentMatch: true)]);
         var playerProvider = new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true));
         var resolver = new StubCatalogResolver(["AP_999"]);
 
@@ -550,7 +646,8 @@ public sealed class LyricsRuntimeServiceTests
         // zero accepts any file at all.
         var document = BuildDocument("AP_111", 180.0, "some line");
 
-        var lyricsProvider = new CandidateLyricsProvider([new LyricsMatch(document, 100, 0.0)]);
+        var lyricsProvider = new CandidateLyricsProvider(
+            [new LyricsMatch(document, 100, 0.0, HasContentMatch: true)]);
         var playerProvider = new SequencePlayerProvider(
         [
             new PlayerState("Song", "Artist", "Album", 0.0, 0.0, true),
@@ -629,7 +726,7 @@ public sealed class LyricsRuntimeServiceTests
         var provider = new StubExternalProvider(BuildDocument("LRCLIB_9", 180.0, "from lrclib"));
 
         var runtime = new LyricsRuntimeService(
-            new CandidateLyricsProvider([new LyricsMatch(local, 100, 0.2)]),
+            new CandidateLyricsProvider([new LyricsMatch(local, 100, 0.2, HasContentMatch: true)]),
             new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true)),
             new LyricsSynchronizer(),
             new PlaybackClock())
@@ -719,7 +816,7 @@ public sealed class LyricsRuntimeServiceTests
     {
         var local = BuildDocument("AP_111", 180.2, "local line");
         var runtime = new LyricsRuntimeService(
-            new CandidateLyricsProvider([new LyricsMatch(local, 100, 0.2)]),
+            new CandidateLyricsProvider([new LyricsMatch(local, 100, 0.2, HasContentMatch: true)]),
             new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true)),
             new LyricsSynchronizer(),
             new PlaybackClock());
@@ -929,6 +1026,26 @@ public sealed class LyricsRuntimeServiceTests
         Assert.Equal(2, provider.CallCount);
     }
 
+    [Fact]
+    public async Task DisposeAsync_CancelsAndObservesBackgroundFetches()
+    {
+        var provider = new CancellableExternalProvider();
+        var runtime = new LyricsRuntimeService(
+            new CandidateLyricsProvider([]),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true)),
+            new LyricsSynchronizer(),
+            new PlaybackClock())
+        {
+            ExternalLyricsProviders = [provider],
+        };
+
+        _ = await runtime.SnapshotAsync();
+        await runtime.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+
+        await provider.FirstAttemptCanceled.WaitAsync(TimeSpan.FromSeconds(2));
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => runtime.SnapshotAsync());
+    }
+
     private static LyricsDocument BuildDocument(
         string lyricsId,
         double durationSeconds,
@@ -1106,6 +1223,24 @@ public sealed class LyricsRuntimeServiceTests
         {
             CallCount++;
             return Task.FromResult(_lyricsIds);
+        }
+    }
+
+    private sealed class PendingCatalogResolver : ICatalogSongResolver
+    {
+        private readonly TaskCompletionSource<IReadOnlyList<string>> _result =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<IReadOnlyList<string>> ResolveLyricsIdCandidatesAsync(
+            PlayerState player,
+            CancellationToken cancellationToken = default)
+        {
+            return _result.Task.WaitAsync(cancellationToken);
+        }
+
+        public void Complete(IReadOnlyList<string> lyricsIds)
+        {
+            _result.TrySetResult(lyricsIds);
         }
     }
 

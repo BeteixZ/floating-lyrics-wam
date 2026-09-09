@@ -2,13 +2,7 @@ namespace AppleMusicLyrics.Core.Configuration;
 
 public sealed class AppSettings
 {
-    public double LyricsPollInterval { get; set; } = 1.0;
-
     public double PlayerPollInterval { get; set; } = 0.2;
-
-    public double CliRenderInterval { get; set; } = 0.2;
-
-    public double UiRefreshInterval { get; set; } = 0.033;
 
     // Calibrates how far SMTC's reported position lags the audio you actually hear. Since the
     // playback clock now measures the sub-second phase instead of guessing it, this is the only
@@ -22,8 +16,6 @@ public sealed class AppSettings
     // Honour the lyricOffset Apple ships inside a TTML document, which corrects lyric timings for
     // the particular master being played. Only a minority of documents carry one.
     public bool ApplyNativeLyricOffset { get; set; } = true;
-
-    public int PreviewLineCount { get; set; } = 8;
 
     // Other SMTC applications can publish plausible metadata and previously hijacked matching.
     // Keep the fallback opt-in because this application targets Apple Music by default.
@@ -48,6 +40,10 @@ public sealed class AppSettings
     public bool ExternalLyricsEnabled { get; set; } = true;
 
     public double ExternalLyricsTimeoutSeconds { get; set; } = 6.0;
+
+    // Keep completed LRCLIB lookups across app restarts. Disabled by default so users explicitly
+    // choose whether lyric data should be retained on disk.
+    public bool PersistExternalLyricsCache { get; set; }
 
     // Normal mode window position and size
     public int WindowX { get; set; } = 100;
@@ -133,13 +129,9 @@ public sealed class AppSettings
     {
         return new AppSettings
         {
-            LyricsPollInterval = LyricsPollInterval,
             PlayerPollInterval = PlayerPollInterval,
-            CliRenderInterval = CliRenderInterval,
-            UiRefreshInterval = UiRefreshInterval,
             LyricsOffsetSeconds = LyricsOffsetSeconds,
             ApplyNativeLyricOffset = ApplyNativeLyricOffset,
-            PreviewLineCount = PreviewLineCount,
             AllowNonAppleMediaSessions = AllowNonAppleMediaSessions,
             AllowLowConfidenceLyrics = AllowLowConfidenceLyrics,
             CatalogLookupEnabled = CatalogLookupEnabled,
@@ -147,6 +139,7 @@ public sealed class AppSettings
             CatalogLookupTimeoutSeconds = CatalogLookupTimeoutSeconds,
             ExternalLyricsEnabled = ExternalLyricsEnabled,
             ExternalLyricsTimeoutSeconds = ExternalLyricsTimeoutSeconds,
+            PersistExternalLyricsCache = PersistExternalLyricsCache,
             WindowX = WindowX,
             WindowY = WindowY,
             WindowWidth = WindowWidth,

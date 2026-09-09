@@ -4,7 +4,11 @@ VisualStudioVersion = 17.0.31903.59
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AppleMusicLyrics.App", "src\AppleMusicLyrics.App\AppleMusicLyrics.App.csproj", "{ED06C0C5-FB39-4AE9-B316-647BB6710CE9}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AppleMusicLyrics.Application", "src\AppleMusicLyrics.Application\AppleMusicLyrics.Application.csproj", "{C247ADAE-724D-477C-8DE5-56078AD000F5}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AppleMusicLyrics.Core", "src\AppleMusicLyrics.Core\AppleMusicLyrics.Core.csproj", "{43B0829A-6B84-4F54-96ED-2E1C9F059B59}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AppleMusicLyrics.Debugger", "src\AppleMusicLyrics.Debugger\AppleMusicLyrics.Debugger.csproj", "{49931B2D-BD0A-4CF6-B648-EEE7AEA42487}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AppleMusicLyrics.Infrastructure.Windows", "src\AppleMusicLyrics.Infrastructure.Windows\AppleMusicLyrics.Infrastructure.Windows.csproj", "{AFABEFE8-06A2-4EB6-A939-3E882D73D52D}"
 EndProject
@@ -20,10 +24,18 @@ Global
 		{ED06C0C5-FB39-4AE9-B316-647BB6710CE9}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{ED06C0C5-FB39-4AE9-B316-647BB6710CE9}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{ED06C0C5-FB39-4AE9-B316-647BB6710CE9}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C247ADAE-724D-477C-8DE5-56078AD000F5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C247ADAE-724D-477C-8DE5-56078AD000F5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C247ADAE-724D-477C-8DE5-56078AD000F5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C247ADAE-724D-477C-8DE5-56078AD000F5}.Release|Any CPU.Build.0 = Release|Any CPU
 		{43B0829A-6B84-4F54-96ED-2E1C9F059B59}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{43B0829A-6B84-4F54-96ED-2E1C9F059B59}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{43B0829A-6B84-4F54-96ED-2E1C9F059B59}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{43B0829A-6B84-4F54-96ED-2E1C9F059B59}.Release|Any CPU.Build.0 = Release|Any CPU
+		{49931B2D-BD0A-4CF6-B648-EEE7AEA42487}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{49931B2D-BD0A-4CF6-B648-EEE7AEA42487}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{49931B2D-BD0A-4CF6-B648-EEE7AEA42487}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{49931B2D-BD0A-4CF6-B648-EEE7AEA42487}.Release|Any CPU.Build.0 = Release|Any CPU
 		{AFABEFE8-06A2-4EB6-A939-3E882D73D52D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{AFABEFE8-06A2-4EB6-A939-3E882D73D52D}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{AFABEFE8-06A2-4EB6-A939-3E882D73D52D}.Release|Any CPU.ActiveCfg = Release|Any CPU

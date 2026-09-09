@@ -3,9 +3,9 @@ using AppleMusicLyrics.Core.Models;
 namespace AppleMusicLyrics.Core.Matching;
 
 /// <summary>
-/// Shared thresholds for discovering lyric candidates and deciding whether duration alone is
-/// strong enough evidence to display one. Candidate discovery stays deliberately broad; display
-/// confidence is intentionally strict.
+/// Shared thresholds for discovering lyric candidates and deciding whether duration plus
+/// independent evidence are strong enough to display one. Candidate discovery stays deliberately
+/// broad; display confidence is intentionally strict.
 /// </summary>
 public static class LyricsMatchPolicy
 {
@@ -34,6 +34,7 @@ public static class LyricsMatchPolicy
     public static bool IsConfidentSingle(IReadOnlyList<LyricsMatch> plausibleCandidates)
     {
         return plausibleCandidates.Count == 1
+            && plausibleCandidates[0].HasContentMatch
             && plausibleCandidates[0].DurationDelta <= ConfidentDurationDeltaSeconds;
     }
 
@@ -62,7 +63,8 @@ public static class LyricsMatchPolicy
 
         var best = plausibleCandidates[0];
         var second = plausibleCandidates[1];
-        return best.Score - second.Score >= ClearWinnerScoreMargin
+        return best.HasContentMatch
+            && best.Score - second.Score >= ClearWinnerScoreMargin
             && best.DurationDelta <= MediumDurationDeltaSeconds;
     }
 }
