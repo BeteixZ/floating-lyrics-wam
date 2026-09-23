@@ -1220,6 +1220,10 @@ public partial class MainWindow : Window
         // cursor that is still over the window, and without click-through WPF's own
         // MouseEnter/MouseLeave take over.
         _isHovering = false;
+        if (!_isClosed)
+        {
+            RefreshOverlayOpacity();
+        }
     }
 
     // Samples arrive from a background thread and can still be queued after their tracker stopped.
