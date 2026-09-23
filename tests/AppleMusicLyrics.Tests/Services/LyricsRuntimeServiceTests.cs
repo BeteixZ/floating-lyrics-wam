@@ -885,6 +885,110 @@ public sealed class LyricsRuntimeServiceTests
     }
 
     [Fact]
+    public async Task SnapshotAsync_KeepsReportingTheExternalSourceAcrossLaterLocalRescans()
+    {
+        // Regression: every later local rescan reported its own miss as "Unavailable" while the
+        // external lyrics stayed on screen, which also mislabelled overnight diagnostic records.
+        var time = new ManualTimeProvider();
+        var provider = new StubExternalProvider(BuildDocument("LRCLIB_1", 180.0, "external line"));
+        var localCache = new CandidateLyricsProvider([]);
+        var runtime = new LyricsRuntimeService(
+            localCache,
+            new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true)),
+            new LyricsSynchronizer(),
+            new PlaybackClock(time),
+            timeProvider: time)
+        {
+            ExternalLyricsProviders = [provider],
+        };
+
+        _ = await runtime.SnapshotAsync();
+        await provider.Completed;
+
+        for (var poll = 0; poll < 3; poll++)
+        {
+            var snapshot = await runtime.SnapshotAsync();
+
+            Assert.Equal("LRCLIB_1", snapshot.Document!.LyricsId);
+            Assert.Equal(LyricsResolutionStatus.Resolved, snapshot.Resolution.Status);
+            Assert.Equal(LyricsResolutionSource.ExternalProvider, snapshot.Resolution.Source);
+        }
+
+        Assert.Equal(4, localCache.ScanCount);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_KeepsExternalLyricsBetweenIdleRescans()
+    {
+        // Regression: a result adopted after the match window set "Resolved"; the next poll skipped
+        // the rescan, no longer qualified for the external lookup, and blanked the lyrics.
+        var time = new ManualTimeProvider();
+        var provider = new StubExternalProvider(BuildDocument("LRCLIB_1", 180.0, "external line"));
+        var localCache = new CandidateLyricsProvider([]);
+        var runtime = new LyricsRuntimeService(
+            localCache,
+            new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true)),
+            new LyricsSynchronizer(),
+            new PlaybackClock(time),
+            timeProvider: time)
+        {
+            ExternalLyricsProviders = [provider],
+            MatchWindow = TimeSpan.FromSeconds(1),
+        };
+
+        _ = await runtime.SnapshotAsync();
+        await provider.Completed;
+
+        time.Advance(TimeSpan.FromSeconds(2));
+        var adopted = await runtime.SnapshotAsync();
+        time.Advance(TimeSpan.FromMilliseconds(200));
+        var betweenRescans = await runtime.SnapshotAsync();
+
+        Assert.Equal("LRCLIB_1", adopted.Document!.LyricsId);
+        Assert.Equal("LRCLIB_1", betweenRescans.Document?.LyricsId);
+        Assert.Equal(LyricsResolutionSource.ExternalProvider, betweenRescans.Resolution.Source);
+        Assert.Equal(2, localCache.ScanCount);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_BacksOffIdleRescansButStillFindsALateCacheFile()
+    {
+        var time = new ManualTimeProvider();
+        var localCache = new CandidateLyricsProvider([]);
+        var runtime = new LyricsRuntimeService(
+            localCache,
+            new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true)),
+            new LyricsSynchronizer(),
+            new PlaybackClock(time),
+            timeProvider: time)
+        {
+            MatchWindow = TimeSpan.FromSeconds(1),
+            IdleRescanInterval = TimeSpan.FromSeconds(1),
+            MaxIdleRescanInterval = TimeSpan.FromSeconds(4),
+        };
+
+        // 200 ms polls for 20 s. Every poll inside the match window scans (t = 0 to 1.0, six
+        // scans); the settled misses after it back off to t = 2, 4, 8, 12, 16 and 20.
+        for (var poll = 0; poll <= 100; poll++)
+        {
+            _ = await runtime.SnapshotAsync();
+            time.Advance(TimeSpan.FromMilliseconds(200));
+        }
+
+        Assert.Equal(12, localCache.ScanCount);
+
+        localCache.Candidates = [new LyricsMatch(BuildDocument("AP_late", 180.0, "late line"), 100, 0.0, HasContentMatch: true)];
+        LyricsDocument? found = null;
+        for (var poll = 0; poll < 25 && found is null; poll++)
+        {
+            found = (await runtime.SnapshotAsync()).Document;
+            time.Advance(TimeSpan.FromMilliseconds(200));
+        }
+
+        Assert.Equal("AP_late", found?.LyricsId);
+    }
+
+    [Fact]
     public async Task SnapshotAsync_ChangesTrackIdentityWhenMetadataChanges()
     {
         var document = BuildDocument("AP_111", 180.0, "line");
@@ -1089,6 +1193,8 @@ public sealed class LyricsRuntimeServiceTests
 
         public IReadOnlyList<LyricsMatch> Candidates { get; set; }
 
+        public int ScanCount { get; private set; }
+
         public Task<LyricsDocument?> GetLatestLyricsAsync(CancellationToken cancellationToken = default)
         {
             return Task.FromResult(Candidates.Count > 0 ? Candidates[0].Document : null);
@@ -1098,6 +1204,7 @@ public sealed class LyricsRuntimeServiceTests
             PlayerState player,
             CancellationToken cancellationToken = default)
         {
+            ScanCount++;
             return Task.FromResult(Candidates);
         }
     }
@@ -1265,14 +1372,18 @@ public sealed class LyricsRuntimeServiceTests
     private sealed class ManualTimeProvider : TimeProvider
     {
         private long _timestamp;
+        private DateTimeOffset _utcNow = DateTimeOffset.UnixEpoch;
 
         public override long TimestampFrequency => 1_000_000;
 
         public override long GetTimestamp() => _timestamp;
 
+        public override DateTimeOffset GetUtcNow() => _utcNow;
+
         public void Advance(TimeSpan amount)
         {
             _timestamp += (long)(amount.TotalSeconds * TimestampFrequency);
+            _utcNow += amount;
         }
     }
 
