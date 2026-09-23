@@ -284,11 +284,15 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
         }
 
         // The duration arriving (or correcting itself) after the title means the input we matched
-        // against has changed — reopen the window and decide again.
+        // against has changed — reopen the window and decide again. Clearing the matched duration
+        // makes this fire once per change; otherwise every later poll would reset the lookups
+        // again and a catalog or external answer for the corrected duration could never land.
         if (_matchedAgainstDuration > 0 && Math.Abs(player.Duration - _matchedAgainstDuration) > 1.0)
         {
             _currentDocument = null;
+            _matchedAgainstDuration = 0;
             ResetCatalogLookup();
+            CancelExternalFetch();
             _sessionChangedAt = _timeProvider.GetUtcNow();
             _unproductiveIdleRescans = 0;
             _resolution = CreateResolution(

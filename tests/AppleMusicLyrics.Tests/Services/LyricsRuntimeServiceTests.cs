@@ -989,6 +989,49 @@ public sealed class LyricsRuntimeServiceTests
     }
 
     [Fact]
+    public async Task SnapshotAsync_ReopensMatchingOnceWhenTheDurationCorrectsItself()
+    {
+        // Regression: the matched duration was never cleared, so once it disagreed with the player
+        // every poll reset the lookups and reopened the match window, rescanning the cache on every
+        // poll and cancelling any lookup for the corrected duration before it could land.
+        var time = new ManualTimeProvider();
+        var localCache = new CandidateLyricsProvider(
+            [new LyricsMatch(BuildDocument("AP_1", 180.0, "local line"), 100, 0.0, HasContentMatch: true)]);
+        var provider = new StubExternalProvider(BuildDocument("LRCLIB_1", 200.0, "external line"));
+        var runtime = new LyricsRuntimeService(
+            localCache,
+            new SequencePlayerProvider(
+            [
+                new PlayerState("Song", "Artist", "Album", 1.0, 180.0, true),
+                new PlayerState("Song", "Artist", "Album", 1.0, 200.0, true),
+            ]),
+            new LyricsSynchronizer(),
+            new PlaybackClock(time),
+            timeProvider: time)
+        {
+            ExternalLyricsProviders = [provider],
+            MatchWindow = TimeSpan.FromSeconds(1),
+        };
+
+        var matched = await runtime.SnapshotAsync();
+        Assert.Equal("AP_1", matched.Document!.LyricsId);
+
+        localCache.Candidates = [];
+        RuntimeSnapshot? last = null;
+        for (var poll = 0; poll < 15; poll++)
+        {
+            time.Advance(TimeSpan.FromMilliseconds(200));
+            last = await runtime.SnapshotAsync();
+        }
+
+        // One scan for the original match, one per poll inside the reopened window (t = 0.2 to
+        // 1.2), then a single idle rescan at t = 2.2.
+        Assert.Equal(8, localCache.ScanCount);
+        Assert.Equal(1, provider.CallCount);
+        Assert.Equal("LRCLIB_1", last!.Document?.LyricsId);
+    }
+
+    [Fact]
     public async Task SnapshotAsync_ChangesTrackIdentityWhenMetadataChanges()
     {
         var document = BuildDocument("AP_111", 180.0, "line");
