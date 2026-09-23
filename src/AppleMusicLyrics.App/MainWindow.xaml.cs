@@ -57,6 +57,7 @@ public partial class MainWindow : Window
     private RuntimeSnapshot? _pendingFrameSnapshot;
     private bool _frameSnapshotApplyScheduled;
     private readonly VisualFrameStatistics _visualFrameStatistics = new();
+    private bool _isRenderingSubscribed;
     private bool _isApplyingPureModeAutoSize;
     private bool _isApplyingWindowPlacement;
     private readonly WindowMessageCoordinator _windowMessageCoordinator = new();
@@ -113,13 +114,49 @@ public partial class MainWindow : Window
         LocationChanged += OnWindowLocationChanged;
         MouseEnter += OnMouseEnter;
         MouseLeave += OnMouseLeave;
+        IsVisibleChanged += OnIsVisibleChanged;
 
         _runtimePollingController = new RuntimePollingController(
             _runtimeService,
             TimeSpan.FromSeconds(Math.Clamp(_settings.PlayerPollInterval, 0.05, 1.0)),
             ApplyRuntimeSnapshot,
             HandleRuntimeError);
-        CompositionTarget.Rendering += OnRendering;
+    }
+
+    // A hidden overlay needs neither visual frames nor hover sampling.
+    private void OnIsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        UpdateRenderingSubscription();
+        if (_sourceInitialized && !_isClosed)
+        {
+            UpdateMouseTracker(new WindowInteropHelper(this).Handle);
+        }
+    }
+
+    // While any handler is attached, CompositionTarget.Rendering keeps WPF composing at the display
+    // refresh rate even when nothing changes. Attach only while a frame can change the screen: a
+    // bounds animation, lyrics advancing during playback, or the live debug readout.
+    private void UpdateRenderingSubscription()
+    {
+        var needed = !_isClosed
+            && (_isAnimatingHeight
+                || (IsVisible
+                    && ((_hasRuntimeSnapshot && !_runtimeRefreshFailed && _lastPlaying && _lastHasLyrics)
+                        || FooterPanel.Visibility == Visibility.Visible)));
+        if (needed == _isRenderingSubscribed)
+        {
+            return;
+        }
+
+        _isRenderingSubscribed = needed;
+        if (needed)
+        {
+            CompositionTarget.Rendering += OnRendering;
+        }
+        else
+        {
+            CompositionTarget.Rendering -= OnRendering;
+        }
     }
 
     private void OnRendering(object? sender, EventArgs e)
@@ -336,11 +373,13 @@ public partial class MainWindow : Window
         _hasRuntimeSnapshot = true;
         ApplySnapshot(snapshot);
         UpdateOverlayVisibility(snapshot);
+        UpdateRenderingSubscription();
     }
 
     private void HandleRuntimeError(Exception ex)
     {
         _runtimeRefreshFailed = true;
+        UpdateRenderingSubscription();
         _pendingFrameSnapshot = null;
         _lastLyricAnimationKey = null;
         SubtitleText.Text = "Failed to refresh runtime state.";
@@ -594,6 +633,7 @@ public partial class MainWindow : Window
         _heightAnimCenterY = Top + Height / 2.0;
         _heightAnimStopwatch.Restart();
         _isAnimatingHeight = true;
+        UpdateRenderingSubscription();
     }
 
     private const double WindowAnimDurationMs = 240.0;
@@ -634,6 +674,7 @@ public partial class MainWindow : Window
                 _isAnimatingHeight = false;
                 _heightAnimStopwatch.Stop();
                 CaptureCurrentPlacement();
+                UpdateRenderingSubscription();
             }
 
             return;
@@ -646,6 +687,7 @@ public partial class MainWindow : Window
             _isAnimatingHeight = false;
             Height = _targetHeight;
             Top = _heightAnimCenterY - _targetHeight / 2.0;
+            UpdateRenderingSubscription();
             return;
         }
 
@@ -809,6 +851,7 @@ public partial class MainWindow : Window
 
         _isAnimatingHeight = false;
         _heightAnimStopwatch.Stop();
+        UpdateRenderingSubscription();
     }
 
     private void QueuePureModeLayoutRefresh()
@@ -858,7 +901,7 @@ public partial class MainWindow : Window
     private void OnClosed(object? sender, EventArgs e)
     {
         _isClosed = true;
-        CompositionTarget.Rendering -= OnRendering;
+        UpdateRenderingSubscription();
         _runtimePollingController.Dispose();
         StopMouseTracker();
         PersistCurrentSettings();
@@ -1126,6 +1169,7 @@ public partial class MainWindow : Window
             : Width;
         UpdateTextMaxWidths(layoutWidth);
         RefreshLyricLayout();
+        UpdateRenderingSubscription();
     }
 
     private bool IsClickThroughEnabled => _settings.ClickThrough;
@@ -1144,12 +1188,14 @@ public partial class MainWindow : Window
 
     private void UpdateMouseTracker(nint hwnd)
     {
-        if (IsClickThroughEnabled && _settings.HoverFadeEnabled)
+        if (IsClickThroughEnabled && _settings.HoverFadeEnabled && IsVisible)
         {
             if (_mouseTracker is null)
             {
-                _mouseTracker = new MouseTracker();
-                _mouseTracker.MouseOverChanged += OnMouseTrackerOverChanged;
+                var tracker = new MouseTracker();
+                tracker.MouseOverChanged += isOver => Dispatcher.BeginInvoke(
+                    () => OnMouseTrackerOverChanged(tracker, isOver));
+                _mouseTracker = tracker;
             }
 
             _mouseTracker.Start(hwnd);
@@ -1162,21 +1208,30 @@ public partial class MainWindow : Window
 
     private void StopMouseTracker()
     {
-        if (_mouseTracker is not null)
+        if (_mouseTracker is null)
         {
-            _mouseTracker.MouseOverChanged -= OnMouseTrackerOverChanged;
-            _mouseTracker.Dispose();
-            _mouseTracker = null;
+            return;
         }
+
+        _mouseTracker.Dispose();
+        _mouseTracker = null;
+
+        // Nothing reports the cursor leaving once sampling stops. A restarted tracker reports a
+        // cursor that is still over the window, and without click-through WPF's own
+        // MouseEnter/MouseLeave take over.
+        _isHovering = false;
     }
 
-    private void OnMouseTrackerOverChanged(bool isOver)
+    // Samples arrive from a background thread and can still be queued after their tracker stopped.
+    private void OnMouseTrackerOverChanged(MouseTracker source, bool isOver)
     {
-        Dispatcher.Invoke(() =>
+        if (!ReferenceEquals(source, _mouseTracker))
         {
-            _isHovering = isOver;
-            RefreshOverlayOpacity();
-        });
+            return;
+        }
+
+        _isHovering = isOver;
+        RefreshOverlayOpacity();
     }
 
     private void ShellBorder_OnMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -1484,6 +1539,7 @@ public partial class MainWindow : Window
             _pureBoundsAnimTarget = targetRect;
             _heightAnimStopwatch.Restart();
             _isAnimatingHeight = true;
+            UpdateRenderingSubscription();
         }
         finally
         {

@@ -22,6 +22,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
     private string? _sessionKey;
     private DateTimeOffset _sessionChangedAt;
     private DateTimeOffset _lastScanAt = DateTimeOffset.MinValue;
+    private int _unproductiveIdleRescans;
     private double? _lastRawPositionSeconds;
     private double _matchedAgainstDuration;
     private int _catalogAttemptCount;
@@ -99,6 +100,13 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
     /// seconds late — but at this interval rather than on every player poll.
     /// </summary>
     public TimeSpan IdleRescanInterval { get; init; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// Each idle rescan that settles with nothing to show doubles the wait before the next one, up
+    /// to this ceiling. A late cache file is still picked up, but an instrumental or an
+    /// externally-sourced track no longer walks the whole cache directory every second.
+    /// </summary>
+    public TimeSpan MaxIdleRescanInterval { get; init; } = TimeSpan.FromSeconds(8);
 
     public TimeSpan CatalogRetryBaseDelay { get; init; } = TimeSpan.FromSeconds(2);
 
@@ -252,6 +260,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             _matchedAgainstDuration = 0;
             ResetCatalogLookup();
             _lastScanAt = DateTimeOffset.MinValue;
+            _unproductiveIdleRescans = 0;
             CancelExternalFetch();
             _resolution = CreateResolution(
                 LyricsResolutionStatus.SearchingLocal,
@@ -281,6 +290,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             _currentDocument = null;
             ResetCatalogLookup();
             _sessionChangedAt = _timeProvider.GetUtcNow();
+            _unproductiveIdleRescans = 0;
             _resolution = CreateResolution(
                 LyricsResolutionStatus.SearchingLocal,
                 "Track duration changed; re-evaluating lyric candidates.");
@@ -293,7 +303,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             return _currentDocument;
         }
 
-        if (!withinMatchWindow && now - _lastScanAt < IdleRescanInterval)
+        if (!withinMatchWindow && now - _lastScanAt < GetIdleRescanDelay())
         {
             return _currentDocument;
         }
@@ -308,6 +318,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             _resolution = CreateResolution(
                 LyricsResolutionStatus.Unavailable,
                 "No local lyric candidate matched the active track.");
+            RecordUnproductiveRescan(withinMatchWindow);
             return _currentDocument;
         }
 
@@ -319,8 +330,30 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             _matchedAgainstDuration = player.Duration;
             CancelExternalFetch();
         }
+        else
+        {
+            RecordUnproductiveRescan(withinMatchWindow);
+        }
 
         return _currentDocument;
+    }
+
+    private TimeSpan GetIdleRescanDelay()
+    {
+        var delay = GetRetryDelay(IdleRescanInterval, _unproductiveIdleRescans + 1);
+        return delay < MaxIdleRescanInterval ? delay : MaxIdleRescanInterval;
+    }
+
+    // Only a settled miss backs off. While a catalog answer is pending or a retry is scheduled, the
+    // rescan is also what adopts that answer, so it keeps the base cadence.
+    private void RecordUnproductiveRescan(bool withinMatchWindow)
+    {
+        var localLookupSettled = _catalogFetch is null
+            && (_catalogAttemptCount == 0 || _catalogLookupComplete);
+        if (!withinMatchWindow && localLookupSettled && GetIdleRescanDelay() < MaxIdleRescanInterval)
+        {
+            _unproductiveIdleRescans++;
+        }
     }
 
     private async Task<CandidateSelection> SelectCandidateAsync(
@@ -583,6 +616,14 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             return false;
         }
 
+        // An adopted external document belongs to this track until a local selection cancels it.
+        // Idle rescans and a late catalog check report their own interim status, but must not
+        // blank lyrics that are already on screen.
+        if (_externalDocument is not null)
+        {
+            return true;
+        }
+
         // No local candidates means no catalog attempt was needed. Once catalog verification did
         // start, wait for it to reach a terminal answer before allowing a community source to
         // replace an Apple-cache decision.
@@ -608,11 +649,6 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
                 {
                     _externalDocument = result.Document;
                     _externalLookupComplete = true;
-                    _resolution = CarryCandidateEvidence(
-                        LyricsResolutionStatus.Resolved,
-                        LyricsResolutionConfidence.Medium,
-                        LyricsResolutionSource.ExternalProvider,
-                        "An external lyric provider returned usable lyrics.");
                 }
                 else if (result.IsTransientFailure && _externalAttemptCount < MaxExternalAttempts)
                 {
@@ -644,6 +680,21 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
 
         if (_externalDocument is not null)
         {
+            // A later local rescan overwrites the resolution with its own miss; the external
+            // document is still what is displayed, so report it again.
+            if (_resolution is not
+                {
+                    Status: LyricsResolutionStatus.Resolved,
+                    Source: LyricsResolutionSource.ExternalProvider,
+                })
+            {
+                _resolution = CarryCandidateEvidence(
+                    LyricsResolutionStatus.Resolved,
+                    LyricsResolutionConfidence.Medium,
+                    LyricsResolutionSource.ExternalProvider,
+                    "An external lyric provider returned usable lyrics.");
+            }
+
             return _externalDocument;
         }
 

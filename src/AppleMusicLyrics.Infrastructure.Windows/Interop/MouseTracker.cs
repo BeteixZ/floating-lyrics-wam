@@ -2,34 +2,43 @@ using System.Runtime.InteropServices;
 
 namespace AppleMusicLyrics.Infrastructure.Windows.Interop;
 
+/// <summary>
+/// Reports whether the cursor is over a click-through window, which receives no mouse messages of
+/// its own. The cursor is sampled on a background timer rather than through a WH_MOUSE_LL hook: a
+/// low-level hook routes every mouse move on the desktop through the installing UI thread, so any
+/// stall there (layout, GC, a bitmap render) stutters the system cursor, and Windows silently
+/// removes hooks that keep timing out.
+/// </summary>
 public sealed class MouseTracker : IDisposable
 {
-    private const int WhMouseLl = 14;
-    private const int WmMousemove = 0x0200;
+    public static readonly TimeSpan DefaultSampleInterval = TimeSpan.FromMilliseconds(50);
 
-    private nint _hookId = nint.Zero;
-    private readonly User32.HookProc _hookProc;
+    private readonly TimeSpan _sampleInterval;
+    private CancellationTokenSource? _sampling;
     private nint _hwnd;
-    private bool _isMouseOver;
     private Rect _bounds;
     private volatile bool _hasBounds;
 
+    /// <summary>Raised on a background thread whenever the hover state changes.</summary>
     public event Action<bool>? MouseOverChanged;
 
-    public MouseTracker()
+    public MouseTracker(TimeSpan? sampleInterval = null)
     {
-        _hookProc = HookCallback;
+        _sampleInterval = sampleInterval is { } interval && interval > TimeSpan.Zero
+            ? interval
+            : DefaultSampleInterval;
     }
 
     public void Start(nint hwnd)
     {
         _hwnd = hwnd;
-        if (_hookId != nint.Zero)
+        if (_sampling is not null)
         {
             return;
         }
 
-        _hookId = User32.SetWindowsHookEx(WhMouseLl, _hookProc, nint.Zero, 0);
+        _sampling = new CancellationTokenSource();
+        _ = SampleAsync(_sampling.Token);
     }
 
     // Restrict "mouse over" to an explicit screen rect (device pixels) instead of the whole
@@ -47,30 +56,40 @@ public sealed class MouseTracker : IDisposable
 
     public void Stop()
     {
-        if (_hookId == nint.Zero)
+        if (_sampling is null)
         {
             return;
         }
 
-        User32.UnhookWindowsHookEx(_hookId);
-        _hookId = nint.Zero;
+        _sampling.Cancel();
+        _sampling.Dispose();
+        _sampling = null;
     }
 
-    private nint HookCallback(int nCode, nint wParam, nint lParam)
+    private async Task SampleAsync(CancellationToken cancellationToken)
     {
-        if (nCode >= 0 && (int)wParam == WmMousemove)
+        var isMouseOver = false;
+        using var timer = new PeriodicTimer(_sampleInterval);
+        try
         {
-            var structure = Marshal.PtrToStructure<Msllhookstruct>(lParam);
-            var isOver = IsPointInWindow(structure.pt.x, structure.pt.y);
-
-            if (isOver != _isMouseOver)
+            while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
-                _isMouseOver = isOver;
-                MouseOverChanged?.Invoke(isOver);
+                if (!User32.GetCursorPos(out var cursor))
+                {
+                    continue;
+                }
+
+                var isOver = IsPointInWindow(cursor.x, cursor.y);
+                if (isOver != isMouseOver)
+                {
+                    isMouseOver = isOver;
+                    MouseOverChanged?.Invoke(isOver);
+                }
             }
         }
-
-        return User32.CallNextHookEx(_hookId, nCode, wParam, lParam);
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
     }
 
     private bool IsPointInWindow(int x, int y)
@@ -81,12 +100,12 @@ public sealed class MouseTracker : IDisposable
             return x >= b.left && x <= b.right && y >= b.top && y <= b.bottom;
         }
 
-        if (_hwnd == nint.Zero)
+        var hwnd = _hwnd;
+        if (hwnd == nint.Zero || !User32.GetWindowRect(hwnd, out var rect))
         {
             return false;
         }
 
-        _ = User32.GetWindowRect(_hwnd, out var rect);
         return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
     }
 
@@ -97,17 +116,9 @@ public sealed class MouseTracker : IDisposable
 
     private static class User32
     {
-        public delegate nint HookProc(int nCode, nint wParam, nint lParam);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        public static extern nint SetWindowsHookEx(int idHook, HookProc lpfn, nint hMod, uint dwThreadId);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        public static extern bool UnhookWindowsHookEx(nint hhk);
-
         [DllImport("user32.dll")]
-        public static extern nint CallNextHookEx(nint hhk, int nCode, nint wParam, nint lParam);
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetCursorPos(out Point lpPoint);
 
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -121,16 +132,6 @@ public sealed class MouseTracker : IDisposable
         public int top;
         public int right;
         public int bottom;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Msllhookstruct
-    {
-        public Point pt;
-        public uint mouseData;
-        public uint flags;
-        public uint time;
-        public nint dwExtraInfo;
     }
 
     [StructLayout(LayoutKind.Sequential)]
