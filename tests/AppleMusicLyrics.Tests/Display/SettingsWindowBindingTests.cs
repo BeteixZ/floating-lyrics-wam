@@ -59,14 +59,26 @@ public sealed class SettingsWindowBindingTests
     {
         var original = new AppSettings
         {
-            FontFamily = "Arial", ChineseFontFamily = "SimSun", MaxCurrentFontSize = 52,
-            TranslationFontFamily = "KaiTi", TranslationFontSize = 27,
-            WordHighlightEnabled = false, ShowTranslation = true,
-            ExternalLyricsEnabled = false, CatalogLookupEnabled = false,
-            PersistExternalLyricsCache = true, ExternalLyricsCacheMaxMegabytes = 128, AllowNonAppleMediaSessions = true,
-            AllowLowConfidenceLyrics = true, ApplyNativeLyricOffset = false,
-            ShowDebugPanel = true, PureMode = false, ClickThrough = false,
-            HoverFadeEnabled = false, HoverFadeDuration = 0.45, BackgroundAlpha = 96,
+            FontFamily = "Arial",
+            ChineseFontFamily = "SimSun",
+            MaxCurrentFontSize = 52,
+            TranslationFontFamily = "KaiTi",
+            TranslationFontSize = 27,
+            WordHighlightEnabled = false,
+            ShowTranslation = true,
+            ExternalLyricsEnabled = false,
+            CatalogLookupEnabled = false,
+            PersistExternalLyricsCache = true,
+            ExternalLyricsCacheMaxMegabytes = 128,
+            AllowNonAppleMediaSessions = true,
+            AllowLowConfidenceLyrics = true,
+            ApplyNativeLyricOffset = false,
+            ShowDebugPanel = true,
+            PureMode = false,
+            ClickThrough = false,
+            HoverFadeEnabled = false,
+            HoverFadeDuration = 0.45,
+            BackgroundAlpha = 96,
         };
         AppSettings? applied = null;
         var window = new SettingsWindow(original, settings => applied = settings);
@@ -168,8 +180,11 @@ public sealed class SettingsWindowBindingTests
     {
         var original = new AppSettings
         {
-            FontFamily = "Arial", ChineseFontFamily = "Microsoft YaHei UI", MaxCurrentFontSize = 38,
-            TranslationFontFamily = "SimSun", TranslationFontSize = 24,
+            FontFamily = "Arial",
+            ChineseFontFamily = "Microsoft YaHei UI",
+            MaxCurrentFontSize = 38,
+            TranslationFontFamily = "SimSun",
+            TranslationFontSize = 24,
         };
         AppSettings? applied = null;
         var window = new SettingsWindow(original, settings => applied = settings);
@@ -686,7 +701,8 @@ public sealed class SettingsWindowBindingTests
             try { action(); }
             catch (Exception error) { failure = error; }
             finally { LocalizationManager.Instance.SetLanguage(language); }
-        }) { IsBackground = true };
+        })
+        { IsBackground = true };
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
         if (!thread.Join(TimeSpan.FromSeconds(30))) throw new TimeoutException("Settings bindings did not finish on the STA thread.");

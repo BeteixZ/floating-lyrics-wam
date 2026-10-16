@@ -114,8 +114,10 @@ public sealed class IniSettingsStoreTests : IDisposable
         var store = new IniSettingsStore(path);
         store.Save(new AppSettings
         {
-            FontFamily = "Optima", ChineseFontFamily = "SimSun",
-            TranslationFontFamily = "DengXian", TranslationFontSize = 27.5,
+            FontFamily = "Optima",
+            ChineseFontFamily = "SimSun",
+            TranslationFontFamily = "DengXian",
+            TranslationFontSize = 27.5,
         });
         var loaded = store.Load();
         var clone = loaded.Clone();

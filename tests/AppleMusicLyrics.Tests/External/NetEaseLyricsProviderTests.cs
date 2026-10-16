@@ -165,9 +165,14 @@ public sealed class NetEaseLyricsProviderTests
     public async Task FetchAsync_MatchesFeaturedTitleAndPreservesTheSuppliedTranslation()
     {
         var player = new PlayerState("One and Only (feat. Twista)", "Mariah Carey", "The Emancipation Of Mimi", 0, 194, true);
-        var search = Search(new { id = 42, name = "One And Only", duration = 194706,
+        var search = Search(new
+        {
+            id = 42,
+            name = "One And Only",
+            duration = 194706,
             artists = new[] { new { name = "Mariah Carey" }, new { name = "Twista" } },
-            album = new { name = "The Emancipation of Mimi" } });
+            album = new { name = "The Emancipation of Mimi" }
+        });
         var handler = new RoutedHandler(search, _ => Lyrics(yrc: "[1000,1000](1000,1000,0)Synthetic",
             ytlrc: "[00:01.00]合成译文"));
         using var provider = new NetEaseLyricsProvider(messageHandler: handler);
@@ -460,8 +465,12 @@ public sealed class NetEaseLyricsProviderTests
     private static string Lyrics(string? yrc = null, string? lrc = null, string? klyric = null, string? ytlrc = null, string? tlyric = null) =>
         JsonSerializer.Serialize(new
         {
-            code = 200, yrc = new { lyric = yrc }, lrc = new { lyric = lrc }, klyric = new { lyric = klyric },
-            ytlrc = new { lyric = ytlrc }, tlyric = new { lyric = tlyric },
+            code = 200,
+            yrc = new { lyric = yrc },
+            lrc = new { lyric = lrc },
+            klyric = new { lyric = klyric },
+            ytlrc = new { lyric = ytlrc },
+            tlyric = new { lyric = tlyric },
         });
 
     private static JsonDocument DecryptPayload(string formBody)

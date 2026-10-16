@@ -9,6 +9,7 @@
 - Follows the Windows display language by default, includes English and Simplified/Traditional Chinese, and supports drop-in JSON language packs.
 - Adds a shared, optional lyric cache that retains translations and word timing, with a configurable size limit, current usage, and one-click clearing.
 - Replaces the large overlay debug panel with a compact optional summary; full query, translation, timing, and failure details open in a separate diagnostics window.
+- Reduces idle rendering and cursor-monitoring overhead, backs off repeated empty cache scans, and reopens matching once when the player corrects a track's duration.
 - Preserves existing settings and includes LyricsKit attribution, the MPL-2.0 license, and the corresponding adapted provider sources in the release package.
 
 Requirements remain Windows 10 version 19041 or later and the x64 .NET 10 Desktop Runtime. Exit the previous tray instance before launching the new executable. Online lyric interfaces may change; translations and word timing depend on the selected source.

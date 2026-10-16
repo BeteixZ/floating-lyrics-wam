@@ -262,7 +262,8 @@ public sealed class KaraokeTextControllerTests
         {
             try { action(); }
             catch (Exception error) { failure = error; }
-        }) { IsBackground = true };
+        })
+        { IsBackground = true };
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
         if (!thread.Join(TimeSpan.FromSeconds(15)))

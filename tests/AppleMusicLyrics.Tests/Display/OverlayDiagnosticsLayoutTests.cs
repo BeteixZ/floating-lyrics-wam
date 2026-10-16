@@ -22,8 +22,13 @@ public sealed class OverlayDiagnosticsLayoutTests
     {
         var settings = new AppSettings
         {
-            PureMode = pureMode, ShowDebugPanel = debug, HoverFadeEnabled = true,
-            HoverFadeMinOpacity = 0.05, OverlayOpacity = 0.85, AutoHideNoLyrics = false, FadeWhenPaused = false,
+            PureMode = pureMode,
+            ShowDebugPanel = debug,
+            HoverFadeEnabled = true,
+            HoverFadeMinOpacity = 0.05,
+            OverlayOpacity = 0.85,
+            AutoHideNoLyrics = false,
+            FadeWhenPaused = false,
         };
         Assert.Equal(expected, OverlayDiagnosticsLayout.ResolveOpacity(settings, true, false, true, false));
         Assert.True(settings.HoverFadeEnabled);
@@ -134,11 +139,11 @@ public sealed class OverlayDiagnosticsLayoutTests
         bitmap.CopyPixels(pixels, bitmap.PixelWidth * 4, 0);
         var count = 0;
         for (var y = Math.Max(0, (int)area.Top); y < Math.Min(bitmap.PixelHeight, (int)Math.Ceiling(area.Bottom)); y++)
-        for (var x = Math.Max(0, (int)area.Left); x < Math.Min(bitmap.PixelWidth, (int)Math.Ceiling(area.Right)); x++)
-        {
-            var offset = (y * bitmap.PixelWidth + x) * 4;
-            if (pixels[offset] > 100 && pixels[offset + 1] > 100 && pixels[offset + 2] > 100) count++;
-        }
+            for (var x = Math.Max(0, (int)area.Left); x < Math.Min(bitmap.PixelWidth, (int)Math.Ceiling(area.Right)); x++)
+            {
+                var offset = (y * bitmap.PixelWidth + x) * 4;
+                if (pixels[offset] > 100 && pixels[offset + 1] > 100 && pixels[offset + 2] > 100) count++;
+            }
         return count;
     }
 
@@ -162,11 +167,11 @@ public sealed class OverlayDiagnosticsLayoutTests
             foreach (var attribute in window.Attributes().Where(attribute => attribute.IsNamespaceDeclaration))
                 grid.SetAttributeValue(attribute.Name, attribute.Value);
             foreach (var element in grid.DescendantsAndSelf())
-            foreach (var attribute in element.Attributes().ToArray())
-            {
-                if (attribute.Name.LocalName is "PreviewMouseLeftButtonDown" or "MouseLeftButtonDown") attribute.Remove();
-                else if (attribute.Value.StartsWith("{loc:Loc ", StringComparison.Ordinal)) attribute.Value = string.Empty;
-            }
+                foreach (var attribute in element.Attributes().ToArray())
+                {
+                    if (attribute.Name.LocalName is "PreviewMouseLeftButtonDown" or "MouseLeftButtonDown") attribute.Remove();
+                    else if (attribute.Value.StartsWith("{loc:Loc ", StringComparison.Ordinal)) attribute.Value = string.Empty;
+                }
             // Load only the real visual tree, without MainWindow's player/network composition.
             Root = (Grid)XamlReader.Parse(grid.ToString());
             Footer = Find<Grid>("FooterPanel");
@@ -221,7 +226,8 @@ public sealed class OverlayDiagnosticsLayoutTests
         {
             try { action(); }
             catch (Exception error) { failure = error; }
-        }) { IsBackground = true };
+        })
+        { IsBackground = true };
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();
         if (!thread.Join(TimeSpan.FromSeconds(20))) throw new TimeoutException("Compact status layout did not finish on its STA thread.");
