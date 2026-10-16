@@ -94,6 +94,12 @@ public sealed class FontFamilyResolverTests
     [Fact]
     public void Resolve_ExistingOptimaApiLoadsEmbeddedFontFromAppAssembly() => OnSta(() =>
     {
+        // Normal WPF startup initializes the application resource package. This isolated test
+        // must do the same without relying on another UI test to initialize it first.
+        using var resource = System.Windows.Application.GetResourceStream(
+            new Uri("/AppleMusicLyrics.App;component/Fonts/Optima.ttf", UriKind.Relative))?.Stream;
+        Assert.NotNull(resource);
+        Assert.True(resource.Length > 0);
         var run = FindRun(GlyphRuns(FontFamilyResolver.Resolve("Optima"), "Ag"), "A");
         Assert.Equal("pack", run.GlyphTypeface.FontUri.Scheme);
         Assert.Contains("AppleMusicLyrics.App;component/Fonts/Optima.ttf", run.GlyphTypeface.FontUri.OriginalString,
