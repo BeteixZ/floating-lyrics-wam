@@ -13,6 +13,7 @@ using AppleMusicLyrics.App.Services;
 using AppleMusicLyrics.App.Controllers;
 using AppleMusicLyrics.App.Composition;
 using AppleMusicLyrics.App.Presentation;
+using AppleMusicLyrics.App.Localization;
 using AppleMusicLyrics.Application.Services;
 using AppleMusicLyrics.Core.Abstractions;
 using AppleMusicLyrics.Core.Configuration;
@@ -39,16 +40,22 @@ public partial class MainWindow : Window
     private readonly LyricsRuntimeService _runtimeService;
     private readonly GlobalMediaSessionProvider _playerProvider;
     private readonly ITunesCatalogSongResolver? _catalogResolver;
-    private readonly LrcLibLyricsProvider? _lrcLibProvider;
+    private readonly IReadOnlyList<IExternalLyricsProvider> _externalLyricsProviders;
+    private readonly ExternalLyricsCache? _externalLyricsCache;
     private readonly RuntimePollingController _runtimePollingController;
     private readonly AppSettings _settings;
     private readonly IniSettingsStore _settingsStore;
     private readonly WindowInteropService _windowInteropService;
     private readonly WindowPlacementCoordinator _windowPlacementCoordinator;
     private readonly TrayIconController _trayIconController;
+    private DiagnosticsWindow? _diagnosticsWindow;
+    private KaraokeTextController? _karaokeTextController;
+    private LyricsLine? _displayedLyricLine;
+    private LyricsDocument? _displayedLyricDocument;
     private bool _sourceInitialized;
     private bool _isClosed;
     private bool _runtimeRefreshFailed;
+    private Exception? _lastRuntimeError;
     private bool _hasRuntimeSnapshot;
     private bool _hasFrameLyricState;
     private LyricsDocument? _lastFrameDocument;
@@ -56,6 +63,7 @@ public partial class MainWindow : Window
     private bool _lastFramePlaying;
     private RuntimeSnapshot? _pendingFrameSnapshot;
     private bool _frameSnapshotApplyScheduled;
+    private bool _diagnosticsLayoutRefreshScheduled;
     private readonly VisualFrameStatistics _visualFrameStatistics = new();
     private bool _isApplyingPureModeAutoSize;
     private bool _isApplyingWindowPlacement;
@@ -70,6 +78,8 @@ public partial class MainWindow : Window
     private MouseTracker? _mouseTracker;
     private string? _currentPreviousText;
     private string? _currentNextText;
+    // Rich Inlines do not populate TextBlock.Text; sizing must retain the displayed source text.
+    private string _currentLyricText = "Current lyric line";
     private double _targetHeight;
     private double _heightAnimFrom;
     private System.Diagnostics.Stopwatch _heightAnimStopwatch = new();
@@ -83,14 +93,19 @@ public partial class MainWindow : Window
         var composition = AppCompositionRoot.Create();
         _settingsStore = composition.SettingsStore;
         _settings = composition.Settings;
+        _externalLyricsCache = composition.ExternalLyricsCache;
+        LocalizationManager.Instance.SetLanguage(_settings.UiLanguage);
+        _currentLyricText = LocalizationManager.Instance.Text("Lyrics.PlaceholderWaiting");
         _playerProvider = composition.PlayerProvider;
         _catalogResolver = composition.CatalogResolver;
-        _lrcLibProvider = composition.ExternalLyricsProvider;
+        _externalLyricsProviders = composition.ExternalLyricsProviders;
         _runtimeService = composition.RuntimeService;
         _windowInteropService = new WindowInteropService();
         _windowPlacementCoordinator = new WindowPlacementCoordinator();
 
         InitializeComponent();
+        HeaderPanel.SizeChanged += OnDiagnosticContentSizeChanged;
+        _karaokeTextController = new KaraokeTextController(CurrentLyricText);
         Icon = LoadAppIcon();
         _trayIconController = new TrayIconController(
             Dispatcher,
@@ -100,6 +115,7 @@ public partial class MainWindow : Window
             () => SetSingleLineMode(!_settings.SingleLineMode),
             () => SetTwoLineMode(!_settings.TwoLineMode),
             () => SetDebugPanelVisibility(!_settings.ShowDebugPanel),
+            OpenDiagnosticsWindow,
             OpenSettingsWindow,
             Close);
         ApplyWindowBounds();
@@ -120,6 +136,7 @@ public partial class MainWindow : Window
             ApplyRuntimeSnapshot,
             HandleRuntimeError);
         CompositionTarget.Rendering += OnRendering;
+        LocalizationManager.Instance.LanguageChanged += OnUiLanguageChanged;
     }
 
     private void OnRendering(object? sender, EventArgs e)
@@ -133,7 +150,7 @@ public partial class MainWindow : Window
         {
             if (publishedFrameRate)
             {
-                TimingText.Text = $"Playback clock refresh failed | {FormatRenderRate()} | {FormatPollRate()}";
+                TimingText.Text = $"{LocalizationManager.Instance.Text("Runtime.RefreshFailed")} | {FormatRenderRate()} | {FormatPollRate()}";
             }
 
             return;
@@ -146,6 +163,7 @@ public partial class MainWindow : Window
 
         var snapshot = _runtimeService.GetFrameSnapshot();
         QueueFrameSnapshot(snapshot);
+        UpdateWordHighlight(snapshot);
         if (publishedFrameRate)
         {
             UpdateTimingText(snapshot);
@@ -156,6 +174,7 @@ public partial class MainWindow : Window
     {
         ApplyAdaptiveFontSizes();
         ApplyClickThrough();
+        QueueDiagnosticsLayoutRefresh();
 
         // For PureMode, calculate initial size based on placeholder content
         if (_settings.PureMode)
@@ -333,24 +352,56 @@ public partial class MainWindow : Window
     private void ApplyRuntimeSnapshot(RuntimeSnapshot snapshot)
     {
         _runtimeRefreshFailed = false;
+        _lastRuntimeError = null;
         _hasRuntimeSnapshot = true;
         ApplySnapshot(snapshot);
         UpdateOverlayVisibility(snapshot);
+        UpdateDiagnosticsWindow(snapshot);
     }
 
     private void HandleRuntimeError(Exception ex)
     {
         _runtimeRefreshFailed = true;
+        _lastRuntimeError = ex;
         _pendingFrameSnapshot = null;
         _lastLyricAnimationKey = null;
-        SubtitleText.Text = "Failed to refresh runtime state.";
-        PlayerText.Text = "Check Apple Music and media session availability.";
-        TimingText.Text = $"Playback clock refresh failed | {FormatRenderRate()} | {FormatPollRate()}";
-        StatusText.Text = "Runtime error";
-        PathText.Text = ex.Message;
-        CurrentLyricText.Text = "Refresh failed.";
+        var text = LocalizationManager.Instance;
+        SubtitleText.Text = text.Text("Runtime.RefreshFailed");
+        PlayerText.Text = text.Text("Runtime.CheckPlayer");
+        TimingText.Text = $"{text.Text("Runtime.RefreshFailed")} | {FormatRenderRate()} | {FormatPollRate()}";
+        StatusText.Text = text.Text("Runtime.Error");
+        PathText.Text = text.Text("Runtime.RefreshFailed");
+        _currentLyricText = text.Text("Runtime.RefreshFailedShort");
+        _karaokeTextController?.SetLine(_currentLyricText, null, false);
+        _displayedLyricLine = null;
+        _displayedLyricDocument = null;
+        SetTranslation(null);
         PreviousLyricText.Text = string.Empty;
-        NextLyricText.Text = "Check Apple Music, cache state, or media session access.";
+        NextLyricText.Text = text.Text("Runtime.CheckCache");
+        QueueDiagnosticsLayoutRefresh();
+        UpdateDiagnosticsWindow();
+    }
+
+    private void OnUiLanguageChanged(object? sender, EventArgs e)
+    {
+        if (_isClosed) return;
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(() => OnUiLanguageChanged(sender, e));
+            return;
+        }
+
+        if (_runtimeRefreshFailed && _lastRuntimeError is { } error)
+        {
+            HandleRuntimeError(error);
+            UpdateTrayState();
+            return;
+        }
+
+        // Refresh status text even while the current track is paused on the same line.
+        var snapshot = _runtimeService.GetFrameSnapshot();
+        ApplySnapshot(snapshot);
+        UpdateDiagnosticsWindow(snapshot);
     }
 
     private void ApplySnapshot(RuntimeSnapshot snapshot)
@@ -427,44 +478,91 @@ public partial class MainWindow : Window
     private void UpdatePlayerSection(RuntimeSnapshot snapshot)
     {
         var presentation = OverlaySnapshotPresenter.CreatePlayer(snapshot);
+        var changed = SubtitleText.Text != presentation.Subtitle || PlayerText.Text != presentation.PlayerText;
         Title = presentation.WindowTitle;
         SubtitleText.Text = presentation.Subtitle;
         PlayerText.Text = presentation.PlayerText;
         UpdateTimingText(snapshot);
+        if (changed) QueueDiagnosticsLayoutRefresh();
     }
 
     private void UpdateTimingText(RuntimeSnapshot snapshot)
+        => TimingText.Text = FormatTimingText(snapshot);
+
+    private string FormatTimingText(RuntimeSnapshot snapshot)
     {
         var clockText = snapshot.Player is null
-            ? "No playback clock data"
-            : $"raw {TimeParser.FormatTimestamp(snapshot.RawPositionSeconds ?? 0)} | est {TimeParser.FormatTimestamp(snapshot.EstimatedPositionSeconds ?? 0)}";
-        TimingText.Text = $"{clockText} | {FormatRenderRate()} | {FormatPollRate()}";
+            ? LocalizationManager.Instance.Text("Runtime.NoClock")
+            : LocalizationManager.Instance.Format("Runtime.Clock",
+                TimeParser.FormatTimestamp(snapshot.RawPositionSeconds ?? 0),
+                TimeParser.FormatTimestamp(snapshot.EstimatedPositionSeconds ?? 0));
+        return $"{clockText} | {FormatRenderRate()} | {FormatPollRate()}";
     }
 
     private string FormatRenderRate()
     {
         return _visualFrameStatistics.FramesPerSecond is double framesPerSecond
-            ? $"render {framesPerSecond.ToString("F1", CultureInfo.InvariantCulture)} fps"
-            : "render measuring";
+            ? LocalizationManager.Instance.Format("Runtime.RenderFps", framesPerSecond.ToString("F1", CultureInfo.InvariantCulture))
+            : LocalizationManager.Instance.Text("Runtime.RenderMeasuring");
     }
 
     private string FormatPollRate()
     {
         var pollsPerSecond = 1.0 / Math.Max(0.001, _runtimePollingController.Interval.TotalSeconds);
-        return $"poll {pollsPerSecond.ToString("F1", CultureInfo.InvariantCulture)} Hz";
+        return LocalizationManager.Instance.Format("Runtime.PollHz", pollsPerSecond.ToString("F1", CultureInfo.InvariantCulture));
     }
 
     private void UpdateLyricSection(RuntimeSnapshot snapshot)
     {
-        var presentation = OverlaySnapshotPresenter.CreateLyrics(snapshot);
+        var presentation = OverlaySnapshotPresenter.CreateLyrics(snapshot, showTranslation: _settings.ShowTranslation);
+        var summary = presentation.DebugSummaryText ?? string.Empty;
+        var diagnosticsChanged = StatusText.Text != presentation.StatusText || PathText.Text != summary;
         StatusText.Text = presentation.StatusText;
-        PathText.Text = presentation.PathText;
+        PathText.Text = summary;
         SetLyrics(
             presentation.PreviousText,
             presentation.CurrentText,
             presentation.NextText,
             presentation.IsPlaying,
-            presentation.Animate);
+            presentation.Animate,
+            presentation.DisplayedLine,
+            presentation.TranslationText);
+        _displayedLyricDocument = snapshot.Document;
+        UpdateWordHighlight(snapshot);
+        if (diagnosticsChanged) QueueDiagnosticsLayoutRefresh();
+    }
+
+    private void UpdateWordHighlight(RuntimeSnapshot snapshot)
+    {
+        if (_karaokeTextController is null || !_karaokeTextController.HasTimedWords
+            || !ReferenceEquals(_displayedLyricDocument, snapshot.Document)) return;
+        var line = snapshot.ActiveLyric.CurrentLine ?? snapshot.ActiveLyric.NextLine
+            ?? snapshot.Document?.Lines.FirstOrDefault();
+        if (!ReferenceEquals(_displayedLyricLine, line)) return;
+        _karaokeTextController.Update(LyricsTiming.GetPosition(snapshot.Document, snapshot.Player,
+            _settings.LyricsOffsetSeconds, _settings.ApplyNativeLyricOffset));
+    }
+
+    private void SetTranslation(string? translation)
+    {
+        TranslationLyricText.Text = translation ?? string.Empty;
+        TranslationLyricText.Visibility = _settings.ShowTranslation && !string.IsNullOrWhiteSpace(translation)
+            ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void BindCurrentLyric(string text, LyricsLine? line, string? translation, bool isPlaying)
+    {
+        _displayedLyricLine = line;
+        _currentLyricText = text;
+        _karaokeTextController?.SetLine(text, line, _settings.WordHighlightEnabled);
+        var sung = ParseColorOrFallback(isPlaying ? _settings.CurrentLineColor : _settings.PausedLineColor, Colors.White);
+        if (CurrentLyricText.Foreground is not SolidColorBrush foreground || foreground.Color != sung)
+        {
+            CurrentLyricText.Foreground = new SolidColorBrush(sung);
+        }
+        var upcoming = MediaColor.FromArgb((byte)Math.Round(sung.A * 0.35), sung.R, sung.G, sung.B);
+        _karaokeTextController?.SetColors(sung, upcoming);
+        SetTranslation(translation);
     }
 
     private void SetLyrics(
@@ -472,15 +570,19 @@ public partial class MainWindow : Window
         string currentText,
         string? nextText,
         bool isPlaying,
-        bool animate)
+        bool animate,
+        LyricsLine? line,
+        string? translation)
     {
-        var lyricKey = $"{previousText}|{currentText}|{nextText}|{isPlaying}";
+        var lyricKey = $"{previousText}|{currentText}|{nextText}|{isPlaying}|{line?.Begin:R}|{line?.End:R}|{translation}|{_settings.ShowTranslation}";
         var isRepeat = string.Equals(_lastLyricAnimationKey, lyricKey, StringComparison.Ordinal);
 
         // Same content as last time (a poll tick with no change): the lyrics are already on
         // screen — do nothing, so a crossfade in progress isn't cut short.
         if (isRepeat)
         {
+            // A replacement document can have different word timing despite identical text.
+            BindCurrentLyric(currentText, line, translation, isPlaying);
             return;
         }
 
@@ -490,7 +592,7 @@ public partial class MainWindow : Window
         if (!shouldAnimate)
         {
             ResetLyricVisualState();
-            ApplyLyricContent(previousText, currentText, nextText, isPlaying);
+            ApplyLyricContent(previousText, currentText, nextText, isPlaying, line, translation);
             RefreshLyricLayout();
             Dispatcher.BeginInvoke(() => StartHeightAnimation(), System.Windows.Threading.DispatcherPriority.Loaded);
             return;
@@ -500,7 +602,7 @@ public partial class MainWindow : Window
         // old lyrics fade out while the new lyrics fade in from transparent and move upward.
         // This work now runs after the render callback, so it no longer blocks the boundary frame.
         SnapshotLyricGhost();
-        ApplyLyricContent(previousText, currentText, nextText, isPlaying);
+        ApplyLyricContent(previousText, currentText, nextText, isPlaying, line, translation);
         RefreshLyricLayout();
 
         var easing = new CubicEase { EasingMode = EasingMode.EaseOut };
@@ -525,7 +627,8 @@ public partial class MainWindow : Window
     }
 
     private (bool showPrevious, bool showNext) ApplyLyricContent(
-        string? previousText, string currentText, string? nextText, bool isPlaying)
+        string? previousText, string currentText, string? nextText, bool isPlaying,
+        LyricsLine? line, string? translation)
     {
         var showPrevious = _settings.ShowPreviousLine && !string.IsNullOrWhiteSpace(previousText);
         var showNext = _settings.ShowNextLine && !string.IsNullOrWhiteSpace(nextText);
@@ -534,7 +637,7 @@ public partial class MainWindow : Window
         _currentNextText = nextText;
 
         PreviousLyricText.Text = showPrevious ? previousText! : string.Empty;
-        CurrentLyricText.Text = currentText;
+        BindCurrentLyric(currentText, line, translation, isPlaying);
         NextLyricText.Text = showNext ? nextText! : string.Empty;
 
         CurrentLyricText.Foreground = CreateBrush(isPlaying ? _settings.CurrentLineColor : _settings.PausedLineColor, Colors.White);
@@ -588,12 +691,32 @@ public partial class MainWindow : Window
         {
             return;
         }
+        if (_isAnimatingHeight && Math.Abs(targetHeight - _targetHeight) < 1)
+        {
+            return;
+        }
 
         _heightAnimFrom = Height;
         _targetHeight = targetHeight;
         _heightAnimCenterY = Top + Height / 2.0;
         _heightAnimStopwatch.Restart();
         _isAnimatingHeight = true;
+    }
+
+    private void OnDiagnosticContentSizeChanged(object sender, SizeChangedEventArgs e)
+        => QueueDiagnosticsLayoutRefresh();
+
+    private void QueueDiagnosticsLayoutRefresh()
+    {
+        if (_isClosed || !IsLoaded || _settings.PureMode || _diagnosticsLayoutRefreshScheduled) return;
+        _diagnosticsLayoutRefreshScheduled = true;
+        Dispatcher.BeginInvoke(() =>
+        {
+            _diagnosticsLayoutRefreshScheduled = false;
+            if (_isClosed || _settings.PureMode) return;
+            ApplyAdaptiveFontSizes();
+            StartHeightAnimation();
+        }, DispatcherPriority.Loaded);
     }
 
     private const double WindowAnimDurationMs = 240.0;
@@ -662,35 +785,48 @@ public partial class MainWindow : Window
 
     private double MeasureDesiredHeight()
     {
-        var showPrevious = _settings.ShowPreviousLine && !string.IsNullOrWhiteSpace(_currentPreviousText);
-        var showNext = _settings.ShowNextLine && !string.IsNullOrWhiteSpace(_currentNextText);
-
-        var shellMargin = 14.0;
-        var shellPadding = 12.0;
-
-        var headerHeight = HeaderPanel.Visibility == Visibility.Visible ? 30.0 : 0.0;
-        var footerHeight = FooterPanel.Visibility == Visibility.Visible ? 50.0 : 0.0;
-
-        var currentFontSize = CurrentLyricText.FontSize;
-        var currentLineHeight = currentFontSize * 1.4;
-        var contextFontSize = PreviousLyricText.FontSize;
-        var contextLineHeight = contextFontSize * 1.4;
-
-        var contentHeight = 0.0;
+        var showPrevious = PreviousLyricText.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(_currentPreviousText);
+        var showNext = NextLyricText.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(_currentNextText);
+        var chromeHeight = ShellBorder.Margin.Top + ShellBorder.Margin.Bottom
+            + ShellBorder.Padding.Top + ShellBorder.Padding.Bottom;
+        var chromeWidth = ShellBorder.Margin.Left + ShellBorder.Margin.Right
+            + ShellBorder.Padding.Left + ShellBorder.Padding.Right;
+        var contentWidth = Math.Max(1, GetCurrentLogicalSize(ActualWidth, Width, MinWidth) - chromeWidth);
+        var headerHeight = OverlayDiagnosticsLayout.MeasureHeight(HeaderPanel, contentWidth);
+        var footerHeight = OverlayDiagnosticsLayout.MeasureHeight(FooterPanel, contentWidth);
+        var contentHeight = LyricPanel.Margin.Top + LyricPanel.Margin.Bottom;
         if (showPrevious)
         {
-            contentHeight += Math.Min(contextLineHeight, 52) + 8;
+            contentHeight += Math.Min(PreviousLyricText.MaxHeight,
+                MeasureText(_currentPreviousText, PreviousLyricText, PreviousLyricText.FontSize,
+                    Math.Min(contentWidth, PreviousLyricText.MaxWidth), 2).Height)
+                + PreviousLyricText.Margin.Top + PreviousLyricText.Margin.Bottom;
         }
-
-        contentHeight += currentLineHeight + 8;
-
+        contentHeight += MeasureText(_currentLyricText, CurrentLyricText, CurrentLyricText.FontSize,
+            Math.Min(contentWidth, CurrentLyricText.MaxWidth), _settings.SingleLineMode ? 1 : int.MaxValue).Height
+            + CurrentLyricText.Margin.Top + CurrentLyricText.Margin.Bottom;
+        if (TranslationLyricText.Visibility == Visibility.Visible)
+        {
+            contentHeight += MeasureText(TranslationLyricText.Text, TranslationLyricText,
+                TranslationLyricText.FontSize, Math.Min(contentWidth, TranslationLyricText.MaxWidth), 2).Height
+                + TranslationLyricText.Margin.Top + TranslationLyricText.Margin.Bottom;
+        }
         if (showNext)
         {
-            contentHeight += Math.Min(contextLineHeight, 52) + 8;
+            contentHeight += Math.Min(NextLyricText.MaxHeight,
+                MeasureText(_currentNextText, NextLyricText, NextLyricText.FontSize,
+                    Math.Min(contentWidth, NextLyricText.MaxWidth), 2).Height)
+                + NextLyricText.Margin.Top + NextLyricText.Margin.Bottom;
         }
-
-        var totalHeight = shellMargin * 2 + shellPadding * 2 + headerHeight + footerHeight + contentHeight + 20;
-        return Math.Max(MinHeight, totalHeight);
+        var workHeight = SystemParameters.WorkArea.Height;
+        if (_sourceInitialized)
+        {
+            var monitor = _windowPlacementCoordinator.GetMonitorForWindow(new WindowInteropHelper(this).Handle,
+                _windowPlacementCoordinator.GetMonitors());
+            if (monitor is not null) workHeight = monitor.WorkAreaPx.Height / monitor.ScaleY;
+        }
+        return OverlayDiagnosticsLayout.GetWindowHeight(chromeHeight + headerHeight, contentHeight,
+            footerHeight, MinHeight, workHeight * 0.9);
     }
 
     private void ResetLyricVisualState()
@@ -764,7 +900,7 @@ public partial class MainWindow : Window
     // Pure Mode drag opacity then overrides hover dimming, followed by the base opacity.
     private double ResolveTargetOpacity()
     {
-        return OverlayOpacityResolver.Resolve(
+        return OverlayDiagnosticsLayout.ResolveOpacity(
             _settings,
             _lastHasLyrics,
             _lastPlaying,
@@ -858,14 +994,22 @@ public partial class MainWindow : Window
     private void OnClosed(object? sender, EventArgs e)
     {
         _isClosed = true;
+        var diagnosticsWindow = _diagnosticsWindow;
+        _diagnosticsWindow = null;
+        diagnosticsWindow?.Close();
+        HeaderPanel.SizeChanged -= OnDiagnosticContentSizeChanged;
         CompositionTarget.Rendering -= OnRendering;
+        LocalizationManager.Instance.LanguageChanged -= OnUiLanguageChanged;
         _runtimePollingController.Dispose();
         StopMouseTracker();
         PersistCurrentSettings();
         _trayIconController.Dispose();
         _runtimeService.DisposeAsync().AsTask().GetAwaiter().GetResult();
         _catalogResolver?.Dispose();
-        _lrcLibProvider?.Dispose();
+        foreach (var provider in _externalLyricsProviders.OfType<IDisposable>())
+        {
+            provider.Dispose();
+        }
     }
 
     private void OnWindowSizeChanged(object sender, SizeChangedEventArgs e)
@@ -931,6 +1075,7 @@ public partial class MainWindow : Window
             CurrentLyricText.FontSize = pureCurrentFontSize;
             PreviousLyricText.FontSize = pureContextFontSize;
             NextLyricText.FontSize = pureContextFontSize;
+            UpdateTranslationFont();
             return;
         }
 
@@ -940,9 +1085,9 @@ public partial class MainWindow : Window
         var shellMargin = 14.0;
         var shellPadding = 12.0;
         var totalHorizontalChrome = shellMargin * 2 + shellPadding * 2;
-        var contentWidth = Math.Max(_settings.MinWindowWidth, effectiveWindowWidth - totalHorizontalChrome - 16);
+        var contentWidth = Math.Max(140, effectiveWindowWidth - totalHorizontalChrome - 16);
 
-        var currentText = string.IsNullOrWhiteSpace(CurrentLyricText.Text) ? "Current lyric line" : CurrentLyricText.Text;
+        var currentText = string.IsNullOrWhiteSpace(_currentLyricText) ? "Current lyric line" : _currentLyricText;
         var currentFontSize = FitFontSize(
             currentText,
             _settings.MaxCurrentFontSize,
@@ -956,6 +1101,14 @@ public partial class MainWindow : Window
         CurrentLyricText.FontSize = currentFontSize;
         PreviousLyricText.FontSize = contextFontSize;
         NextLyricText.FontSize = contextFontSize;
+        UpdateTranslationFont();
+    }
+
+    private void UpdateTranslationFont()
+    {
+        TranslationLyricText.FontSize = TranslationTypography.GetFontSize(_settings.TranslationFontSize);
+        TranslationLyricText.LineHeight = TranslationLyricText.FontSize * 1.35;
+        TranslationLyricText.MaxHeight = TranslationLyricText.LineHeight * 2;
     }
 
     private void ApplyRestoredPlacement()
@@ -1083,7 +1236,7 @@ public partial class MainWindow : Window
             PreviousLyricRow.Height = new GridLength(0);
             CurrentLyricRow.Height = GridLength.Auto;
             NextLyricRow.Height = GridLength.Auto;
-            System.Windows.Controls.Grid.SetRow(CurrentLyricText, 1);
+            System.Windows.Controls.Grid.SetRow(CurrentLyricContainer, 1);
             System.Windows.Controls.Grid.SetRow(NextLyricText, 2);
             CurrentLyricText.Margin = _settings.PureMode ? new Thickness(0, 0, 0, 4) : new Thickness(0, 0, 0, 10);
             NextLyricText.Margin = new Thickness(0);
@@ -1100,7 +1253,7 @@ public partial class MainWindow : Window
             NextLyricRow.Height = showNext
                 ? new GridLength(1, GridUnitType.Star)
                 : new GridLength(0);
-            System.Windows.Controls.Grid.SetRow(CurrentLyricText, 1);
+            System.Windows.Controls.Grid.SetRow(CurrentLyricContainer, 1);
             System.Windows.Controls.Grid.SetRow(NextLyricText, 2);
             CurrentLyricText.Margin = _settings.PureMode ? new Thickness(0, 2, 0, 2) : new Thickness(0, 4, 0, 4);
             NextLyricText.Margin = new Thickness(0);
@@ -1110,10 +1263,15 @@ public partial class MainWindow : Window
         var alpha = (byte)Math.Clamp(_settings.BackgroundAlpha ?? (_settings.PureMode ? 72 : 200), 0, 255);
         ShellBorder.Background = new SolidColorBrush(MediaColor.FromArgb(alpha, 20, 20, 22));
 
-        var fontFamily = FontFamilyResolver.Resolve(_settings.FontFamily);
+        var fontFamily = FontFamilyResolver.Resolve(_settings.FontFamily, _settings.ChineseFontFamily);
         CurrentLyricText.FontFamily = fontFamily;
         PreviousLyricText.FontFamily = fontFamily;
         NextLyricText.FontFamily = fontFamily;
+        TranslationLyricText.FontFamily = TranslationTypography.ResolveFontFamily(_settings.TranslationFontFamily);
+        TranslationLyricText.TextWrapping = TextWrapping.Wrap;
+        TranslationLyricText.Foreground = CreateBrush(_settings.ContextLineColor, Colors.White);
+        TranslationLyricText.Opacity = 0.8;
+        BindCurrentLyric(_currentLyricText, _displayedLyricLine, _displayedLyricLine?.Translation, _lastFramePlaying);
         SubtitleText.FontFamily = fontFamily;
 
         CurrentLyricGlowEffect.Color = ParseColorOrFallback(_settings.GlowColor, Colors.White);
@@ -1126,6 +1284,7 @@ public partial class MainWindow : Window
             : Width;
         UpdateTextMaxWidths(layoutWidth);
         RefreshLyricLayout();
+        QueueDiagnosticsLayoutRefresh();
     }
 
     private bool IsClickThroughEnabled => _settings.ClickThrough;
@@ -1247,11 +1406,53 @@ public partial class MainWindow : Window
         UpdateTrayState();
     }
 
+    private void OpenDiagnosticsWindow()
+    {
+        if (_isClosed) return;
+        if (_diagnosticsWindow is null)
+        {
+            var window = new DiagnosticsWindow();
+            window.Closed += (_, _) =>
+            {
+                if (ReferenceEquals(_diagnosticsWindow, window)) _diagnosticsWindow = null;
+            };
+            _diagnosticsWindow = window;
+        }
+
+        UpdateDiagnosticsWindow();
+        if (_diagnosticsWindow.WindowState == WindowState.Minimized)
+            _diagnosticsWindow.WindowState = WindowState.Normal;
+        _diagnosticsWindow.Show();
+        _diagnosticsWindow.Activate();
+    }
+
+    private void UpdateDiagnosticsWindow(RuntimeSnapshot? snapshot = null)
+    {
+        if (_diagnosticsWindow is not { } window) return;
+        snapshot ??= _runtimeService.GetFrameSnapshot();
+        var player = OverlaySnapshotPresenter.CreatePlayer(snapshot);
+        var text = LocalizationManager.Instance;
+        if (_runtimeRefreshFailed && _lastRuntimeError is { } error)
+        {
+            window.UpdateDiagnostics(player.WindowTitle, text.Text("Runtime.RefreshFailed"),
+                $"{text.Text("Runtime.CheckPlayer")}{Environment.NewLine}{FormatRenderRate()} | {FormatPollRate()}"
+                + $"{Environment.NewLine}{error.GetType().Name}: {error.Message}");
+            return;
+        }
+
+        var lyrics = OverlaySnapshotPresenter.CreateLyrics(snapshot, showTranslation: _settings.ShowTranslation);
+        window.UpdateDiagnostics(player.WindowTitle, lyrics.DebugSummaryText,
+            $"{player.PlayerText}{Environment.NewLine}{FormatTimingText(snapshot)}{Environment.NewLine}{lyrics.PathText}");
+    }
+
     private void OpenSettingsWindow()
     {
+        var cacheGeneration = _externalLyricsCache?.Generation;
         var settingsWindow = new SettingsWindow(
             _settings,
-            previewSettings => ApplySettings(previewSettings, persist: true))
+            previewSettings => ApplySettings(previewSettings, persist: true, cacheGeneration),
+            lyricsCache: _externalLyricsCache,
+            openDiagnostics: OpenDiagnosticsWindow)
         {
             Owner = IsVisible ? this : null,
         };
@@ -1261,7 +1462,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        ApplySettings(settingsWindow.Settings, persist: true);
+        ApplySettings(settingsWindow.Settings, persist: true, cacheGeneration);
     }
 
     private void SetPureMode(bool enabled, bool persist = true)
@@ -1294,6 +1495,11 @@ public partial class MainWindow : Window
         ApplyWindowBounds();
         ApplyRestoredPlacement();
         ApplyAppearanceSettings();
+        if (!enabled)
+        {
+            Dispatcher.BeginInvoke(() => StartHeightAnimation(), DispatcherPriority.Loaded);
+        }
+
         if (persist)
         {
             PersistCurrentSettings();
@@ -1338,17 +1544,25 @@ public partial class MainWindow : Window
         PersistCurrentSettings();
     }
 
-    private void ApplySettings(AppSettings sourceSettings, bool persist)
+    private void ApplySettings(AppSettings sourceSettings, bool persist, long? expectedCacheGeneration = null)
     {
         var currentLeft = Left;
         var currentTop = Top;
         var currentWidth = Width;
         var currentHeight = Height;
         var currentPureMode = _settings.PureMode;
+        var cacheWasEnabled = _settings.PersistExternalLyricsCache;
         var requestedPureMode = sourceSettings.PureMode;
 
         CancelPureModeBoundsAnimation();
         CopySettings(sourceSettings, _settings);
+        _externalLyricsCache?.Configure(_settings.PersistExternalLyricsCache, _settings.ExternalLyricsCacheMaxMegabytes);
+        // Applying unrelated edits after Clear must not repopulate the current song.
+        if (!cacheWasEnabled && _settings.PersistExternalLyricsCache)
+        {
+            CacheCurrentExternalLyrics(expectedCacheGeneration);
+        }
+        LocalizationManager.Instance.SetLanguage(_settings.UiLanguage);
         // Keep the source mode active until SetPureMode captures its placement. The settings
         // dialog carries both modes' saved anchors, so the target placement remains available.
         _settings.PureMode = currentPureMode;
@@ -1357,6 +1571,8 @@ public partial class MainWindow : Window
         _runtimeService.LyricsOffsetSeconds = _settings.LyricsOffsetSeconds;
         _runtimeService.ApplyNativeLyricOffset = _settings.ApplyNativeLyricOffset;
         _runtimeService.AllowLowConfidenceLyrics = _settings.AllowLowConfidenceLyrics;
+        _runtimeService.PreferWordTimings = _settings.WordHighlightEnabled;
+        _runtimeService.PreferTranslations = _settings.ShowTranslation;
         _runtimePollingController.Interval = TimeSpan.FromSeconds(Math.Clamp(_settings.PlayerPollInterval, 0.05, 1.0));
 
         if (requestedPureMode != currentPureMode)
@@ -1378,6 +1594,8 @@ public partial class MainWindow : Window
         {
             Width = currentWidth;
             Height = currentHeight;
+            // Font edits must resize the current line even when playback is paused.
+            Dispatcher.BeginInvoke(() => StartHeightAnimation(), DispatcherPriority.Loaded);
         }
 
         if (persist)
@@ -1408,6 +1626,20 @@ public partial class MainWindow : Window
         }
 
         _settingsStore.Save(_settings);
+    }
+
+    private void CacheCurrentExternalLyrics(long? expectedGeneration)
+    {
+        if (!_settings.PersistExternalLyricsCache || _externalLyricsCache is null) return;
+        var snapshot = _runtimeService.GetFrameSnapshot();
+        if (snapshot.Player is not { } player || snapshot.Document is not { } document) return;
+
+        var source = document.SourceFile.StartsWith("qqmusic:", StringComparison.OrdinalIgnoreCase) ? "QQ Music"
+            : document.SourceFile.StartsWith("netease:", StringComparison.OrdinalIgnoreCase) ? "NetEase Cloud Music"
+            : document.SourceFile.StartsWith("lrclib:", StringComparison.OrdinalIgnoreCase)
+                || document.SourceFile.StartsWith("lrclib-plain:", StringComparison.OrdinalIgnoreCase) ? "LRCLIB"
+            : null;
+        if (source is not null) _externalLyricsCache.Store(source, player, document, expectedGeneration);
     }
 
     private void RefreshLyricLayout()
@@ -1549,8 +1781,14 @@ public partial class MainWindow : Window
     {
         var widths = new List<double>
         {
-            MeasureText(CurrentLyricText.Text, CurrentLyricText, currentFontSize, null, 1).Width,
+            MeasureText(_currentLyricText, CurrentLyricText, currentFontSize, null, 1).Width,
         };
+
+        if (TranslationLyricText.Visibility == Visibility.Visible)
+        {
+            widths.Add(MeasureText(TranslationLyricText.Text, TranslationLyricText,
+                TranslationTypography.GetFontSize(_settings.TranslationFontSize), null, 1).Width);
+        }
 
         if (PreviousLyricText.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(PreviousLyricText.Text))
         {
@@ -1569,12 +1807,17 @@ public partial class MainWindow : Window
     {
         var totalHeight = 0.0;
         var currentMeasure = MeasureText(
-            CurrentLyricText.Text,
+            _currentLyricText,
             CurrentLyricText,
             currentFontSize,
             contentWidth,
             _settings.SingleLineMode ? 1 : (_settings.PureMode ? 4 : 2));
         totalHeight += currentMeasure.Height;
+        if (TranslationLyricText.Visibility == Visibility.Visible)
+        {
+            totalHeight += MeasureText(TranslationLyricText.Text, TranslationLyricText,
+                TranslationTypography.GetFontSize(_settings.TranslationFontSize), contentWidth, 2).Height + 4;
+        }
 
         // Use PureMode-specific margin values
         var currentMarginTop = _settings.PureMode ? 2.0 : 4.0;
@@ -1638,6 +1881,11 @@ public partial class MainWindow : Window
             System.Windows.Media.Brushes.White,
             pixelsPerDip);
 
+        if (double.IsFinite(reference.LineHeight) && reference.LineHeight > 0 && reference.FontSize > 0)
+        {
+            formattedText.LineHeight = reference.LineHeight * fontSize / reference.FontSize;
+        }
+
         if (maxWidth.HasValue)
         {
             formattedText.MaxTextWidth = maxWidth.Value;
@@ -1660,6 +1908,8 @@ public partial class MainWindow : Window
         CurrentLyricText.MaxWidth = currentMaxWidth;
         PreviousLyricText.MaxWidth = contextMaxWidth;
         NextLyricText.MaxWidth = contextMaxWidth;
+        TranslationLyricText.MaxWidth = currentMaxWidth;
+        StatusText.MaxWidth = OverlayDiagnosticsLayout.GetStatusMaxWidth(windowWidth - totalHorizontalChrome);
     }
 
     private void UpdateTrayState()
@@ -1671,7 +1921,7 @@ public partial class MainWindow : Window
             _settings.SingleLineMode,
             _settings.TwoLineMode,
             _settings.ShowDebugPanel,
-            CurrentLyricText.Text);
+            _currentLyricText);
     }
 
     private static System.Windows.Media.Brush CreateBrush(string colorValue, MediaColor fallbackColor)
@@ -1703,7 +1953,8 @@ public partial class MainWindow : Window
         double maxHeight,
         bool singleLine)
     {
-        var fontFamily = CurrentLyricText.FontFamily ?? FontFamilyResolver.Resolve(_settings.FontFamily);
+        var fontFamily = CurrentLyricText.FontFamily
+            ?? FontFamilyResolver.Resolve(_settings.FontFamily, _settings.ChineseFontFamily);
         var typeface = new Typeface(
             fontFamily,
             CurrentLyricText.FontStyle,
@@ -1768,6 +2019,8 @@ public partial class MainWindow : Window
         target.ExternalLyricsEnabled = copy.ExternalLyricsEnabled;
         target.ExternalLyricsTimeoutSeconds = copy.ExternalLyricsTimeoutSeconds;
         target.PersistExternalLyricsCache = copy.PersistExternalLyricsCache;
+        target.ExternalLyricsCacheMaxMegabytes = copy.ExternalLyricsCacheMaxMegabytes;
+        target.UiLanguage = copy.UiLanguage;
         target.WindowX = copy.WindowX;
         target.WindowY = copy.WindowY;
         target.WindowWidth = copy.WindowWidth;
@@ -1791,8 +2044,13 @@ public partial class MainWindow : Window
         target.GlowColor = copy.GlowColor;
         target.GlowOpacity = copy.GlowOpacity;
         target.FontFamily = copy.FontFamily;
+        target.ChineseFontFamily = copy.ChineseFontFamily;
+        target.TranslationFontFamily = copy.TranslationFontFamily;
+        target.TranslationFontSize = copy.TranslationFontSize;
         target.ShowPreviousLine = copy.ShowPreviousLine;
         target.ShowNextLine = copy.ShowNextLine;
+        target.WordHighlightEnabled = copy.WordHighlightEnabled;
+        target.ShowTranslation = copy.ShowTranslation;
         target.SingleLineMode = copy.SingleLineMode;
         target.TwoLineMode = copy.TwoLineMode;
         target.ShowDebugPanel = copy.ShowDebugPanel;

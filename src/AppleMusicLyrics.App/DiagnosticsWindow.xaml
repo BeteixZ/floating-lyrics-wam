@@ -1,0 +1,57 @@
+<Window x:Class="AppleMusicLyrics.App.DiagnosticsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:loc="clr-namespace:AppleMusicLyrics.App.Localization"
+        Title="{loc:Loc Diagnostics.Title}"
+        Width="760" Height="560" MinWidth="540" MinHeight="360"
+        WindowStartupLocation="CenterScreen" WindowStyle="SingleBorderWindow" ResizeMode="CanResize"
+        Topmost="False" AllowsTransparency="False" ShowInTaskbar="True" Opacity="1"
+        Background="#101319" Foreground="#F3F6FB" FontFamily="Segoe UI, Microsoft YaHei UI" FontSize="14"
+        UseLayoutRounding="True" TextOptions.TextFormattingMode="Ideal">
+  <Grid x:Name="LayoutRoot" Margin="24">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+
+    <TextBlock x:Name="TrackTitleText" Text="—" FontSize="22" FontWeight="SemiBold"
+               TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxHeight="64" Margin="0,0,0,20" />
+    <TextBlock x:Name="SummaryLabelText" Grid.Row="1" Text="{loc:Loc Diagnostics.SummaryLabel}"
+               Foreground="#A8B2C3" FontSize="12" Margin="0,0,0,6" />
+    <TextBlock x:Name="SummaryText" Grid.Row="2" Text="—" TextWrapping="Wrap"
+               TextTrimming="CharacterEllipsis" MaxHeight="64" Margin="0,0,0,20" />
+    <TextBlock x:Name="DetailsLabelText" Grid.Row="3" Text="{loc:Loc Diagnostics.DetailsLabel}"
+               Foreground="#A8B2C3" FontSize="12" Margin="0,0,0,8" />
+    <TextBox x:Name="DetailsTextBox" Grid.Row="4"
+             IsReadOnly="True" IsUndoEnabled="False" AcceptsReturn="True" AcceptsTab="True"
+             TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+             Background="#171C25" Foreground="#E7EBF2" BorderBrush="#364051" BorderThickness="1"
+             CaretBrush="White" SelectionBrush="#5F6F96" Padding="12"
+             AutomationProperties.Name="{loc:Loc Diagnostics.DetailsLabel}" />
+    <Button x:Name="CloseButton" Grid.Row="5" Content="{loc:Loc Diagnostics.Close}"
+            Click="CloseButton_OnClick" MinWidth="88" Padding="18,8" Margin="0,18,0,0"
+            HorizontalAlignment="Right" Background="#303949" Foreground="#F3F6FB" BorderBrush="#465267">
+      <Button.Template>
+        <ControlTemplate TargetType="Button">
+          <Border x:Name="ButtonBorder" Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="6"
+                  Padding="{TemplateBinding Padding}">
+            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="ButtonBorder" Property="Background" Value="#414E63" />
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+              <Setter TargetName="ButtonBorder" Property="Background" Value="#242D3C" />
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Button.Template>
+    </Button>
+  </Grid>
+</Window>

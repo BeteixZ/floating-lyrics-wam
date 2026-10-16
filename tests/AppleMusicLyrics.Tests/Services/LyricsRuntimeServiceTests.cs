@@ -1,4 +1,5 @@
 using AppleMusicLyrics.Application.Services;
+using AppleMusicLyrics.App.Presentation;
 using AppleMusicLyrics.Core.Abstractions;
 using AppleMusicLyrics.Core.Models;
 using AppleMusicLyrics.Core.Parsing;
@@ -692,6 +693,104 @@ public sealed class LyricsRuntimeServiceTests
         Assert.Equal("LRCLIB_42", second.Document!.LyricsId);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task SnapshotAsync_RetainsExternalLyricsBetweenLocalRescansAfterMatchWindow(bool preferRichLyrics)
+    {
+        var time = new ManualTimeProvider();
+        var document = RichDocument("LRCLIB_retained");
+        var provider = new StubExternalProvider(document);
+        await using var runtime = new LyricsRuntimeService(
+            new CandidateLyricsProvider([]),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1, 180, true)),
+            new LyricsSynchronizer(), new PlaybackClock(), timeProvider: time)
+        {
+            ExternalLyricsProviders = [provider],
+            PreferWordTimings = preferRichLyrics,
+            PreferTranslations = preferRichLyrics,
+            MatchWindow = TimeSpan.FromSeconds(5),
+            IdleRescanInterval = TimeSpan.FromSeconds(1),
+        };
+
+        await runtime.SnapshotAsync();
+        Assert.Same(document, (await runtime.SnapshotAsync()).Document);
+        if (preferRichLyrics)
+        {
+            // The source has no additional word timings or translation, so no enriched copy
+            // can accidentally conceal a missing base document in subsequent snapshots.
+            await WaitForSnapshotAsync(runtime, snapshot => snapshot.Resolution.Summary.Contains("checked sources", StringComparison.Ordinal));
+        }
+        time.Advance(TimeSpan.FromSeconds(6));
+        Assert.Same(document, (await runtime.SnapshotAsync()).Document);
+
+        for (var poll = 0; poll < 12; poll++)
+        {
+            time.Advance(TimeSpan.FromMilliseconds(200));
+            var snapshot = await runtime.SnapshotAsync();
+
+            Assert.Same(document, snapshot.Document);
+            Assert.Equal(LyricsResolutionStatus.Resolved, snapshot.Resolution.Status);
+            Assert.Equal(LyricsResolutionSource.ExternalProvider, snapshot.Resolution.Source);
+            var presentation = OverlaySnapshotPresenter.CreateLyrics(snapshot);
+            Assert.Equal("hello world", presentation.CurrentText);
+            Assert.DoesNotContain("Waiting for lyrics", presentation.CurrentText);
+        }
+        Assert.Equal(preferRichLyrics ? 2 : 1, provider.CallCount);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_PrefersTimedPlatformLyricsOverProjectedPlainLyrics()
+    {
+        var plain = new StubExternalProvider(BuildDocument("LRCLIB_plain", 180, "plain") with { Status = "plain" });
+        var timed = new StubExternalProvider(BuildDocument("qqmusic:42", 180, "timed"));
+        var runtime = new LyricsRuntimeService(
+            new CandidateLyricsProvider([]),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1, 180, true)),
+            new LyricsSynchronizer(), new PlaybackClock())
+        {
+            ExternalLyricsProviders = [plain, timed],
+        };
+
+        await runtime.SnapshotAsync();
+        await timed.Completed;
+        RuntimeSnapshot? snapshot = null;
+        for (var attempt = 0; attempt < 50; attempt++)
+        {
+            snapshot = await runtime.SnapshotAsync();
+            if (snapshot.Document is not null) break;
+            await Task.Delay(10);
+        }
+        Assert.Equal("qqmusic:42", snapshot!.Document!.LyricsId);
+        Assert.Equal(1, plain.CallCount);
+        Assert.Equal(1, timed.CallCount);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_KeepsPlainFallbackWhenTheNextSourceFails()
+    {
+        var plain = new StubExternalProvider(BuildDocument("LRCLIB_plain", 180, "plain") with { Status = "plain" });
+        var failed = new FlakyExternalProvider(BuildDocument("unavailable", 180, "timed"), failuresBeforeSuccess: 100);
+        var runtime = new LyricsRuntimeService(
+            new CandidateLyricsProvider([]),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1, 180, true)),
+            new LyricsSynchronizer(), new PlaybackClock())
+        {
+            ExternalLyricsProviders = [plain, failed],
+        };
+
+        await runtime.SnapshotAsync();
+        RuntimeSnapshot? snapshot = null;
+        for (var attempt = 0; attempt < 50; attempt++)
+        {
+            snapshot = await runtime.SnapshotAsync();
+            if (snapshot.Document is not null) break;
+            await Task.Delay(10);
+        }
+        Assert.Equal("LRCLIB_plain", snapshot!.Document!.LyricsId);
+        Assert.Equal(1, failed.CallCount);
+    }
+
     [Fact]
     public async Task SnapshotAsync_UsesExternalProviderInsteadOfLowConfidenceLocalCandidate()
     {
@@ -1046,6 +1145,463 @@ public sealed class LyricsRuntimeServiceTests
         await Assert.ThrowsAsync<ObjectDisposedException>(() => runtime.SnapshotAsync());
     }
 
+    [Fact]
+    public async Task SnapshotAsync_EnrichesLocalLyricsWithoutDelayingTheBaseOrQueryingPastCompleteResult()
+    {
+        var local = RichDocument("AP_local");
+        var completion = new TaskCompletionSource<LyricsDocument?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var rich = RichDocument("QQ_rich", words: true, translation: true);
+        var provider = new DelegateEnrichmentProvider("QQ Music", (_, _) => completion.Task);
+        var skipped = new StubExternalProvider(RichDocument("NE_unneeded", words: true, translation: true));
+        await using var runtime = EnrichmentRuntime(local, [provider, skipped], words: true, translation: true);
+
+        var first = await runtime.SnapshotAsync().WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.Same(local, first.Document);
+        Assert.Equal(LyricsResolutionStatus.Resolved, first.Resolution.Status);
+        Assert.Equal(LyricsResolutionSource.AppleMusicCache, first.Resolution.Source);
+        Assert.Contains("checking missing word timings and translations", first.Resolution.Summary);
+        await provider.Started.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Same(local, (await runtime.SnapshotAsync()).Document);
+        completion.SetResult(rich);
+
+        var upgraded = await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, rich));
+
+        Assert.Equal(LyricsResolutionSource.ExternalProvider, upgraded.Resolution.Source);
+        Assert.Contains("QQ Music", upgraded.Resolution.Summary);
+        Assert.Equal(0, skipped.CallCount);
+        // Repeated local candidate adoption must not cancel or forget the independent enrichment.
+        Assert.Same(rich, (await runtime.SnapshotAsync()).Document);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_EnrichesSynchronizedLrcLibFallbackFromLaterPlatform()
+    {
+        var basic = RichDocument("LRCLIB_base");
+        var lrcLib = new StubExternalProvider(basic);
+        var completion = new TaskCompletionSource<LyricsDocument?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var rich = RichDocument("NETEASE_rich", words: true, translation: true);
+        var platform = new DelegateEnrichmentProvider("NetEase Cloud Music", (_, _) => completion.Task);
+        await using var runtime = EnrichmentRuntime(basic, [lrcLib, platform], words: true, translation: true,
+            lyricsProvider: new CandidateLyricsProvider([]));
+
+        await runtime.SnapshotAsync();
+        var baseSnapshot = await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, basic));
+        Assert.Same(basic, baseSnapshot.Document);
+        await platform.Started.WaitAsync(TimeSpan.FromSeconds(2));
+        completion.SetResult(rich);
+
+        var upgraded = await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, rich));
+
+        Assert.Contains("NetEase Cloud Music", upgraded.Resolution.Summary);
+        Assert.True(lrcLib.CallCount >= 1);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_AdoptsPartialRichResultWhileTheNextSourceIsStillPending()
+    {
+        var local = RichDocument("AP_local");
+        var wordDocument = RichDocument("QQ_words", words: true);
+        var words = new StubExternalProvider(wordDocument);
+        var completion = new TaskCompletionSource<LyricsDocument?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completeDocument = RichDocument("NE_complete", words: true, translation: true);
+        var slow = new DelegateEnrichmentProvider("Slow source", (_, _) => completion.Task);
+        await using var runtime = EnrichmentRuntime(local, [words, slow], words: true, translation: true);
+
+        Assert.Same(local, (await runtime.SnapshotAsync()).Document);
+        await slow.Started.WaitAsync(TimeSpan.FromSeconds(2));
+        var partial = await runtime.SnapshotAsync().WaitAsync(TimeSpan.FromSeconds(1));
+
+        Assert.Same(wordDocument, partial.Document);
+        Assert.False(completion.Task.IsCompleted);
+        Assert.Same(wordDocument, runtime.GetFrameSnapshot().Document);
+        completion.SetResult(completeDocument);
+        await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, completeDocument));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SnapshotAsync_DoesNotTradeAwayAnExistingRequestedFeature(bool baselineWords)
+    {
+        var local = RichDocument("AP_local", words: baselineWords, translation: !baselineWords);
+        var otherFeatureOnly = RichDocument("QQ_incomplete", words: !baselineWords, translation: baselineWords);
+        var provider = new DelegateEnrichmentProvider("Platform", (_, _) => Task.FromResult<LyricsDocument?>(otherFeatureOnly));
+        await using var runtime = EnrichmentRuntime(local, [provider], words: true, translation: true);
+
+        Assert.Same(local, (await runtime.SnapshotAsync()).Document);
+        await provider.Started.WaitAsync(TimeSpan.FromSeconds(2));
+        for (var poll = 0; poll < 10; poll++)
+        {
+            Assert.Same(local, (await runtime.SnapshotAsync()).Document);
+            await Task.Delay(1);
+        }
+        Assert.Equal(1, provider.CallCount);
+        var completed = await runtime.SnapshotAsync();
+        var diagnostic = Assert.Single(completed.ExternalDiagnostics!.Providers,
+            item => item.Stage == ExternalLyricsQueryStage.Enrichment);
+        Assert.Equal(ExternalLyricsQueryOutcome.Rejected, diagnostic.Outcome);
+        Assert.Equal(baselineWords ? ExternalLyricsDiagnosticReason.WouldLoseWordTimings
+            : ExternalLyricsDiagnosticReason.WouldLoseTranslations, diagnostic.Reason);
+        Assert.Equal(baselineWords ? 1 : 0, diagnostic.TranslatedLineCount);
+        Assert.Equal(baselineWords ? 0 : 1, diagnostic.WordLineCount);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_DoesNotQueryEnrichmentWhenPreferencesAreOff()
+    {
+        var local = RichDocument("AP_local");
+        var provider = new StubExternalProvider(RichDocument("QQ_rich", words: true, translation: true));
+        await using var runtime = EnrichmentRuntime(local, [provider]);
+
+        Assert.Same(local, (await runtime.SnapshotAsync()).Document);
+        Assert.Same(local, (await runtime.SnapshotAsync()).Document);
+        Assert.Equal(0, provider.CallCount);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_DoesNotQueryWhenTheLocalDocumentAlreadyHasRequestedFeatures()
+    {
+        var local = RichDocument("AP_complete", words: true, translation: true);
+        var provider = new StubExternalProvider(RichDocument("QQ_rich", words: true, translation: true));
+        await using var runtime = EnrichmentRuntime(local, [provider], words: true, translation: true);
+
+        Assert.Same(local, (await runtime.SnapshotAsync()).Document);
+        Assert.Equal(0, provider.CallCount);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_ReportsCompletedEnrichmentMissWithoutLosingTheBaseSource()
+    {
+        var local = RichDocument("AP_local");
+        var provider = new DelegateEnrichmentProvider("Empty source", (_, _) => Task.FromResult<LyricsDocument?>(null));
+        await using var runtime = EnrichmentRuntime(local, [provider], words: true, translation: true);
+
+        await runtime.SnapshotAsync();
+        var completed = await WaitForSnapshotAsync(runtime,
+            snapshot => snapshot.Resolution.Summary.Contains("checked sources", StringComparison.Ordinal));
+
+        Assert.Same(local, completed.Document);
+        Assert.Equal(LyricsResolutionStatus.Resolved, completed.Resolution.Status);
+        Assert.Equal(LyricsResolutionSource.AppleMusicCache, completed.Resolution.Source);
+        Assert.Equal(LyricsResolutionConfidence.High, completed.Resolution.Confidence);
+        Assert.Equal(1, provider.CallCount);
+        var repeated = await runtime.SnapshotAsync();
+        Assert.Equal(completed.Resolution.Summary, repeated.Resolution.Summary);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_RejectsUnusableWordTimingAsAnEnrichment()
+    {
+        var local = RichDocument("AP_local");
+        var invalid = RichDocument("QQ_invalid", words: true) with
+        {
+            Lines = [new LyricsLine(0, 5, "hello world", Words: [new LyricWord(0, 0, "different text")])],
+        };
+        var provider = new DelegateEnrichmentProvider("Platform", (_, _) => Task.FromResult<LyricsDocument?>(invalid));
+        await using var runtime = EnrichmentRuntime(local, [provider], words: true);
+
+        await runtime.SnapshotAsync();
+        await provider.Started.WaitAsync(TimeSpan.FromSeconds(2));
+        for (var poll = 0; poll < 5; poll++)
+        {
+            Assert.Same(local, (await runtime.SnapshotAsync()).Document);
+            await Task.Delay(1);
+        }
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_PreferenceChangesCancelAndRestartEnrichmentForTheSameTrack()
+    {
+        var local = RichDocument("AP_local");
+        var oldCompletion = new TaskCompletionSource<LyricsDocument?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var rich = RichDocument("QQ_words", words: true);
+        var calls = 0;
+        var provider = new DelegateEnrichmentProvider("Platform", (_, _) =>
+            Interlocked.Increment(ref calls) == 1 ? oldCompletion.Task : Task.FromResult<LyricsDocument?>(rich));
+        await using var runtime = EnrichmentRuntime(local, [provider]);
+
+        await runtime.SnapshotAsync();
+        Assert.Equal(0, provider.CallCount);
+        runtime.PreferWordTimings = true;
+        Assert.Same(local, (await runtime.SnapshotAsync()).Document);
+        await provider.Started.WaitAsync(TimeSpan.FromSeconds(2));
+        runtime.PreferWordTimings = false;
+        Assert.Same(local, (await runtime.SnapshotAsync()).Document);
+        await provider.FirstCanceled.WaitAsync(TimeSpan.FromSeconds(2));
+        oldCompletion.SetResult(rich);
+        Assert.Same(local, (await runtime.SnapshotAsync()).Document);
+        runtime.PreferWordTimings = true;
+
+        await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, rich));
+        Assert.Equal(2, provider.CallCount);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_DiscardsCanceledEnrichmentAfterTheTrackChanges()
+    {
+        var oldLocal = RichDocument("AP_old");
+        var newLocal = RichDocument("AP_new");
+        var candidates = new CandidateLyricsProvider([new LyricsMatch(oldLocal, 100, 0, HasContentMatch: true)]);
+        var player = new MutableEnrichmentPlayer(new PlayerState("Song A", "Artist", "Album", 1, 180, true));
+        var oldCompletion = new TaskCompletionSource<LyricsDocument?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = new DelegateEnrichmentProvider("Platform", (state, _) => state.Title == "Song A"
+            ? oldCompletion.Task : Task.FromResult<LyricsDocument?>(null));
+        await using var runtime = EnrichmentRuntime(oldLocal, [provider], words: true,
+            lyricsProvider: candidates, playerProvider: player);
+
+        await runtime.SnapshotAsync();
+        await provider.Started.WaitAsync(TimeSpan.FromSeconds(2));
+        player.State = player.State with { Title = "Song B" };
+        candidates.Candidates = [new LyricsMatch(newLocal, 100, 0, HasContentMatch: true)];
+        Assert.Same(newLocal, (await runtime.SnapshotAsync()).Document);
+        await provider.FirstCanceled.WaitAsync(TimeSpan.FromSeconds(2));
+        oldCompletion.SetResult(RichDocument("QQ_old", words: true));
+        for (var poll = 0; poll < 5; poll++)
+        {
+            Assert.Same(newLocal, (await runtime.SnapshotAsync()).Document);
+            await Task.Delay(1);
+        }
+        var current = await WaitForSnapshotAsync(runtime,
+            snapshot => snapshot.ExternalDiagnostics?.EnrichmentState == ExternalLyricsQueryState.Completed);
+        var diagnostic = Assert.Single(current.ExternalDiagnostics!.Providers,
+            item => item.Stage == ExternalLyricsQueryStage.Enrichment);
+        Assert.Equal(ExternalLyricsQueryOutcome.NoResult, diagnostic.Outcome);
+        Assert.Equal(0, diagnostic.LineCount);
+        Assert.Same(newLocal, current.Document);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_DurationCorrectionCancelsTheOldEnrichmentScope()
+    {
+        var local = RichDocument("AP_local");
+        var candidates = new CandidateLyricsProvider([new LyricsMatch(local, 100, 0, HasContentMatch: true)]);
+        var player = new MutableEnrichmentPlayer(new PlayerState("Song", "Artist", "Album", 1, 180, true));
+        var oldCompletion = new TaskCompletionSource<LyricsDocument?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = new DelegateEnrichmentProvider("Platform", (state, _) => state.Duration == 180
+            ? oldCompletion.Task : Task.FromResult<LyricsDocument?>(null));
+        await using var runtime = EnrichmentRuntime(local, [provider], words: true,
+            lyricsProvider: candidates, playerProvider: player);
+
+        await runtime.SnapshotAsync();
+        await provider.Started.WaitAsync(TimeSpan.FromSeconds(2));
+        player.State = player.State with { Duration = 184 };
+        var corrected = local with { DurationSeconds = 184 };
+        candidates.Candidates = [new LyricsMatch(corrected, 100, 0, HasContentMatch: true)];
+        Assert.Same(corrected, (await runtime.SnapshotAsync()).Document);
+        await provider.FirstCanceled.WaitAsync(TimeSpan.FromSeconds(2));
+        oldCompletion.SetResult(RichDocument("QQ_old_duration", words: true));
+        Assert.Same(corrected, (await runtime.SnapshotAsync()).Document);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_EnrichmentRetriesTransientFailuresAtMostThreeTimesAndKeepsBase()
+    {
+        var local = RichDocument("AP_local");
+        var provider = new DelegateEnrichmentProvider("Failing platform", (_, _) =>
+            Task.FromException<LyricsDocument?>(new HttpRequestException("temporary")));
+        await using var runtime = EnrichmentRuntime(local, [provider], words: true);
+
+        await WaitForSnapshotAsync(runtime, _ => provider.CallCount == 3);
+        for (var poll = 0; poll < 10; poll++)
+        {
+            Assert.Same(local, (await runtime.SnapshotAsync()).Document);
+            await Task.Delay(1);
+        }
+        Assert.Equal(3, provider.CallCount);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_EnrichmentCanRecoverAfterTransientFailure()
+    {
+        var local = RichDocument("AP_local");
+        var rich = RichDocument("QQ_recovered", words: true);
+        var calls = 0;
+        var provider = new DelegateEnrichmentProvider("Platform", (_, _) => Interlocked.Increment(ref calls) == 1
+            ? Task.FromException<LyricsDocument?>(new HttpRequestException("temporary"))
+            : Task.FromResult<LyricsDocument?>(rich));
+        await using var runtime = EnrichmentRuntime(local, [provider], words: true);
+
+        var upgraded = await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, rich));
+
+        Assert.Same(rich, upgraded.Document);
+        Assert.Equal(2, provider.CallCount);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_ReportsEveryFallbackSourceWithoutTreatingNullAsProvenNoMatch()
+    {
+        var empty = new DelegateEnrichmentProvider("Empty", (_, _) => Task.FromResult<LyricsDocument?>(null));
+        var failed = new DelegateEnrichmentProvider("Forbidden", (_, _) => Task.FromException<LyricsDocument?>(
+            new HttpRequestException("secret cookie and request URL", null, System.Net.HttpStatusCode.Forbidden)));
+        var rich = RichDocument("QQ_diagnostic", words: true, translation: true);
+        var success = new DelegateEnrichmentProvider("QQ Music", (_, _) => Task.FromResult<LyricsDocument?>(rich));
+        var skipped = new DelegateEnrichmentProvider("Not needed", (_, _) => Task.FromResult<LyricsDocument?>(null));
+        await using var runtime = EnrichmentRuntime(rich, [empty, failed, success, skipped],
+            lyricsProvider: new CandidateLyricsProvider([]));
+
+        var result = await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, rich));
+        var diagnostics = result.ExternalDiagnostics!;
+        var sources = diagnostics.Providers.Where(item => item.Stage == ExternalLyricsQueryStage.Fallback).ToArray();
+
+        Assert.Equal(ExternalLyricsQueryState.Satisfied, diagnostics.FallbackState);
+        Assert.Equal(1, diagnostics.FallbackAttempt);
+        Assert.Equal(ExternalLyricsQueryOutcome.NoResult, sources[0].Outcome);
+        Assert.Equal(ExternalLyricsDiagnosticReason.NoDocumentReturned, sources[0].Reason);
+        Assert.Equal(ExternalLyricsQueryOutcome.Failed, sources[1].Outcome);
+        Assert.Equal(nameof(HttpRequestException), sources[1].ExceptionType);
+        Assert.Equal(ExternalLyricsFailureReason.HttpError, sources[1].FailureReason);
+        Assert.Equal(403, sources[1].HttpStatusCode);
+        Assert.DoesNotContain("secret", sources[1].Detail!);
+        Assert.Equal(ExternalLyricsQueryOutcome.Success, sources[2].Outcome);
+        Assert.Equal((1, 1, 1), (sources[2].LineCount, sources[2].WordLineCount, sources[2].TranslatedLineCount));
+        Assert.Equal(ExternalLyricsQueryOutcome.Skipped, sources[3].Outcome);
+        Assert.Equal(0, skipped.CallCount);
+        Assert.Same(diagnostics, runtime.GetFrameSnapshot().ExternalDiagnostics);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_ReportsTranslationRejectedToRetainWordsWhileAnotherSourceIsPending()
+    {
+        var local = RichDocument("AP_words", words: true);
+        var translated = RichDocument("NE_translation", translation: true);
+        var translationSource = new DelegateEnrichmentProvider("NetEase Cloud Music", (_, _) => Task.FromResult<LyricsDocument?>(translated));
+        var completion = new TaskCompletionSource<LyricsDocument?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pending = new DelegateEnrichmentProvider("Pending", (_, _) => completion.Task);
+        await using var runtime = EnrichmentRuntime(local, [translationSource, pending], words: true, translation: true);
+
+        await runtime.SnapshotAsync();
+        await pending.Started.WaitAsync(TimeSpan.FromSeconds(2));
+        var during = await runtime.SnapshotAsync();
+        var duringSources = during.ExternalDiagnostics!.Providers.Where(item => item.Stage == ExternalLyricsQueryStage.Enrichment).ToArray();
+
+        Assert.Same(local, during.Document);
+        Assert.Equal(ExternalLyricsQueryState.Querying, during.ExternalDiagnostics.EnrichmentState);
+        Assert.Equal(ExternalLyricsQueryOutcome.Rejected, duringSources[0].Outcome);
+        Assert.Equal(ExternalLyricsDiagnosticReason.WouldLoseWordTimings, duringSources[0].Reason);
+        Assert.Equal(1, duringSources[0].TranslatedLineCount);
+        Assert.Equal(ExternalLyricsQueryOutcome.Querying, duringSources[1].Outcome);
+        Assert.True(during.ExternalDiagnostics.MissingTranslations);
+        Assert.False(during.ExternalDiagnostics.MissingWordTimings);
+        completion.SetResult(null);
+
+        var complete = await WaitForSnapshotAsync(runtime,
+            snapshot => snapshot.ExternalDiagnostics?.EnrichmentState == ExternalLyricsQueryState.Completed);
+        var completedSource = complete.ExternalDiagnostics!.Providers.Single(item =>
+            item.Stage == ExternalLyricsQueryStage.Enrichment && item.Source == "Pending");
+        Assert.Equal(ExternalLyricsQueryOutcome.NoResult, completedSource.Outcome);
+        // Published snapshots are immutable even as the next poll adopts more evidence.
+        Assert.Equal(ExternalLyricsQueryOutcome.Querying, duringSources[1].Outcome);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_DiagnosticsExplainRetryWaitingAndFinalFailureWithoutLosingLocalLyrics()
+    {
+        var local = RichDocument("AP_local");
+        var time = new ManualTimeProvider();
+        var failing = new DelegateEnrichmentProvider("Timed out", (_, _) =>
+            Task.FromException<LyricsDocument?>(new TimeoutException("private response data")));
+        await using var runtime = new LyricsRuntimeService(
+            new CandidateLyricsProvider([new LyricsMatch(local, 100, 0, HasContentMatch: true)]),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1, 180, true)),
+            new LyricsSynchronizer(), timeProvider: time)
+        {
+            PreferTranslations = true,
+            ExternalLyricsProviders = [failing],
+            ExternalRetryBaseDelay = TimeSpan.FromSeconds(2),
+        };
+
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            var expectedState = attempt < 3 ? ExternalLyricsQueryState.RetryWaiting : ExternalLyricsQueryState.Completed;
+            var snapshot = await WaitForSnapshotAsync(runtime, item =>
+                item.ExternalDiagnostics is { } state && state.EnrichmentAttempt == attempt && state.EnrichmentState == expectedState);
+            Assert.Same(local, snapshot.Document);
+            var source = Assert.Single(snapshot.ExternalDiagnostics!.Providers,
+                item => item.Stage == ExternalLyricsQueryStage.Enrichment);
+            Assert.Equal(attempt, source.Attempt);
+            Assert.Equal(ExternalLyricsQueryOutcome.Failed, source.Outcome);
+            Assert.Equal(ExternalLyricsFailureReason.Timeout, source.FailureReason);
+            Assert.Equal(nameof(TimeoutException), source.ExceptionType);
+            Assert.DoesNotContain("private", source.Detail!);
+            if (attempt < 3) time.Advance(TimeSpan.FromSeconds(10));
+            else Assert.Contains("source requests failed", snapshot.Resolution.Summary);
+        }
+        Assert.Equal(3, failing.CallCount);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_CancelsIndependentEnrichment()
+    {
+        var pending = new TaskCompletionSource<LyricsDocument?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = new DelegateEnrichmentProvider("Platform", (_, _) => pending.Task);
+        var runtime = EnrichmentRuntime(RichDocument("AP_local"), [provider], words: true);
+
+        await runtime.SnapshotAsync();
+        await provider.Started.WaitAsync(TimeSpan.FromSeconds(2));
+        await runtime.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(2));
+        await provider.FirstCanceled.WaitAsync(TimeSpan.FromSeconds(2));
+        pending.SetResult(null);
+    }
+
+    private static LyricsRuntimeService EnrichmentRuntime(LyricsDocument local,
+        IReadOnlyList<IExternalLyricsProvider> providers, bool words = false, bool translation = false,
+        ILyricsDocumentProvider? lyricsProvider = null, IPlayerSessionProvider? playerProvider = null) => new(
+            lyricsProvider ?? new CandidateLyricsProvider([new LyricsMatch(local, 100, 0, HasContentMatch: true)]),
+            playerProvider ?? new StubPlayerProvider(new PlayerState("Song", "Artist", "Album", 1, 180, true)),
+            new LyricsSynchronizer(), new PlaybackClock())
+        {
+            ExternalLyricsProviders = providers,
+            PreferWordTimings = words,
+            PreferTranslations = translation,
+            ExternalRetryBaseDelay = TimeSpan.Zero,
+        };
+
+    private static LyricsDocument RichDocument(string id, bool words = false, bool translation = false) =>
+        BuildDocument(id, 180, "hello world") with
+        {
+            Lines = [new LyricsLine(0, 5, "hello world",
+                Words: words ? [new LyricWord(0, 2, "hello "), new LyricWord(2, 5, "world")] : null,
+                Translation: translation ? "你好，世界" : null)],
+        };
+
+    private static async Task<RuntimeSnapshot> WaitForSnapshotAsync(LyricsRuntimeService runtime, Func<RuntimeSnapshot, bool> predicate)
+    {
+        for (var poll = 0; poll < 150; poll++)
+        {
+            var snapshot = await runtime.SnapshotAsync();
+            if (predicate(snapshot)) return snapshot;
+            await Task.Delay(10);
+        }
+        throw new TimeoutException("The expected background lyric result was not adopted.");
+    }
+
+    private sealed class DelegateEnrichmentProvider(string name,
+        Func<PlayerState, CancellationToken, Task<LyricsDocument?>> fetch) : IExternalLyricsProvider
+    {
+        private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _firstCanceled = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _calls;
+        public string Name => name;
+        public int CallCount => Volatile.Read(ref _calls);
+        public Task Started => _started.Task;
+        public Task FirstCanceled => _firstCanceled.Task;
+
+        public async Task<LyricsDocument?> FetchAsync(PlayerState player, CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _calls);
+            _started.TrySetResult();
+            using var registration = cancellationToken.Register(() => _firstCanceled.TrySetResult());
+            return await fetch(player, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private sealed class MutableEnrichmentPlayer(PlayerState state) : IPlayerSessionProvider
+    {
+        public PlayerState State { get; set; } = state;
+        public Task<PlayerState?> GetCurrentPlayerStateAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<PlayerState?>(State);
+    }
+
     private static LyricsDocument BuildDocument(
         string lyricsId,
         double durationSeconds,
@@ -1269,6 +1825,8 @@ public sealed class LyricsRuntimeServiceTests
         public override long TimestampFrequency => 1_000_000;
 
         public override long GetTimestamp() => _timestamp;
+
+        public override DateTimeOffset GetUtcNow() => DateTimeOffset.UnixEpoch.AddTicks(_timestamp * 10);
 
         public void Advance(TimeSpan amount)
         {

@@ -17,7 +17,17 @@
     <Resource Include="Fonts\Optima.ttf" />
     <None Update="Fonts\Optima.ttf">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
     </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Localization\Languages\*.json" Link="Languages\%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest"
+             ExcludeFromSingleFile="true" />
+    <EmbeddedResource Include="Localization\Languages\en-US.json"
+                      LogicalName="AppleMusicLyrics.Localization.en-US.json" />
   </ItemGroup>
 
   <ItemGroup>

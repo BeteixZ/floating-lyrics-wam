@@ -150,6 +150,113 @@ public sealed class ITunesCatalogSongResolverTests
         Assert.Empty(await resolver.ResolveLyricsIdCandidatesAsync(player));
     }
 
+    [Fact]
+    public async Task ResolveLyricsIdCandidatesAsync_RejectsTheFullSongForAnIntro()
+    {
+        var handler = new StubHandler("""
+        {"resultCount": 1, "results": [
+          {"trackId": 1, "trackName": "Family Tree", "artistName": "Ethel Cain",
+           "collectionName": "Preacher’s Daughter", "trackTimeMillis": 430000}
+        ]}
+        """);
+        using var resolver = new ITunesCatalogSongResolver("us", cachePath: null, messageHandler: handler);
+        var player = new PlayerState("Family Tree (Intro)", "Ethel Cain", "Preacher’s Daughter", 0, 221, true);
+
+        Assert.Empty(await resolver.ResolveLyricsIdCandidatesAsync(player));
+    }
+
+    [Fact]
+    public async Task ResolveLyricsIdCandidatesAsync_RejectsADifferentArtistEvenWhenTitleAndDurationMatch()
+    {
+        var handler = new StubHandler("""
+        {"resultCount": 1, "results": [
+          {"trackId": 7, "trackName": "Song", "artistName": "Someone Else",
+           "collectionName": "Album", "trackTimeMillis": 180000}
+        ]}
+        """);
+        using var resolver = new ITunesCatalogSongResolver("us", cachePath: null, messageHandler: handler);
+        var player = new PlayerState("Song", "Artist", "Album", 0, 180, true);
+
+        Assert.Empty(await resolver.ResolveLyricsIdCandidatesAsync(player));
+    }
+
+    [Fact]
+    public async Task ResolveLyricsIdCandidatesAsync_ContinuesStorefrontsAfterAnExactTitleWithTheWrongDuration()
+    {
+        var handler = new StorefrontHandler(request => request.RequestUri!.Query.Contains("country=us", StringComparison.Ordinal)
+            ? """
+              {"resultCount": 1, "results": [
+                {"trackId": 1, "trackName": "Family Tree (Intro)", "artistName": "Ethel Cain",
+                 "collectionName": "Preacher’s Daughter", "trackTimeMillis": 430000}
+              ]}
+              """
+            : """
+              {"resultCount": 1, "results": [
+                {"trackId": 2, "trackName": "Family Tree (Intro)", "artistName": "Ethel Cain",
+                 "collectionName": "Preacher’s Daughter", "trackTimeMillis": 221000}
+              ]}
+              """);
+        using var resolver = new ITunesCatalogSongResolver("us,cn,jp", cachePath: null, messageHandler: handler);
+        var player = new PlayerState("Family Tree (Intro)", "Ethel Cain", "Preacher’s Daughter", 0, 221, true);
+
+        Assert.Equal(["AP_2"], await resolver.ResolveLyricsIdCandidatesAsync(player));
+        Assert.Equal(2, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task ResolveLyricsIdCandidatesAsync_IgnoresLegacyCachedIdsAndPersistsTheValidatedKey()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "AppleMusicLyrics.Tests", Guid.NewGuid().ToString("N"));
+        var cachePath = Path.Combine(directory, "catalog.json");
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(cachePath, """{"familytreeintro|ethelcain|preachersdaughter|221":["AP_1"]}""");
+        var handler = new StubHandler("""
+        {"resultCount": 1, "results": [
+          {"trackId": 2, "trackName": "Family Tree (Intro)", "artistName": "Ethel Cain",
+           "collectionName": "Preacher’s Daughter", "trackTimeMillis": 221000}
+        ]}
+        """);
+        var player = new PlayerState("Family Tree (Intro)", "Ethel Cain", "Preacher’s Daughter", 0, 221, true);
+        try
+        {
+            using (var resolver = new ITunesCatalogSongResolver("us", cachePath, messageHandler: handler))
+            {
+                Assert.Equal(["AP_2"], await resolver.ResolveLyricsIdCandidatesAsync(player));
+                Assert.Equal(1, handler.RequestCount);
+            }
+            using (var cache = System.Text.Json.JsonDocument.Parse(File.ReadAllText(cachePath)))
+            {
+                // Preserve the old entry without trusting it. No user cache file is deleted.
+                Assert.Equal("AP_1", cache.RootElement.GetProperty("familytreeintro|ethelcain|preachersdaughter|221")[0].GetString());
+                Assert.Equal("AP_2", cache.RootElement.GetProperty("v2|familytreeintro|ethelcain|preachersdaughter|221")[0].GetString());
+            }
+            var offline = new StubHandler(statusCode: HttpStatusCode.ServiceUnavailable);
+            using (var resolver = new ITunesCatalogSongResolver("us", cachePath, messageHandler: offline))
+            {
+                Assert.Equal(["AP_2"], await resolver.ResolveLyricsIdCandidatesAsync(player));
+                Assert.Equal(0, offline.RequestCount);
+            }
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private sealed class StorefrontHandler(Func<HttpRequestMessage, string> payload) : HttpMessageHandler
+    {
+        public int RequestCount { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(payload(request)),
+            });
+        }
+    }
+
     private sealed class StubHandler : HttpMessageHandler
     {
         private readonly string _payload;

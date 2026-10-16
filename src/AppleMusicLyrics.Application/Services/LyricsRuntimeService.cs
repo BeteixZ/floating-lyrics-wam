@@ -1,3 +1,6 @@
+using System.Collections.Concurrent;
+using System.Net.Http;
+using System.Text.Json;
 using AppleMusicLyrics.Core.Abstractions;
 using AppleMusicLyrics.Core.Matching;
 using AppleMusicLyrics.Core.Models;
@@ -39,6 +42,17 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
     private int _externalAttemptCount;
     private bool _externalLookupComplete;
     private DateTimeOffset _externalNextAttemptAt = DateTimeOffset.MinValue;
+    private ConcurrentQueue<ProviderDiagnosticUpdate>? _externalDiagnosticUpdates;
+    private ExternalLyricsDiagnostic[] _fallbackDiagnostics = [];
+    private ExternalLyricsDiagnostic[] _enrichmentDiagnostics = [];
+    private ExternalLyricsQueryState _fallbackState;
+    private ExternalLyricsQueryState _enrichmentState;
+    private EnrichmentScope? _enrichmentScope;
+    private EnrichmentAttempt? _enrichmentAttempt;
+    private EnrichmentUpdate? _enrichedLyrics;
+    private int _enrichmentAttemptCount;
+    private bool _enrichmentLookupComplete;
+    private DateTimeOffset _enrichmentNextAttemptAt = DateTimeOffset.MinValue;
     private LyricsResolution _resolution = LyricsResolution.NoPlayer;
     private bool _disposed;
 
@@ -79,10 +93,15 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
     /// </summary>
     public bool AllowLowConfidenceLyrics { get; set; }
 
+    /// <summary>Keep the fast base result visible while looking for real word timings.</summary>
+    public bool PreferWordTimings { get; set; }
+
+    /// <summary>Keep the fast base result visible while looking for translated lyrics.</summary>
+    public bool PreferTranslations { get; set; }
+
     /// <summary>
-    /// Consulted in order, and only for songs Apple's own cache has nothing for. These reach the
-    /// network, so they are fetched on a background task rather than inside the poll: a lyrics
-    /// service being slow must never stall the position updates driving the display.
+    /// Consulted in order for missing local lyrics, and optionally for richer word timings or
+    /// translations. Network work never stalls the position updates driving the display.
     /// </summary>
     public IReadOnlyList<IExternalLyricsProvider> ExternalLyricsProviders { get; init; } = Array.Empty<IExternalLyricsProvider>();
 
@@ -118,12 +137,14 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
         var sessionChanged = UpdateClock(rawPlayer);
         var document = await ResolveCurrentDocumentAsync(rawPlayer, sessionChanged, cancellationToken).ConfigureAwait(false);
 
-        // Apple's own cache is authoritative when it has the song, so an external source is only
-        // consulted once the local search has come up empty.
-        if (document is null && CanStartOrAdoptExternalLookup())
+        // Reusing this track's completed external result must not depend on a diagnostic status
+        // left by the preceding poll. Catalog gating applies to starting a fresh lookup only.
+        if (document is null && (_externalDocument is not null || CanStartOrAdoptExternalLookup()))
         {
             document = ResolveExternalDocument(rawPlayer);
         }
+
+        document = ResolveEnrichedDocument(rawPlayer, document);
 
         var estimatedPosition = _playbackClock.GetEstimatedPosition();
         if (rawPlayer.Duration > 0)
@@ -143,7 +164,8 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             activeLyric,
             _resolution,
             RawPositionSeconds: rawPlayer.Position,
-            EstimatedPositionSeconds: estimatedPosition));
+            EstimatedPositionSeconds: estimatedPosition,
+            ExternalDiagnostics: CreateExternalDiagnostics(document)));
     }
 
     /// <summary>
@@ -238,6 +260,11 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
         _matchedAgainstDuration = 0;
         ResetCatalogLookup();
         CancelExternalFetch();
+        ResetEnrichmentLookup();
+        _fallbackDiagnostics = [];
+        _enrichmentDiagnostics = [];
+        _fallbackState = ExternalLyricsQueryState.NotStarted;
+        _enrichmentState = ExternalLyricsQueryState.NotStarted;
         _resolution = LyricsResolution.NoPlayer;
     }
 
@@ -253,6 +280,11 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             ResetCatalogLookup();
             _lastScanAt = DateTimeOffset.MinValue;
             CancelExternalFetch();
+            ResetEnrichmentLookup();
+            _fallbackDiagnostics = CreateProviderDiagnostics(ExternalLyricsQueryStage.Fallback);
+            _enrichmentDiagnostics = CreateProviderDiagnostics(ExternalLyricsQueryStage.Enrichment);
+            _fallbackState = ExternalLyricsQueryState.NotStarted;
+            _enrichmentState = ExternalLyricsQueryState.NotStarted;
             _resolution = CreateResolution(
                 LyricsResolutionStatus.SearchingLocal,
                 "Track changed; searching the Apple Music lyric cache.");
@@ -598,8 +630,11 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             return null;
         }
 
+        DrainProviderDiagnostics(_externalDiagnosticUpdates, _fallbackDiagnostics);
         if (_externalFetch is { IsCompleted: true })
         {
+            // Completion may race the preceding drain; no more writes can follow this drain.
+            DrainProviderDiagnostics(_externalDiagnosticUpdates, _fallbackDiagnostics);
             if (_externalFetch.Status == TaskStatus.RanToCompletion &&
                 _externalFetchGeneration == _trackGeneration)
             {
@@ -608,6 +643,9 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
                 {
                     _externalDocument = result.Document;
                     _externalLookupComplete = true;
+                    _fallbackState = ExternalLyricsQueryState.Satisfied;
+                    MarkUnstartedProviders(_fallbackDiagnostics, ExternalLyricsQueryOutcome.Skipped,
+                        ExternalLyricsDiagnosticReason.AlreadySatisfied);
                     _resolution = CarryCandidateEvidence(
                         LyricsResolutionStatus.Resolved,
                         LyricsResolutionConfidence.Medium,
@@ -618,6 +656,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
                 {
                     _externalNextAttemptAt = _timeProvider.GetUtcNow()
                         + GetRetryDelay(ExternalRetryBaseDelay, _externalAttemptCount);
+                    _fallbackState = ExternalLyricsQueryState.RetryWaiting;
                     _resolution = CarryCandidateEvidence(
                         LyricsResolutionStatus.FetchingExternal,
                         LyricsResolutionConfidence.None,
@@ -627,6 +666,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
                 else
                 {
                     _externalLookupComplete = true;
+                    _fallbackState = ExternalLyricsQueryState.Completed;
                     _resolution = CarryCandidateEvidence(
                         LyricsResolutionStatus.Unavailable,
                         LyricsResolutionConfidence.None,
@@ -640,10 +680,16 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             _externalFetchCancellation?.Dispose();
             _externalFetchCancellation = null;
             _externalFetch = null;
+            _externalDiagnosticUpdates = null;
         }
 
         if (_externalDocument is not null)
         {
+            _resolution = CarryCandidateEvidence(
+                LyricsResolutionStatus.Resolved,
+                LyricsResolutionConfidence.Medium,
+                LyricsResolutionSource.ExternalProvider,
+                "An external lyric provider returned usable lyrics.");
             return _externalDocument;
         }
 
@@ -658,12 +704,17 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             _externalAttemptCount++;
             _externalFetchGeneration = _trackGeneration;
             _externalFetchCancellation = new CancellationTokenSource();
+            _fallbackDiagnostics = CreateProviderDiagnostics(ExternalLyricsQueryStage.Fallback, _externalAttemptCount);
+            _externalDiagnosticUpdates = new ConcurrentQueue<ProviderDiagnosticUpdate>();
+            _fallbackState = ExternalLyricsQueryState.Querying;
             _resolution = CarryCandidateEvidence(
                 LyricsResolutionStatus.FetchingExternal,
                 LyricsResolutionConfidence.None,
                 LyricsResolutionSource.None,
                 $"Querying external lyric providers (attempt {_externalAttemptCount}/{MaxExternalAttempts}).");
-            _externalFetch = FetchExternalLyricsAsync(player, _externalFetchCancellation.Token);
+            _externalFetch = FetchExternalLyricsAsync(player, _externalFetchCancellation.Token,
+                _externalDiagnosticUpdates, _externalAttemptCount);
+            DrainProviderDiagnostics(_externalDiagnosticUpdates, _fallbackDiagnostics);
         }
         else if (_externalFetch is not null)
         {
@@ -679,18 +730,32 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
 
     private async Task<ExternalFetchResult> FetchExternalLyricsAsync(
         PlayerState player,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ConcurrentQueue<ProviderDiagnosticUpdate> diagnostics,
+        int attempt)
     {
         var transientFailures = new List<string>();
-        foreach (var provider in ExternalLyricsProviders)
+        LyricsDocument? plainFallback = null;
+        for (var index = 0; index < ExternalLyricsProviders.Count; index++)
         {
+            var provider = ExternalLyricsProviders[index];
             cancellationToken.ThrowIfCancellationRequested();
+            var diagnostic = new ExternalLyricsDiagnostic(provider.Name, ExternalLyricsQueryStage.Fallback,
+                ExternalLyricsQueryOutcome.Querying, attempt);
+            diagnostics.Enqueue(new ProviderDiagnosticUpdate(index, diagnostic));
 
             try
             {
                 var document = await provider.FetchAsync(player, cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                diagnostics.Enqueue(new ProviderDiagnosticUpdate(index, DescribeDocument(diagnostic, document)));
                 if (document is not null && document.Lines.Count > 0)
                 {
+                    if (string.Equals(document.Status, "plain", StringComparison.OrdinalIgnoreCase))
+                    {
+                        plainFallback ??= document;
+                        continue;
+                    }
                     return new ExternalFetchResult(document, false, null);
                 }
             }
@@ -700,27 +765,406 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             }
             catch (Exception ex)
             {
+                diagnostics.Enqueue(new ProviderDiagnosticUpdate(index, DescribeFailure(diagnostic, ex)));
                 transientFailures.Add($"{provider.Name}: {ex.GetType().Name}");
             }
         }
 
-        return transientFailures.Count > 0
+        return plainFallback is not null
+            ? new ExternalFetchResult(plainFallback, false, null)
+            : transientFailures.Count > 0
             ? new ExternalFetchResult(null, true, string.Join(", ", transientFailures))
             : new ExternalFetchResult(null, false, null);
     }
 
     private void CancelExternalFetch()
     {
+        DrainProviderDiagnostics(_externalDiagnosticUpdates, _fallbackDiagnostics);
+        if (_externalFetch is not null)
+        {
+            _fallbackState = ExternalLyricsQueryState.Canceled;
+            MarkPendingProvidersCanceled(_fallbackDiagnostics);
+        }
         _externalFetchCancellation?.Cancel();
         _externalFetchCancellation?.Dispose();
         _externalFetchCancellation = null;
         _externalFetch = null;
+        _externalDiagnosticUpdates = null;
         _externalFetchGeneration = 0;
         _externalDocument = null;
         _externalAttemptCount = 0;
         _externalLookupComplete = false;
         _externalNextAttemptAt = DateTimeOffset.MinValue;
     }
+
+    private LyricsDocument? ResolveEnrichedDocument(PlayerState player, LyricsDocument? baseDocument)
+    {
+        var scope = new EnrichmentScope(_trackGeneration, player.Duration, PreferWordTimings, PreferTranslations);
+        if (_enrichmentScope != scope)
+        {
+            ResetEnrichmentLookup();
+            _enrichmentScope = scope;
+        }
+        if ((!scope.Words && !scope.Translation) || ExternalLyricsProviders.Count == 0
+            || !double.IsFinite(player.Duration) || player.Duration <= 0)
+        {
+            return baseDocument;
+        }
+
+        var selected = baseDocument;
+        if (_enrichedLyrics is not null
+            && (selected is null || IsRicherDocument(selected, _enrichedLyrics.Document, scope)))
+        {
+            selected = _enrichedLyrics.Document;
+        }
+
+        if (_enrichmentAttempt is { } attempt)
+        {
+            DrainProviderDiagnostics(attempt.Diagnostics, _enrichmentDiagnostics);
+            while (attempt.Updates.TryDequeue(out var update))
+            {
+                if (selected is null || IsRicherDocument(selected, update.Document, scope))
+                {
+                    selected = update.Document;
+                    _enrichedLyrics = update;
+                }
+            }
+
+            if (attempt.Fetch.IsCompleted)
+            {
+                DrainProviderDiagnostics(attempt.Diagnostics, _enrichmentDiagnostics);
+                // Completion can race the first drain. Once completed, no later update can be
+                // enqueued, so drain once more before releasing this attempt's queue.
+                while (attempt.Updates.TryDequeue(out var update))
+                {
+                    if (selected is null || IsRicherDocument(selected, update.Document, scope))
+                    {
+                        selected = update.Document;
+                        _enrichedLyrics = update;
+                    }
+                }
+                var transientFailure = attempt.Fetch.Status == TaskStatus.RanToCompletion
+                    && attempt.Fetch.Result.IsTransientFailure;
+                CancelEnrichmentAttempt();
+                if (transientFailure && _enrichmentAttemptCount < MaxExternalAttempts
+                    && selected is not null && !HasRequestedFeatures(selected, scope))
+                {
+                    _enrichmentNextAttemptAt = _timeProvider.GetUtcNow()
+                        + GetRetryDelay(ExternalRetryBaseDelay, _enrichmentAttemptCount);
+                    _enrichmentState = ExternalLyricsQueryState.RetryWaiting;
+                }
+                else
+                {
+                    _enrichmentLookupComplete = true;
+                    _enrichmentState = ExternalLyricsQueryState.Completed;
+                }
+            }
+        }
+
+        if (selected is null)
+        {
+            return null;
+        }
+        if (HasRequestedFeatures(selected, scope))
+        {
+            CancelEnrichmentAttempt();
+            _enrichmentLookupComplete = true;
+            _enrichmentState = ExternalLyricsQueryState.Satisfied;
+            MarkUnstartedProviders(_enrichmentDiagnostics, ExternalLyricsQueryOutcome.Skipped,
+                ExternalLyricsDiagnosticReason.AlreadySatisfied);
+        }
+        else if (!_enrichmentLookupComplete && _enrichmentAttempt is null
+            && _enrichmentAttemptCount < MaxExternalAttempts
+            && _timeProvider.GetUtcNow() >= _enrichmentNextAttemptAt)
+        {
+            var cancellation = new CancellationTokenSource();
+            var updates = new ConcurrentQueue<EnrichmentUpdate>();
+            var diagnostics = new ConcurrentQueue<ProviderDiagnosticUpdate>();
+            var initialDocument = selected;
+            var token = cancellation.Token;
+            _enrichmentAttemptCount++;
+            _enrichmentDiagnostics = CreateProviderDiagnostics(ExternalLyricsQueryStage.Enrichment, _enrichmentAttemptCount);
+            _enrichmentState = ExternalLyricsQueryState.Querying;
+            var attemptNumber = _enrichmentAttemptCount;
+            _enrichmentAttempt = new EnrichmentAttempt(cancellation, updates, diagnostics,
+                Task.Run(() => FetchEnrichmentAsync(player, initialDocument, scope, updates, diagnostics, attemptNumber, token)));
+        }
+
+        if (_enrichedLyrics is not null && ReferenceEquals(selected, _enrichedLyrics.Document))
+        {
+            _resolution = CarryCandidateEvidence(LyricsResolutionStatus.Resolved,
+                LyricsResolutionConfidence.Medium, LyricsResolutionSource.ExternalProvider,
+                $"Using richer lyrics from {_enrichedLyrics.ProviderName}.");
+        }
+        if (!HasRequestedFeatures(selected, scope))
+        {
+            var missing = scope.Words && !HasUsableWords(selected)
+                ? scope.Translation && !HasTranslation(selected) ? "word timings and translations" : "word timings"
+                : "translations";
+            var source = _enrichedLyrics is not null && ReferenceEquals(selected, _enrichedLyrics.Document)
+                ? $"Lyrics from {_enrichedLyrics.ProviderName} remain visible" : "Existing lyrics remain visible";
+            _resolution = _resolution with
+            {
+                Status = LyricsResolutionStatus.Resolved,
+                Summary = _enrichmentLookupComplete
+                    ? _enrichmentDiagnostics.Any(diagnostic => diagnostic.Outcome == ExternalLyricsQueryOutcome.Failed)
+                        ? $"{source}; the missing {missing} remain unresolved because some source requests failed."
+                        : $"{source}; checked sources did not provide an adoptable result for the missing {missing}."
+                    : $"{source} while checking missing {missing}.",
+            };
+        }
+        return selected;
+    }
+
+    private async Task<EnrichmentFetchResult> FetchEnrichmentAsync(PlayerState player, LyricsDocument initialDocument,
+        EnrichmentScope scope, ConcurrentQueue<EnrichmentUpdate> updates,
+        ConcurrentQueue<ProviderDiagnosticUpdate> diagnostics, int attempt, CancellationToken cancellationToken)
+    {
+        var best = initialDocument;
+        var failed = false;
+        for (var index = 0; index < ExternalLyricsProviders.Count; index++)
+        {
+            var provider = ExternalLyricsProviders[index];
+            cancellationToken.ThrowIfCancellationRequested();
+            var diagnostic = new ExternalLyricsDiagnostic(provider.Name, ExternalLyricsQueryStage.Enrichment,
+                ExternalLyricsQueryOutcome.Querying, attempt);
+            diagnostics.Enqueue(new ProviderDiagnosticUpdate(index, diagnostic));
+            try
+            {
+                // WaitAsync also scopes providers which fail to honor cancellation themselves.
+                var fetch = provider.FetchAsync(player, cancellationToken);
+                ObserveFault(fetch);
+                var document = await fetch.WaitAsync(cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                var resultDiagnostic = DescribeDocument(diagnostic, document);
+                if (document is not null && IsRicherDocument(best, document, scope))
+                {
+                    diagnostics.Enqueue(new ProviderDiagnosticUpdate(index, resultDiagnostic));
+                    best = document;
+                    updates.Enqueue(new EnrichmentUpdate(document, provider.Name));
+                    if (HasRequestedFeatures(document, scope))
+                    {
+                        return new EnrichmentFetchResult(false);
+                    }
+                }
+                else
+                {
+                    if (document is { Lines.Count: > 0 })
+                    {
+                        resultDiagnostic = resultDiagnostic with
+                        {
+                            Outcome = ExternalLyricsQueryOutcome.Rejected,
+                            Reason = DescribeRejection(best, document, scope),
+                        };
+                    }
+                    diagnostics.Enqueue(new ProviderDiagnosticUpdate(index, resultDiagnostic));
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception error)
+            {
+                diagnostics.Enqueue(new ProviderDiagnosticUpdate(index, DescribeFailure(diagnostic, error)));
+                failed = true;
+            }
+        }
+        return new EnrichmentFetchResult(failed);
+    }
+
+    private static bool IsRicherDocument(LyricsDocument current, LyricsDocument candidate, EnrichmentScope scope)
+    {
+        if (candidate.Lines.Count == 0 || string.Equals(candidate.Status, "plain", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        var currentWords = HasUsableWords(current);
+        var candidateWords = HasUsableWords(candidate);
+        var currentTranslation = HasTranslation(current);
+        var candidateTranslation = HasTranslation(candidate);
+        if ((scope.Words && currentWords && !candidateWords)
+            || (scope.Translation && currentTranslation && !candidateTranslation))
+        {
+            return false;
+        }
+        return (scope.Words && !currentWords && candidateWords)
+            || (scope.Translation && !currentTranslation && candidateTranslation);
+    }
+
+    private static bool HasRequestedFeatures(LyricsDocument document, EnrichmentScope scope) =>
+        (!scope.Words || HasUsableWords(document)) && (!scope.Translation || HasTranslation(document));
+
+    private static bool HasUsableWords(LyricsDocument document) => document.Lines.Any(HasUsableWords);
+
+    private static bool HasUsableWords(LyricsLine line) => line.Words is { Count: > 0 } words
+        && words.All(word => double.IsFinite(word.Begin) && double.IsFinite(word.End)
+            && word.Begin >= 0 && word.End > word.Begin && !string.IsNullOrEmpty(word.Text))
+        && string.Equals(string.Concat(words.Select(word => word.Text)).Trim(), line.Text.Trim(), StringComparison.Ordinal);
+
+    private static bool HasTranslation(LyricsDocument document) => document.Lines.Any(HasMeaningfulTranslation);
+
+    private static bool HasMeaningfulTranslation(LyricsLine line) => !string.IsNullOrWhiteSpace(line.Translation)
+        && MetadataMatching.Normalize(line.Translation) != MetadataMatching.Normalize(line.Text);
+
+    private ExternalLyricsDiagnostic[] CreateProviderDiagnostics(ExternalLyricsQueryStage stage, int attempt = 0) =>
+        ExternalLyricsProviders.Select(provider => new ExternalLyricsDiagnostic(provider.Name, stage,
+            ExternalLyricsQueryOutcome.NotStarted, attempt)).ToArray();
+
+    private ExternalLyricsDiagnostics CreateExternalDiagnostics(LyricsDocument? document)
+    {
+        DrainProviderDiagnostics(_externalDiagnosticUpdates, _fallbackDiagnostics);
+        if (_enrichmentAttempt is { } enrichment)
+        {
+            DrainProviderDiagnostics(enrichment.Diagnostics, _enrichmentDiagnostics);
+        }
+        return new ExternalLyricsDiagnostics(
+            Array.AsReadOnly(_fallbackDiagnostics.Concat(_enrichmentDiagnostics).ToArray()),
+            _fallbackState, _enrichmentState,
+            _fallbackDiagnostics.Select(diagnostic => diagnostic.Attempt).DefaultIfEmpty().Max(),
+            _enrichmentAttemptCount,
+            PreferWordTimings && (document is null || !HasUsableWords(document)),
+            PreferTranslations && (document is null || !HasTranslation(document)));
+    }
+
+    private static void DrainProviderDiagnostics(ConcurrentQueue<ProviderDiagnosticUpdate>? updates,
+        ExternalLyricsDiagnostic[] diagnostics)
+    {
+        if (updates is null) return;
+        while (updates.TryDequeue(out var update))
+        {
+            if ((uint)update.ProviderIndex < (uint)diagnostics.Length)
+            {
+                diagnostics[update.ProviderIndex] = update.Diagnostic;
+            }
+        }
+    }
+
+    private static void MarkUnstartedProviders(ExternalLyricsDiagnostic[] diagnostics,
+        ExternalLyricsQueryOutcome outcome, ExternalLyricsDiagnosticReason reason)
+    {
+        for (var index = 0; index < diagnostics.Length; index++)
+        {
+            if (diagnostics[index].Outcome == ExternalLyricsQueryOutcome.NotStarted)
+            {
+                diagnostics[index] = diagnostics[index] with { Outcome = outcome, Reason = reason };
+            }
+        }
+    }
+
+    private static void MarkPendingProvidersCanceled(ExternalLyricsDiagnostic[] diagnostics)
+    {
+        for (var index = 0; index < diagnostics.Length; index++)
+        {
+            if (diagnostics[index].Outcome == ExternalLyricsQueryOutcome.Querying)
+            {
+                diagnostics[index] = diagnostics[index] with
+                {
+                    Outcome = ExternalLyricsQueryOutcome.Canceled,
+                    Reason = ExternalLyricsDiagnosticReason.Canceled,
+                };
+            }
+        }
+    }
+
+    private static ExternalLyricsDiagnostic DescribeDocument(ExternalLyricsDiagnostic diagnostic, LyricsDocument? document)
+    {
+        if (document is null)
+        {
+            return diagnostic with
+            {
+                Outcome = ExternalLyricsQueryOutcome.NoResult,
+                Reason = ExternalLyricsDiagnosticReason.NoDocumentReturned,
+            };
+        }
+        return diagnostic with
+        {
+            Outcome = document.Lines.Count > 0 ? ExternalLyricsQueryOutcome.Success : ExternalLyricsQueryOutcome.NoResult,
+            LineCount = document.Lines.Count,
+            WordLineCount = document.Lines.Count(HasUsableWords),
+            TranslatedLineCount = document.Lines.Count(HasMeaningfulTranslation),
+            Reason = document.Lines.Count == 0 ? ExternalLyricsDiagnosticReason.EmptyDocument
+                : string.Equals(document.Status, "plain", StringComparison.OrdinalIgnoreCase)
+                    ? ExternalLyricsDiagnosticReason.PlainLyricsOnly : ExternalLyricsDiagnosticReason.None,
+        };
+    }
+
+    private static ExternalLyricsDiagnosticReason DescribeRejection(
+        LyricsDocument current, LyricsDocument candidate, EnrichmentScope scope)
+    {
+        if (string.Equals(candidate.Status, "plain", StringComparison.OrdinalIgnoreCase))
+        {
+            return ExternalLyricsDiagnosticReason.PlainLyricsOnly;
+        }
+        var losesWords = scope.Words && HasUsableWords(current) && !HasUsableWords(candidate);
+        var losesTranslation = scope.Translation && HasTranslation(current) && !HasTranslation(candidate);
+        return losesWords && losesTranslation ? ExternalLyricsDiagnosticReason.WouldLoseWordsAndTranslations
+            : losesWords ? ExternalLyricsDiagnosticReason.WouldLoseWordTimings
+            : losesTranslation ? ExternalLyricsDiagnosticReason.WouldLoseTranslations
+            : ExternalLyricsDiagnosticReason.NoAdditionalRequestedFeatures;
+    }
+
+    private static ExternalLyricsDiagnostic DescribeFailure(ExternalLyricsDiagnostic diagnostic, Exception error)
+    {
+        var reason = error switch
+        {
+            OperationCanceledException or TimeoutException => ExternalLyricsFailureReason.Timeout,
+            HttpRequestException { StatusCode: not null } => ExternalLyricsFailureReason.HttpError,
+            HttpRequestException => ExternalLyricsFailureReason.NetworkError,
+            JsonException or InvalidDataException => ExternalLyricsFailureReason.InvalidResponse,
+            _ => ExternalLyricsFailureReason.Other,
+        };
+        var status = error is HttpRequestException { StatusCode: { } httpStatus } ? (int?)httpStatus : null;
+        // Never include exception messages: they can contain request URLs, cookies,
+        // payload excerpts, or local paths. The type and classified reason suffice.
+        var detail = reason switch
+        {
+            ExternalLyricsFailureReason.Timeout => "The provider request timed out.",
+            ExternalLyricsFailureReason.HttpError => $"The provider returned HTTP {status}.",
+            ExternalLyricsFailureReason.NetworkError => "The provider could not be reached.",
+            ExternalLyricsFailureReason.InvalidResponse => "The provider returned an invalid response.",
+            _ => "The provider request failed.",
+        };
+        return diagnostic with
+        {
+            Outcome = ExternalLyricsQueryOutcome.Failed,
+            ExceptionType = error.GetType().Name,
+            FailureReason = reason,
+            HttpStatusCode = status,
+            Detail = detail,
+        };
+    }
+
+    private void CancelEnrichmentAttempt()
+    {
+        if (_enrichmentAttempt is not { } attempt) return;
+        DrainProviderDiagnostics(attempt.Diagnostics, _enrichmentDiagnostics);
+        if (_enrichmentState == ExternalLyricsQueryState.Querying)
+        {
+            _enrichmentState = ExternalLyricsQueryState.Canceled;
+            MarkPendingProvidersCanceled(_enrichmentDiagnostics);
+        }
+        _enrichmentAttempt = null;
+        attempt.Cancellation.Cancel();
+        attempt.Cancellation.Dispose();
+        ObserveFault(attempt.Fetch);
+    }
+
+    private void ResetEnrichmentLookup()
+    {
+        CancelEnrichmentAttempt();
+        _enrichmentScope = null;
+        _enrichedLyrics = null;
+        _enrichmentAttemptCount = 0;
+        _enrichmentLookupComplete = false;
+        _enrichmentNextAttemptAt = DateTimeOffset.MinValue;
+        _enrichmentDiagnostics = CreateProviderDiagnostics(ExternalLyricsQueryStage.Enrichment);
+        _enrichmentState = ExternalLyricsQueryState.NotStarted;
+    }
+
+    private static void ObserveFault(Task task) => _ = task.ContinueWith(completed => { _ = completed.Exception; },
+        CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+        TaskScheduler.Default);
 
     private async Task<LyricsDocument?> ResolveWithoutMatchingAsync(
         PlayerState player,
@@ -936,6 +1380,14 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
 
     private sealed record CandidateSelection(LyricsDocument? Document, LyricsResolution Resolution);
 
+    private sealed record EnrichmentScope(int TrackGeneration, double Duration, bool Words, bool Translation);
+    private sealed record EnrichmentUpdate(LyricsDocument Document, string ProviderName);
+    private sealed record EnrichmentFetchResult(bool IsTransientFailure);
+    private sealed record EnrichmentAttempt(CancellationTokenSource Cancellation,
+        ConcurrentQueue<EnrichmentUpdate> Updates, ConcurrentQueue<ProviderDiagnosticUpdate> Diagnostics,
+        Task<EnrichmentFetchResult> Fetch);
+    private sealed record ProviderDiagnosticUpdate(int ProviderIndex, ExternalLyricsDiagnostic Diagnostic);
+
     public async ValueTask DisposeAsync()
     {
         if (_disposed)
@@ -946,12 +1398,14 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
         _disposed = true;
         var catalogFetch = _catalogFetch;
         var externalFetch = _externalFetch;
+        var enrichmentFetch = _enrichmentAttempt?.Fetch;
         _catalogFetchCancellation?.Cancel();
         _externalFetchCancellation?.Cancel();
+        _enrichmentAttempt?.Cancellation.Cancel();
 
         try
         {
-            var pending = new Task?[] { catalogFetch, externalFetch }
+            var pending = new Task?[] { catalogFetch, externalFetch, enrichmentFetch }
                 .Where(task => task is not null)
                 .Cast<Task>()
                 .ToArray();
@@ -967,6 +1421,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
         {
             ResetCatalogLookup();
             CancelExternalFetch();
+            ResetEnrichmentLookup();
         }
     }
 }

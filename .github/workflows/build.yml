@@ -56,7 +56,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Publish WPF App
-        run: dotnet publish .\src\AppleMusicLyrics.App\AppleMusicLyrics.App.csproj -c $env:CONFIGURATION -r win-x64 -p:PublishSingleFile=true -o .\artifacts\publish\win-x64
+        run: dotnet publish .\src\AppleMusicLyrics.App\AppleMusicLyrics.App.csproj -c $env:CONFIGURATION -r win-x64 -p:PublishSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o .\artifacts\publish\win-x64
 
       - name: Create Release Zip
         id: package

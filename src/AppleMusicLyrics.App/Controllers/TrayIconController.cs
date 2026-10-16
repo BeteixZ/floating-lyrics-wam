@@ -1,6 +1,7 @@
 using System.Drawing;
 using System.Windows;
 using System.Windows.Threading;
+using AppleMusicLyrics.App.Localization;
 using Forms = System.Windows.Forms;
 
 namespace AppleMusicLyrics.App.Controllers;
@@ -15,6 +16,9 @@ public sealed class TrayIconController : IDisposable
     private readonly Forms.ToolStripMenuItem _singleLineMenuItem;
     private readonly Forms.ToolStripMenuItem _twoLineMenuItem;
     private readonly Forms.ToolStripMenuItem _debugPanelMenuItem;
+    private readonly Forms.ToolStripMenuItem _diagnosticsMenuItem;
+    private readonly Forms.ToolStripMenuItem _settingsMenuItem;
+    private readonly Forms.ToolStripMenuItem _exitMenuItem;
 
     public TrayIconController(
         Dispatcher dispatcher,
@@ -24,19 +28,22 @@ public sealed class TrayIconController : IDisposable
         Action toggleSingleLine,
         Action toggleTwoLine,
         Action toggleDebugPanel,
+        Action openDiagnostics,
         Action openSettings,
         Action exit)
     {
         var menu = new Forms.ContextMenuStrip();
-        _showHideMenuItem = AddItem(menu, "Hide overlay", dispatcher, toggleOverlay);
-        _clickThroughMenuItem = AddItem(menu, "Click through", dispatcher, toggleClickThrough);
-        _pureModeMenuItem = AddItem(menu, "Pure mode", dispatcher, togglePureMode);
-        _singleLineMenuItem = AddItem(menu, "Single-line mode", dispatcher, toggleSingleLine);
-        _twoLineMenuItem = AddItem(menu, "Two-line mode", dispatcher, toggleTwoLine);
-        _debugPanelMenuItem = AddItem(menu, "Show debug panel", dispatcher, toggleDebugPanel);
+        var text = LocalizationManager.Instance;
+        _showHideMenuItem = AddItem(menu, text.Text("Tray.Hide"), dispatcher, toggleOverlay);
+        _clickThroughMenuItem = AddItem(menu, text.Text("Tray.ClickThrough"), dispatcher, toggleClickThrough);
+        _pureModeMenuItem = AddItem(menu, text.Text("Tray.PureMode"), dispatcher, togglePureMode);
+        _singleLineMenuItem = AddItem(menu, text.Text("Tray.SingleLine"), dispatcher, toggleSingleLine);
+        _twoLineMenuItem = AddItem(menu, text.Text("Tray.TwoLine"), dispatcher, toggleTwoLine);
+        _debugPanelMenuItem = AddItem(menu, text.Text("Tray.Debug"), dispatcher, toggleDebugPanel);
+        _diagnosticsMenuItem = AddItem(menu, text.Text("Diagnostics.Open"), dispatcher, openDiagnostics);
         menu.Items.Add(new Forms.ToolStripSeparator());
-        _ = AddItem(menu, "Settings...", dispatcher, openSettings);
-        _ = AddItem(menu, "Exit", dispatcher, exit);
+        _settingsMenuItem = AddItem(menu, text.Text("Tray.Settings"), dispatcher, openSettings);
+        _exitMenuItem = AddItem(menu, text.Text("Tray.Exit"), dispatcher, exit);
 
         _icon = LoadAppIcon();
         _notifyIcon = new Forms.NotifyIcon
@@ -58,7 +65,16 @@ public sealed class TrayIconController : IDisposable
         bool showDebugPanel,
         string? currentLyric)
     {
-        _showHideMenuItem.Text = isOverlayVisible ? "Hide overlay" : "Show overlay";
+        var text = LocalizationManager.Instance;
+        _showHideMenuItem.Text = text.Text(isOverlayVisible ? "Tray.Hide" : "Tray.Show");
+        _clickThroughMenuItem.Text = text.Text("Tray.ClickThrough");
+        _pureModeMenuItem.Text = text.Text("Tray.PureMode");
+        _singleLineMenuItem.Text = text.Text("Tray.SingleLine");
+        _twoLineMenuItem.Text = text.Text("Tray.TwoLine");
+        _debugPanelMenuItem.Text = text.Text("Tray.Debug");
+        _diagnosticsMenuItem.Text = text.Text("Diagnostics.Open");
+        _settingsMenuItem.Text = text.Text("Tray.Settings");
+        _exitMenuItem.Text = text.Text("Tray.Exit");
         _clickThroughMenuItem.Checked = clickThrough;
         _pureModeMenuItem.Checked = pureMode;
         _singleLineMenuItem.Checked = singleLine;

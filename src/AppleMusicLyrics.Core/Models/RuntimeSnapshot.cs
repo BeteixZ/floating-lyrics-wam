@@ -6,4 +6,5 @@ public sealed record RuntimeSnapshot(
     ActiveLyricState ActiveLyric,
     LyricsResolution Resolution,
     double? RawPositionSeconds = null,
-    double? EstimatedPositionSeconds = null);
+    double? EstimatedPositionSeconds = null,
+    ExternalLyricsDiagnostics? ExternalDiagnostics = null);

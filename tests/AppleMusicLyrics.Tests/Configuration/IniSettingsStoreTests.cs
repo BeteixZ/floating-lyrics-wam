@@ -16,6 +16,124 @@ public sealed class IniSettingsStoreTests : IDisposable
     }
 
     [Fact]
+    public void Load_LegacySettingsUseLanguageAndUnifiedCacheDefaults()
+    {
+        var path = Path.Combine(_root, "legacy-cache-language.ini");
+        File.WriteAllLines(path, ["[apple_music_lyrics]", "PersistExternalLyricsCache=true"]);
+        var loaded = new IniSettingsStore(path).Load();
+        Assert.Equal("system", new AppSettings().UiLanguage);
+        Assert.Equal(64, new AppSettings().ExternalLyricsCacheMaxMegabytes);
+        Assert.False(new AppSettings().PersistExternalLyricsCache);
+        Assert.Equal("system", loaded.UiLanguage);
+        Assert.Equal(64, loaded.ExternalLyricsCacheMaxMegabytes);
+        Assert.True(loaded.PersistExternalLyricsCache);
+    }
+
+    [Theory]
+    [InlineData("zh-CN", 1)]
+    [InlineData("en-US", 1024)]
+    public void SaveLoadAndClone_PreserveLanguageAndUnifiedCacheCapacity(string language, int capacity)
+    {
+        var path = Path.Combine(_root, "cache-language.ini");
+        var store = new IniSettingsStore(path);
+        store.Save(new AppSettings
+        {
+            UiLanguage = language,
+            PersistExternalLyricsCache = true,
+            ExternalLyricsCacheMaxMegabytes = capacity,
+        });
+        var loaded = store.Load();
+        var clone = loaded.Clone();
+        Assert.Contains($"UiLanguage={language}", File.ReadAllText(path), StringComparison.Ordinal);
+        Assert.Contains($"ExternalLyricsCacheMaxMegabytes={capacity}", File.ReadAllText(path), StringComparison.Ordinal);
+        Assert.Equal(language, loaded.UiLanguage);
+        Assert.Equal(capacity, loaded.ExternalLyricsCacheMaxMegabytes);
+        Assert.Equal(language, clone.UiLanguage);
+        Assert.Equal(capacity, clone.ExternalLyricsCacheMaxMegabytes);
+        Assert.True(clone.PersistExternalLyricsCache);
+        clone.UiLanguage = "system";
+        clone.ExternalLyricsCacheMaxMegabytes = 64;
+        Assert.Equal(language, loaded.UiLanguage);
+        Assert.Equal(capacity, loaded.ExternalLyricsCacheMaxMegabytes);
+    }
+
+    [Fact]
+    public void SaveLoadAndClone_PreserveWordHighlightAndTranslationChoices()
+    {
+        var store = new IniSettingsStore(Path.Combine(_root, "rich-lyrics.ini"));
+        Assert.True(new AppSettings().WordHighlightEnabled);
+        Assert.True(new AppSettings().ShowTranslation);
+        store.Save(new AppSettings { WordHighlightEnabled = false, ShowTranslation = false });
+        var loaded = store.Load().Clone();
+        Assert.False(loaded.WordHighlightEnabled);
+        Assert.False(loaded.ShowTranslation);
+    }
+
+    [Fact]
+    public void Load_LegacyFontSettingsUseIndependentChineseDefault()
+    {
+        var path = Path.Combine(_root, "legacy-font.ini");
+        File.WriteAllLines(path, ["[apple_music_lyrics]", "FontFamily=Arial"]);
+        var settings = new IniSettingsStore(path).Load();
+        Assert.Equal("Arial", settings.FontFamily);
+        Assert.Equal("Microsoft YaHei UI", settings.ChineseFontFamily);
+    }
+
+    [Fact]
+    public void SaveLoadAndClone_PreserveIndependentChineseFont()
+    {
+        var path = Path.Combine(_root, "independent-fonts.ini");
+        var store = new IniSettingsStore(path);
+        store.Save(new AppSettings { FontFamily = "Optima", ChineseFontFamily = "SimSun" });
+        var loaded = store.Load();
+        var clone = loaded.Clone();
+        Assert.Contains("ChineseFontFamily=SimSun", File.ReadAllText(path), StringComparison.Ordinal);
+        Assert.Equal("Optima", loaded.FontFamily);
+        Assert.Equal("SimSun", loaded.ChineseFontFamily);
+        Assert.Equal("SimSun", clone.ChineseFontFamily);
+        clone.ChineseFontFamily = "Microsoft YaHei UI";
+        Assert.Equal("SimSun", loaded.ChineseFontFamily);
+    }
+
+    [Fact]
+    public void Load_LegacySettingsUseIndependentTranslationTypographyDefaults()
+    {
+        var path = Path.Combine(_root, "legacy-translation-font.ini");
+        File.WriteAllLines(path, ["[apple_music_lyrics]", "FontFamily=Arial", "ChineseFontFamily=SimSun"]);
+        var settings = new IniSettingsStore(path).Load();
+        Assert.Equal("Arial", settings.FontFamily);
+        Assert.Equal("SimSun", settings.ChineseFontFamily);
+        Assert.Equal("Microsoft YaHei UI", settings.TranslationFontFamily);
+        Assert.Equal(20, settings.TranslationFontSize);
+    }
+
+    [Fact]
+    public void SaveLoadAndClone_PreserveIndependentTranslationTypography()
+    {
+        var path = Path.Combine(_root, "translation-font.ini");
+        var store = new IniSettingsStore(path);
+        store.Save(new AppSettings
+        {
+            FontFamily = "Optima", ChineseFontFamily = "SimSun",
+            TranslationFontFamily = "DengXian", TranslationFontSize = 27.5,
+        });
+        var loaded = store.Load();
+        var clone = loaded.Clone();
+        Assert.Contains("TranslationFontFamily=DengXian", File.ReadAllText(path), StringComparison.Ordinal);
+        Assert.Contains("TranslationFontSize=27.5", File.ReadAllText(path), StringComparison.Ordinal);
+        Assert.Equal("DengXian", loaded.TranslationFontFamily);
+        Assert.Equal(27.5, loaded.TranslationFontSize);
+        Assert.Equal("DengXian", clone.TranslationFontFamily);
+        Assert.Equal(27.5, clone.TranslationFontSize);
+        Assert.Equal("Optima", clone.FontFamily);
+        Assert.Equal("SimSun", clone.ChineseFontFamily);
+        clone.TranslationFontFamily = "Microsoft YaHei UI";
+        clone.TranslationFontSize = 10;
+        Assert.Equal("DengXian", loaded.TranslationFontFamily);
+        Assert.Equal(27.5, loaded.TranslationFontSize);
+    }
+
+    [Fact]
     public void SaveAndLoad_RoundTripsOverlaySettings()
     {
         var path = Path.Combine(_root, "settings.ini");

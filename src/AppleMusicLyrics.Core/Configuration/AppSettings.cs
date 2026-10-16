@@ -2,6 +2,8 @@ namespace AppleMusicLyrics.Core.Configuration;
 
 public sealed class AppSettings
 {
+    public string UiLanguage { get; set; } = "system";
+
     public double PlayerPollInterval { get; set; } = 0.2;
 
     // Calibrates how far SMTC's reported position lags the audio you actually hear. Since the
@@ -35,15 +37,18 @@ public sealed class AppSettings
 
     public double CatalogLookupTimeoutSeconds { get; set; } = 3.0;
 
-    // For songs Apple's own cache has no lyrics for at all, fall back to the community database at
-    // lrclib.net. Fetched on a background task, so a slow lookup never stalls the display.
+    // Query LRCLIB, QQ Music, and NetEase Cloud Music on background tasks when Apple's cache has
+    // no usable lyrics or lacks requested word timings/translations. Disabling this setting disables every external source.
     public bool ExternalLyricsEnabled { get; set; } = true;
 
     public double ExternalLyricsTimeoutSeconds { get; set; } = 6.0;
 
-    // Keep completed LRCLIB lookups across app restarts. Disabled by default so users explicitly
+    // Keep completed external lyric documents across app restarts. Disabled by default so users explicitly
     // choose whether lyric data should be retained on disk.
     public bool PersistExternalLyricsCache { get; set; }
+
+    // One shared disk quota for all external sources; the cache clamps this to 1..1024 MiB.
+    public int ExternalLyricsCacheMaxMegabytes { get; set; } = 64;
 
     // Normal mode window position and size
     public int WindowX { get; set; } = 100;
@@ -95,9 +100,19 @@ public sealed class AppSettings
 
     public string FontFamily { get; set; } = "Optima";
 
+    public string ChineseFontFamily { get; set; } = "Microsoft YaHei UI";
+
+    public string TranslationFontFamily { get; set; } = "Microsoft YaHei UI";
+
+    public double TranslationFontSize { get; set; } = 20.0;
+
     public bool ShowPreviousLine { get; set; } = true;
 
     public bool ShowNextLine { get; set; } = true;
+
+    public bool WordHighlightEnabled { get; set; } = true;
+
+    public bool ShowTranslation { get; set; } = true;
 
     public bool SingleLineMode { get; set; }
 
@@ -129,6 +144,7 @@ public sealed class AppSettings
     {
         return new AppSettings
         {
+            UiLanguage = UiLanguage,
             PlayerPollInterval = PlayerPollInterval,
             LyricsOffsetSeconds = LyricsOffsetSeconds,
             ApplyNativeLyricOffset = ApplyNativeLyricOffset,
@@ -140,6 +156,7 @@ public sealed class AppSettings
             ExternalLyricsEnabled = ExternalLyricsEnabled,
             ExternalLyricsTimeoutSeconds = ExternalLyricsTimeoutSeconds,
             PersistExternalLyricsCache = PersistExternalLyricsCache,
+            ExternalLyricsCacheMaxMegabytes = ExternalLyricsCacheMaxMegabytes,
             WindowX = WindowX,
             WindowY = WindowY,
             WindowWidth = WindowWidth,
@@ -163,8 +180,13 @@ public sealed class AppSettings
             GlowColor = GlowColor,
             GlowOpacity = GlowOpacity,
             FontFamily = FontFamily,
+            ChineseFontFamily = ChineseFontFamily,
+            TranslationFontFamily = TranslationFontFamily,
+            TranslationFontSize = TranslationFontSize,
             ShowPreviousLine = ShowPreviousLine,
             ShowNextLine = ShowNextLine,
+            WordHighlightEnabled = WordHighlightEnabled,
+            ShowTranslation = ShowTranslation,
             SingleLineMode = SingleLineMode,
             TwoLineMode = TwoLineMode,
             ShowDebugPanel = ShowDebugPanel,

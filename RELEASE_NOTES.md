@@ -1,5 +1,20 @@
 # Release Notes
 
+## v0.6.0 - Word highlighting, translations, and multilingual settings
+
+- Adds QQ Music and NetEase Cloud Music lyric sources based on the maintained LyricsKit fork, with QRC/YRC word timing and source-provided translations.
+- Checks for missing enabled lyric features in the background while keeping existing lyrics visible; improves title matching for explicit featured-artist credits while preserving version checks.
+- Adds word-by-word highlighting and translated lines, with separate original Latin/Chinese fonts and independent translation font and size.
+- Organizes Settings into five tabs with live previews and fewer explanatory labels.
+- Follows the Windows display language by default, includes English and Simplified/Traditional Chinese, and supports drop-in JSON language packs.
+- Adds a shared, optional lyric cache that retains translations and word timing, with a configurable size limit, current usage, and one-click clearing.
+- Replaces the large overlay debug panel with a compact optional summary; full query, translation, timing, and failure details open in a separate diagnostics window.
+- Preserves existing settings and includes LyricsKit attribution, the MPL-2.0 license, and the corresponding adapted provider sources in the release package.
+
+Requirements remain Windows 10 version 19041 or later and the x64 .NET 10 Desktop Runtime. Exit the previous tray instance before launching the new executable. Online lyric interfaces may change; translations and word timing depend on the selected source.
+
+---
+
 ## v0.5.0 - More reliable lyrics, optional caching, and diagnostic tools
 
 - Tightens local lyric content matching and catalog ID handling to reduce incorrect song matches.

@@ -168,11 +168,23 @@ public sealed class ITunesCatalogSongResolver : ICatalogSongResolver, IDisposabl
         }
 
         var artistScore = ScoreText(player.Artist, artistName, exact: 30, partial: 14);
+        if (artistScore == 0)
+        {
+            return null;
+        }
         var albumScore = ScoreText(player.Album, collectionName, exact: 20, partial: 8);
 
         var durationDelta = player.Duration > 0 && trackSeconds > 0
             ? Math.Abs(trackSeconds - player.Duration)
             : double.MaxValue;
+        if (double.IsFinite(player.Duration) && player.Duration > 0
+            && double.IsFinite(trackSeconds) && trackSeconds > 0
+            && durationDelta > LyricsMatchPolicy.DurationToleranceSeconds)
+        {
+            // A shared title can name different recordings or an intro and a full song. Such
+            // a catalog id must not verify a local candidate or stop later storefront lookups.
+            return null;
+        }
         var durationScore = durationDelta switch
         {
             <= 1.0 => 20,
@@ -209,6 +221,7 @@ public sealed class ITunesCatalogSongResolver : ICatalogSongResolver, IDisposabl
     {
         return string.Join(
             "|",
+            "v2",
             NormalizeText(player.Title),
             NormalizeText(player.Artist),
             NormalizeText(player.Album),

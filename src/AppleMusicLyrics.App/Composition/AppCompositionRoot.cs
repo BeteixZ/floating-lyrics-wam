@@ -17,7 +17,8 @@ public sealed record AppRuntimeComposition(
     AppSettings Settings,
     GlobalMediaSessionProvider PlayerProvider,
     ITunesCatalogSongResolver? CatalogResolver,
-    LrcLibLyricsProvider? ExternalLyricsProvider,
+    IReadOnlyList<IExternalLyricsProvider> ExternalLyricsProviders,
+    ExternalLyricsCache? ExternalLyricsCache,
     LyricsRuntimeService RuntimeService);
 
 public static class AppCompositionRoot
@@ -34,13 +35,18 @@ public static class AppCompositionRoot
                 GetWritableDataPath("catalog-cache.json"),
                 settings.CatalogLookupTimeoutSeconds)
             : null;
-        var externalProvider = settings.ExternalLyricsEnabled
-            ? new LrcLibLyricsProvider(
-                timeoutSeconds: settings.ExternalLyricsTimeoutSeconds,
-                persistentCachePath: settings.PersistExternalLyricsCache
-                    ? GetWritableDataPath("lrclib-cache.json")
-                    : null)
-            : null;
+        // Cache management stays available even while online providers are disabled.
+        var externalCache = new ExternalLyricsCache(GetWritableDataPath("external-lyrics-cache"));
+        externalCache.Configure(settings.PersistExternalLyricsCache, settings.ExternalLyricsCacheMaxMegabytes);
+        IExternalLyricsProvider[] externalProviders = settings.ExternalLyricsEnabled
+            // The unified cache owns the full disk quota. Leave any legacy lrclib-cache.json
+            // untouched; do not also enable LRCLIB's private persistent cache.
+            ? [new LrcLibLyricsProvider(timeoutSeconds: settings.ExternalLyricsTimeoutSeconds),
+                new QQMusicLyricsProvider(settings.ExternalLyricsTimeoutSeconds),
+                new NetEaseLyricsProvider(settings.ExternalLyricsTimeoutSeconds)]
+            : [];
+        externalProviders = externalProviders.Select(provider =>
+            (IExternalLyricsProvider)new CachedExternalLyricsProvider(provider, externalCache)).ToArray();
         var runtimeService = new LyricsRuntimeService(
             scanner,
             playerProvider,
@@ -51,9 +57,9 @@ public static class AppCompositionRoot
         {
             ApplyNativeLyricOffset = settings.ApplyNativeLyricOffset,
             AllowLowConfidenceLyrics = settings.AllowLowConfidenceLyrics,
-            ExternalLyricsProviders = externalProvider is null
-                ? Array.Empty<IExternalLyricsProvider>()
-                : [externalProvider],
+            PreferWordTimings = settings.WordHighlightEnabled,
+            PreferTranslations = settings.ShowTranslation,
+            ExternalLyricsProviders = externalProviders,
         };
 
         return new AppRuntimeComposition(
@@ -61,7 +67,8 @@ public static class AppCompositionRoot
             settings,
             playerProvider,
             catalogResolver,
-            externalProvider,
+            externalProviders,
+            externalCache,
             runtimeService);
     }
 

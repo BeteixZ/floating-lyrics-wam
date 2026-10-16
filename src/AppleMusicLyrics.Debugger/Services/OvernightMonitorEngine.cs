@@ -22,7 +22,7 @@ public sealed class OvernightMonitorEngine : IDisposable
     private readonly IPlayerSessionProvider _playerProvider;
     private readonly IPlayerMatchedLyricsProvider _cacheScanner;
     private readonly ITunesCatalogSongResolver? _catalogResolver;
-    private readonly LrcLibLyricsProvider? _lrcLibProvider;
+    private readonly IReadOnlyList<IExternalLyricsProvider> _externalLyricsProviders = [];
     private readonly LyricsRuntimeService _runtimeService;
 
     private readonly TimeSpan _stabilizationDelay;
@@ -41,7 +41,11 @@ public sealed class OvernightMonitorEngine : IDisposable
         _logger = logger;
         _stabilizationDelay = TimeSpan.FromMilliseconds(2500);
         _pollInterval = TimeSpan.FromMilliseconds(1200);
-        _resolutionTimeout = TimeSpan.FromSeconds(10);
+        // Three retry rounds can each spend two LRCLIB request budgets and one budget per
+        // platform adapter. Include the retry delays before freezing an audit verdict.
+        var externalTimeout = double.IsFinite(settings.ExternalLyricsTimeoutSeconds)
+            ? Math.Clamp(settings.ExternalLyricsTimeoutSeconds, 2, 30) : 6;
+        _resolutionTimeout = TimeSpan.FromSeconds(settings.ExternalLyricsEnabled ? 12 * externalTimeout + 10 : 10);
         _resolutionPollInterval = TimeSpan.FromMilliseconds(400);
         _departureDebounce = TimeSpan.FromSeconds(3);
         _timeProvider = TimeProvider.System;
@@ -63,9 +67,11 @@ public sealed class OvernightMonitorEngine : IDisposable
                 _settings.CatalogLookupTimeoutSeconds)
             : null;
 
-        _lrcLibProvider = _settings.ExternalLyricsEnabled
-            ? new LrcLibLyricsProvider(timeoutSeconds: _settings.ExternalLyricsTimeoutSeconds)
-            : null;
+        _externalLyricsProviders = _settings.ExternalLyricsEnabled
+            ? [new LrcLibLyricsProvider(timeoutSeconds: _settings.ExternalLyricsTimeoutSeconds),
+                new QQMusicLyricsProvider(_settings.ExternalLyricsTimeoutSeconds),
+                new NetEaseLyricsProvider(_settings.ExternalLyricsTimeoutSeconds)]
+            : [];
 
         var synchronizer = new LyricsSynchronizer();
         var playbackClock = new PlaybackClock();
@@ -80,9 +86,9 @@ public sealed class OvernightMonitorEngine : IDisposable
         {
             ApplyNativeLyricOffset = _settings.ApplyNativeLyricOffset,
             AllowLowConfidenceLyrics = _settings.AllowLowConfidenceLyrics,
-            ExternalLyricsProviders = _lrcLibProvider is null
-                ? Array.Empty<IExternalLyricsProvider>()
-                : [_lrcLibProvider],
+            PreferWordTimings = _settings.WordHighlightEnabled,
+            PreferTranslations = _settings.ShowTranslation,
+            ExternalLyricsProviders = _externalLyricsProviders,
         };
     }
 
@@ -383,7 +389,10 @@ public sealed class OvernightMonitorEngine : IDisposable
         {
             disposableGt.Dispose();
         }
-        _lrcLibProvider?.Dispose();
+        foreach (var provider in _externalLyricsProviders.OfType<IDisposable>())
+        {
+            provider.Dispose();
+        }
         _catalogResolver?.Dispose();
     }
 }

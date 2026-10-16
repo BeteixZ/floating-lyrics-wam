@@ -24,8 +24,7 @@ public sealed class LyricsSynchronizer
 
         // lyricOffset shifts the lyric timeline, so shifting the playback position the other way
         // compares the two on the same axis.
-        var nativeOffset = applyNativeOffset ? document.NativeOffsetSeconds : 0.0;
-        var position = Math.Max(0, player.Position + offsetSeconds - nativeOffset);
+        var position = LyricsTiming.GetPosition(document, player, offsetSeconds, applyNativeOffset);
         var lines = document.Lines;
 
         if (position < lines[0].Begin)
