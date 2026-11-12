@@ -1804,9 +1804,25 @@ public partial class MainWindow : Window
         var currentFontSize = _settings.MaxCurrentFontSize;
         var contextScale = _settings.TwoLineMode ? 0.72 : 0.56;
         var contextFontSize = Math.Clamp(currentFontSize * contextScale, 12, _settings.ContextFontSize);
-        var desiredContentWidth = MeasureNaturalContentWidth(currentFontSize, contextFontSize);
+
+        // Shape each text once; the width search below only re-wraps the cached glyphs.
+        var pixelsPerDip = VisualTreeHelper.GetDpi(this).PixelsPerDip;
+        var current = CreateLyricTextMeasurement(_currentLyricText, CurrentLyricText, currentFontSize, pixelsPerDip);
+        var translation = TranslationLyricText.Visibility == Visibility.Visible
+            ? CreateLyricTextMeasurement(TranslationLyricText.Text, TranslationLyricText,
+                TranslationTypography.GetFontSize(_settings.TranslationFontSize), pixelsPerDip)
+            : null;
+        var previous = PreviousLyricText.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(PreviousLyricText.Text)
+            ? CreateLyricTextMeasurement(PreviousLyricText.Text, PreviousLyricText, contextFontSize, pixelsPerDip)
+            : null;
+        var next = NextLyricText.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(NextLyricText.Text)
+            ? CreateLyricTextMeasurement(NextLyricText.Text, NextLyricText, contextFontSize, pixelsPerDip)
+            : null;
+
+        var desiredContentWidth = Math.Max(current.NaturalWidth,
+            Math.Max(translation?.NaturalWidth ?? 0, Math.Max(previous?.NaturalWidth ?? 0, next?.NaturalWidth ?? 0))) + 24;
         var contentWidth = Math.Clamp(desiredContentWidth, minContentWidth, maxContentWidth);
-        var contentHeight = MeasureContentHeight(contentWidth, currentFontSize, contextFontSize);
+        var contentHeight = MeasureContentHeight(contentWidth, current, translation, previous, next);
 
         if (contentHeight > maxContentHeight)
         {
@@ -1817,7 +1833,7 @@ public partial class MainWindow : Window
             for (var iteration = 0; iteration < 12; iteration++)
             {
                 var mid = (low + high) / 2.0;
-                var midHeight = MeasureContentHeight(mid, currentFontSize, contextFontSize);
+                var midHeight = MeasureContentHeight(mid, current, translation, previous, next);
                 if (midHeight <= maxContentHeight)
                 {
                     bestWidth = mid;
@@ -1830,7 +1846,7 @@ public partial class MainWindow : Window
             }
 
             contentWidth = bestWidth;
-            contentHeight = MeasureContentHeight(contentWidth, currentFontSize, contextFontSize);
+            contentHeight = MeasureContentHeight(contentWidth, current, translation, previous, next);
         }
 
         return new System.Windows.Size(
@@ -1838,59 +1854,27 @@ public partial class MainWindow : Window
             Math.Ceiling(Math.Min(contentHeight, maxContentHeight) + extraHeightPadding));
     }
 
-    private double MeasureNaturalContentWidth(double currentFontSize, double contextFontSize)
+    private double MeasureContentHeight(double contentWidth, LyricTextMeasurement current,
+        LyricTextMeasurement? translation, LyricTextMeasurement? previous, LyricTextMeasurement? next)
     {
-        var widths = new List<double>
-        {
-            MeasureText(_currentLyricText, CurrentLyricText, currentFontSize, null, 1).Width,
-        };
-
-        if (TranslationLyricText.Visibility == Visibility.Visible)
-        {
-            widths.Add(MeasureText(TranslationLyricText.Text, TranslationLyricText,
-                TranslationTypography.GetFontSize(_settings.TranslationFontSize), null, 1).Width);
-        }
-
-        if (PreviousLyricText.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(PreviousLyricText.Text))
-        {
-            widths.Add(MeasureText(PreviousLyricText.Text, PreviousLyricText, contextFontSize, null, 1).Width);
-        }
-
-        if (NextLyricText.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(NextLyricText.Text))
-        {
-            widths.Add(MeasureText(NextLyricText.Text, NextLyricText, contextFontSize, null, 1).Width);
-        }
-
-        return widths.Count == 0 ? MinWidth : widths.Max() + 24;
-    }
-
-    private double MeasureContentHeight(double contentWidth, double currentFontSize, double contextFontSize)
-    {
-        var totalHeight = 0.0;
-        var currentMeasure = MeasureText(
-            _currentLyricText,
-            CurrentLyricText,
-            currentFontSize,
-            contentWidth,
+        var totalHeight = current.MeasureHeight(contentWidth,
             _settings.SingleLineMode ? 1 : (_settings.PureMode ? 4 : 2));
-        totalHeight += currentMeasure.Height;
-        if (TranslationLyricText.Visibility == Visibility.Visible)
+        if (translation is not null)
         {
-            totalHeight += MeasureText(TranslationLyricText.Text, TranslationLyricText,
-                TranslationTypography.GetFontSize(_settings.TranslationFontSize), contentWidth, 2).Height + 4;
+            totalHeight += translation.MeasureHeight(contentWidth, 2) + 4;
         }
 
         // Use PureMode-specific margin values
         var currentMarginTop = _settings.PureMode ? 2.0 : 4.0;
         var currentMarginBottom = _settings.PureMode ? (_settings.TwoLineMode ? 4.0 : 2.0) : (_settings.TwoLineMode ? 10.0 : 4.0);
 
-        var showNext = _settings.TwoLineMode && !_settings.SingleLineMode && NextLyricText.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(NextLyricText.Text);
-        var showPrevious = !_settings.TwoLineMode && !_settings.SingleLineMode && PreviousLyricText.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(PreviousLyricText.Text);
+        var showNext = _settings.TwoLineMode && !_settings.SingleLineMode && next is not null;
+        var showPrevious = !_settings.TwoLineMode && !_settings.SingleLineMode && previous is not null;
 
         if (showNext)
         {
             totalHeight += currentMarginBottom;
-            totalHeight += MeasureText(NextLyricText.Text, NextLyricText, contextFontSize, contentWidth, 2).Height;
+            totalHeight += next!.MeasureHeight(contentWidth, 2);
         }
         else if (_settings.TwoLineMode)
         {
@@ -1904,18 +1888,32 @@ public partial class MainWindow : Window
         {
             if (showPrevious)
             {
-                totalHeight += MeasureText(PreviousLyricText.Text, PreviousLyricText, contextFontSize, contentWidth, _settings.PureMode ? 4 : 2).Height;
+                totalHeight += previous!.MeasureHeight(contentWidth, _settings.PureMode ? 4 : 2);
             }
 
             totalHeight += currentMarginTop + currentMarginBottom;
 
-            if (NextLyricText.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(NextLyricText.Text))
+            if (next is not null)
             {
-                totalHeight += MeasureText(NextLyricText.Text, NextLyricText, contextFontSize, contentWidth, _settings.PureMode ? 4 : 2).Height;
+                totalHeight += next.MeasureHeight(contentWidth, _settings.PureMode ? 4 : 2);
             }
         }
 
         return totalHeight;
+    }
+
+    private LyricTextMeasurement CreateLyricTextMeasurement(string? text, TextBlock reference,
+        double fontSize, double pixelsPerDip)
+    {
+        var typeface = new Typeface(
+            reference.FontFamily,
+            reference.FontStyle,
+            reference.FontWeight,
+            reference.FontStretch);
+        var lineHeight = double.IsFinite(reference.LineHeight) && reference.LineHeight > 0 && reference.FontSize > 0
+            ? reference.LineHeight * fontSize / reference.FontSize
+            : 0;
+        return new LyricTextMeasurement(text, typeface, fontSize, lineHeight, pixelsPerDip);
     }
 
     private System.Windows.Size MeasureText(

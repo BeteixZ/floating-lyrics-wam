@@ -22,17 +22,43 @@ public static class LyricFontSizeFitter
         ValidatePositiveFinite(maxHeight, nameof(maxHeight));
         ValidatePositiveFinite(pixelsPerDip, nameof(pixelsPerDip));
 
-        for (var size = Math.Max(maxSize, minSize); size > minSize; size -= 1.0)
+        var start = Math.Max(maxSize, minSize);
+        if (Fits(start))
         {
-            var measured = Measure(text, typeface, size, maxWidth, singleLine, pixelsPerDip, culture);
-            if (measured.Width <= maxWidth && measured.Height <= maxHeight)
+            return start;
+        }
+
+        var steps = (int)Math.Ceiling(start - minSize);
+        if (steps <= 0)
+        {
+            return minSize;
+        }
+
+        // Fit is monotonic across the 1pt grid, so binary-search the smallest decrement that
+        // fits instead of measuring every size from the top (up to ~6 measures instead of ~58).
+        var low = 0;
+        var high = steps;
+        while (high - low > 1)
+        {
+            var mid = low + (high - low) / 2;
+            if (Fits(Math.Max(minSize, start - mid)))
             {
-                return size;
+                high = mid;
+            }
+            else
+            {
+                low = mid;
             }
         }
 
         // The configured minimum is the lower bound even if the available space cannot fit it.
-        return minSize;
+        return Math.Max(minSize, start - high);
+
+        bool Fits(double size)
+        {
+            var measured = Measure(text, typeface, size, maxWidth, singleLine, pixelsPerDip, culture);
+            return measured.Width <= maxWidth && measured.Height <= maxHeight;
+        }
     }
 
     public static Size Measure(string text, Typeface typeface, double fontSize,
