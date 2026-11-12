@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Diagnostics;
+using AppleMusicLyrics.App.Services;
 
 namespace AppleMusicLyrics.App;
 
@@ -9,11 +10,10 @@ public partial class App : System.Windows.Application
 
     protected override void OnStartup(StartupEventArgs e)
     {
-        var mutex = new Mutex(true, MutexName, out var createdNew);
-        if (!createdNew)
+        var mutex = SingleInstanceGuard.TryAcquire(MutexName);
+        if (mutex is null)
         {
             // Another instance is already running
-            mutex.Dispose();
             Shutdown();
             return;
         }

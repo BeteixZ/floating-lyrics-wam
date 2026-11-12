@@ -22,9 +22,20 @@ public sealed class IniSettingsStore : ISettingsStore
             return new AppSettings();
         }
 
+        string[] lines;
+        try
+        {
+            lines = File.ReadAllLines(_path);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            // A file locked by antivirus, sync, or another instance must not crash startup.
+            return new AppSettings();
+        }
+
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var insideSection = false;
-        foreach (var rawLine in File.ReadAllLines(_path))
+        foreach (var rawLine in lines)
         {
             var line = rawLine.Trim();
             if (string.IsNullOrWhiteSpace(line) || line.StartsWith('#') || line.StartsWith(';'))

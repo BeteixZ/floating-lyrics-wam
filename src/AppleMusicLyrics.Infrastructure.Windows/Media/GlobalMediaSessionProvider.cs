@@ -7,13 +7,11 @@ namespace AppleMusicLyrics.Infrastructure.Windows.Media;
 
 public sealed class GlobalMediaSessionProvider : IPlayerSessionProvider
 {
-    private readonly Lazy<Task<GlobalSystemMediaTransportControlsSessionManager>> _managerTask;
+    private Task<GlobalSystemMediaTransportControlsSessionManager>? _managerTask;
 
     public GlobalMediaSessionProvider(bool allowNonAppleMediaSessions = false)
     {
         AllowNonAppleMediaSessions = allowNonAppleMediaSessions;
-        _managerTask = new Lazy<Task<GlobalSystemMediaTransportControlsSessionManager>>(
-            () => GlobalSystemMediaTransportControlsSessionManager.RequestAsync().AsTask());
     }
 
     public bool AllowNonAppleMediaSessions { get; set; }
@@ -24,7 +22,7 @@ public sealed class GlobalMediaSessionProvider : IPlayerSessionProvider
 
         try
         {
-            var manager = await _managerTask.Value.ConfigureAwait(false);
+            var manager = await GetManagerTask().ConfigureAwait(false);
             var currentSession = manager.GetCurrentSession();
             var currentState = await TryCreatePlayerStateAsync(currentSession, cancellationToken).ConfigureAwait(false);
             if (MediaSessionSelectionPolicy.IsAppleMusicState(currentState))
@@ -57,6 +55,19 @@ public sealed class GlobalMediaSessionProvider : IPlayerSessionProvider
         {
             return null;
         }
+    }
+
+    private Task<GlobalSystemMediaTransportControlsSessionManager> GetManagerTask()
+    {
+        var task = _managerTask;
+        // A transient RequestAsync failure (early boot, service restart) must not be cached
+        // forever; the next poll retries instead of returning null until the app restarts.
+        if (task is null || task.IsFaulted || task.IsCanceled)
+        {
+            task = GlobalSystemMediaTransportControlsSessionManager.RequestAsync().AsTask();
+            _managerTask = task;
+        }
+        return task;
     }
 
     private static async Task<PlayerState?> TryCreatePlayerStateAsync(

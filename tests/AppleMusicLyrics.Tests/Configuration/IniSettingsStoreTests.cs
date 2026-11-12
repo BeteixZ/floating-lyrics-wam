@@ -29,6 +29,18 @@ public sealed class IniSettingsStoreTests : IDisposable
         Assert.True(loaded.PersistExternalLyricsCache);
     }
 
+    [Fact]
+    public void Load_LockedFileFallsBackToDefaults()
+    {
+        var path = Path.Combine(_root, "locked.ini");
+        File.WriteAllLines(path, ["[apple_music_lyrics]", "UiLanguage=zh-CN"]);
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            var loaded = new IniSettingsStore(path).Load();
+            Assert.Equal(new AppSettings().UiLanguage, loaded.UiLanguage);
+        }
+    }
+
     [Theory]
     [InlineData("zh-CN", 1)]
     [InlineData("en-US", 1024)]
