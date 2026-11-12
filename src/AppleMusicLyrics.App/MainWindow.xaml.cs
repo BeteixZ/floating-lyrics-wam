@@ -551,7 +551,8 @@ public partial class MainWindow : Window
 
     private void UpdateLyricSection(RuntimeSnapshot snapshot)
     {
-        var presentation = OverlaySnapshotPresenter.CreateLyrics(snapshot, showTranslation: _settings.ShowTranslation);
+        var presentation = OverlaySnapshotPresenter.CreateLyrics(snapshot, showTranslation: _settings.ShowTranslation,
+            includeDetailedDiagnostics: false);
         var summary = presentation.DebugSummaryText ?? string.Empty;
         var diagnosticsChanged = StatusText.Text != presentation.StatusText || PathText.Text != summary;
         StatusText.Text = presentation.StatusText;
@@ -582,6 +583,8 @@ public partial class MainWindow : Window
 
     private void SetTranslation(string? translation)
     {
+        // Cached documents can predate merge-time filtering of "//" and credit rows.
+        translation = AppleMusicLyrics.Core.Parsing.LyricsTranslationFilter.Clean(translation);
         TranslationLyricText.Text = translation ?? string.Empty;
         TranslationLyricText.Visibility = _settings.ShowTranslation && !string.IsNullOrWhiteSpace(translation)
             ? Visibility.Visible : Visibility.Collapsed;
@@ -2020,34 +2023,8 @@ public partial class MainWindow : Window
             CurrentLyricText.FontStretch);
         var pixelsPerDip = VisualTreeHelper.GetDpi(this).PixelsPerDip;
 
-        for (var size = maxSize; size >= minSize; size -= 1.0)
-        {
-            var formattedText = new FormattedText(
-                text,
-                CultureInfo.CurrentUICulture,
-                System.Windows.FlowDirection.LeftToRight,
-                typeface,
-                size,
-                System.Windows.Media.Brushes.White,
-                pixelsPerDip)
-            {
-                MaxTextWidth = maxWidth,
-                MaxTextHeight = maxHeight,
-                Trimming = singleLine ? TextTrimming.CharacterEllipsis : TextTrimming.None,
-            };
-
-            if (!singleLine)
-            {
-                formattedText.MaxLineCount = 2;
-            }
-
-            if (formattedText.Width <= maxWidth && formattedText.Height <= maxHeight)
-            {
-                return size;
-            }
-        }
-
-        return minSize;
+        return LyricFontSizeFitter.FindLargestFittingSize(text, typeface, maxSize, minSize,
+            maxWidth, maxHeight, singleLine, pixelsPerDip, CultureInfo.CurrentUICulture);
     }
 
     private static System.Windows.Media.ImageSource? LoadAppIcon()

@@ -47,11 +47,14 @@ public static class Program
 
         // 3. Setup output directory
         var logsDir = Path.Combine(AppContext.BaseDirectory, "logs");
-        // Also ensure logs directory in project root if running from source
-        var projectRootLogs = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "logs"));
-        if (Directory.Exists(Path.GetDirectoryName(projectRootLogs)))
+        // Locate the checkout without depending on the build output folder depth.
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory); directory is not null; directory = directory.Parent)
         {
-            logsDir = projectRootLogs;
+            if (File.Exists(Path.Combine(directory.FullName, "AppleMusicLyrics.sln")))
+            {
+                logsDir = Path.Combine(directory.FullName, "artifacts", "logs");
+                break;
+            }
         }
 
         var logger = new DiagnosticReportLogger(logsDir);

@@ -4,6 +4,7 @@ using AppleMusicLyrics.Core.Abstractions;
 using AppleMusicLyrics.Core.Matching;
 using AppleMusicLyrics.Core.Models;
 using AppleMusicLyrics.Core.Parsing;
+using AppleMusicLyrics.Core.Sync;
 
 namespace AppleMusicLyrics.Infrastructure.Windows.Cache;
 
@@ -89,12 +90,64 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
             }
         }
 
+        // Several endpoints may cache the same Apple catalog track (legacy line lyrics and
+        // localized syllable lyrics). They are versions of one candidate, not competing tracks.
         return matches
+            .GroupBy(match => GetDocumentIdentity(match.Document), StringComparer.OrdinalIgnoreCase)
+            .Select(SelectNativeMatch)
             .OrderByDescending(match => match.HasContentMatch)
             .ThenByDescending(match => match.Score)
             .ThenBy(match => match.DurationDelta)
             .ThenByDescending(match => match.Document.UpdatedAt)
             .ToArray();
+    }
+
+    public async Task<IReadOnlyList<string>> GetCachedLyricsIdsAsync(CancellationToken cancellationToken = default)
+    {
+        var roots = _fixedRoots ?? FindInetCacheRoots();
+        var documents = new List<LyricsDocument>();
+        foreach (var file in GetIndexedLyricsFiles(roots))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var document = await TryParseLyricsDocumentAsync(file, cancellationToken).ConfigureAwait(false);
+            if (document is { Lines.Count: > 0 })
+                documents.Add(document);
+        }
+        // Newest first: catalog verification only checks a bounded prefix of this list.
+        return documents.OrderByDescending(document => document.UpdatedAt)
+            .Select(document => CatalogLyricsId.ToCatalogId(document.LyricsId))
+            .OfType<long>()
+            .Select(CatalogLyricsId.FromCatalogId)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    public async Task<LyricsDocument?> FindByLyricsIdsAsync(
+        IReadOnlyList<string> lyricsIds,
+        CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (lyricsIds.Count == 0)
+        {
+            return null;
+        }
+
+        var roots = _fixedRoots ?? FindInetCacheRoots();
+        var documents = new List<LyricsDocument>();
+        foreach (var file in GetIndexedLyricsFiles(roots))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var document = await TryParseLyricsDocumentAsync(file, cancellationToken).ConfigureAwait(false);
+            if (document is { Lines.Count: > 0 }
+                && lyricsIds.Any(id => CatalogLyricsId.Matches(document.LyricsId, id)))
+            {
+                documents.Add(document);
+            }
+        }
+
+        return lyricsIds.SelectMany(id => OrderNativeDocuments(documents
+                .Where(document => CatalogLyricsId.Matches(document.LyricsId, id))))
+            .FirstOrDefault();
     }
 
     public async Task<LyricsDocument?> FindBestLyricsAsync(
@@ -133,7 +186,11 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
         {
             try
             {
-                results.AddRange(Directory.EnumerateFiles(root, "ttmlLyrics*.json", SearchOption.AllDirectories));
+                // Current Apple Music caches the localized/word-timed endpoint under
+                // syllable-lyrics[...].json; legacy line lyrics use ttmlLyrics[...].json.
+                // Walk once, rather than once per endpoint, and ignore unrelated account/media JSON.
+                results.AddRange(Directory.EnumerateFiles(root, "*.json", SearchOption.AllDirectories)
+                    .Where(path => IsLyricsFileName(Path.GetFileName(path))));
             }
             catch (UnauthorizedAccessException)
             {
@@ -145,6 +202,58 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
 
         return results;
     }
+
+    private static LyricsMatch SelectNativeMatch(IEnumerable<LyricsMatch> versions)
+    {
+        var matches = versions.ToArray();
+        var preferred = OrderNativeDocuments(matches.Select(match => match.Document)).First();
+        var selected = matches.First(match => ReferenceEquals(match.Document, preferred));
+        // Localized/word versions can omit title-bearing text that another version of the same
+        // catalog id already supplied. Keep that identity evidence without borrowing its duration.
+        var evidence = matches.Max(match => match.EffectiveTitleEvidence);
+        return selected with
+        {
+            HasContentMatch = evidence == TitleEvidenceStrength.Strong,
+            TitleEvidence = evidence,
+            Score = selected.Score + GetTitleScore(evidence) - GetTitleScore(selected.EffectiveTitleEvidence),
+        };
+    }
+
+    private static int GetTitleScore(TitleEvidenceStrength evidence) => evidence switch
+    {
+        TitleEvidenceStrength.Strong => 60,
+        TitleEvidenceStrength.Weak => 10,
+        _ => 0,
+    };
+
+    private static bool IsLyricsFileName(string name) =>
+        name.StartsWith("ttmlLyrics", StringComparison.OrdinalIgnoreCase)
+        || name.StartsWith("syllable-lyrics", StringComparison.OrdinalIgnoreCase);
+
+    private static string GetDocumentIdentity(LyricsDocument document) =>
+        CatalogLyricsId.ToCatalogId(document.LyricsId) is long catalogId
+            ? CatalogLyricsId.FromCatalogId(catalogId)
+            : !string.IsNullOrWhiteSpace(document.LyricsId) ? "id:" + document.LyricsId.Trim()
+            : "file:" + document.SourceFile;
+
+    private static IEnumerable<LyricsDocument> OrderNativeDocuments(IEnumerable<LyricsDocument> documents) =>
+        documents.Select(document =>
+            {
+                var timedLines = document.Lines.Where(LyricWordTiming.IsUsable).ToArray();
+                return new
+                {
+                    Document = document,
+                    WordLines = timedLines.Length,
+                    WordFragments = timedLines.Sum(line => line.Words!.Count),
+                    TranslationLines = document.Lines.Count(line => LyricsTranslationFilter.IsMeaningful(line.Translation)),
+                };
+            })
+            .OrderByDescending(item => (item.WordLines > 0 ? 1 : 0) + (item.TranslationLines > 0 ? 1 : 0))
+            .ThenByDescending(item => item.WordLines)
+            .ThenByDescending(item => item.TranslationLines)
+            .ThenByDescending(item => item.WordFragments)
+            .ThenByDescending(item => item.Document.UpdatedAt)
+            .Select(item => item.Document);
 
     public void InvalidateFileIndex()
     {
@@ -196,15 +305,11 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
 
         try
         {
-            using var document = JsonDocument.Parse(File.ReadAllText(path));
-            var root = document.RootElement;
-            string? lyricsId = root.TryGetProperty("lyricsId", out var value) && value.ValueKind == JsonValueKind.String
-                ? value.GetString()
-                : null;
-
+            // Use the same identity extraction for legacy and current API-wrapped caches.
+            var document = _parser.ParseLyricsJson(File.ReadAllText(path), path);
             return new LyricsFileMetadata(
                 Path: path,
-                LyricsId: lyricsId,
+                LyricsId: document.LyricsId,
                 LastWriteTimeUtc: new DateTimeOffset(File.GetLastWriteTimeUtc(path), TimeSpan.Zero));
         }
         catch (IOException)
@@ -219,17 +324,33 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
         {
             return null;
         }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+        catch (System.Xml.XmlException)
+        {
+            return null;
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
     }
 
     // Candidates get re-scored on every poll for a few seconds after each track change, so parsing
-    // is memoised on the file's last-write time; a rewritten cache file re-parses, an untouched one
+    // is memoised on last-write time and size; a localized rewrite re-parses even when its HTTP
+    // timestamp is unchanged, while an untouched file
     // costs a dictionary hit instead of an XML parse.
     private async Task<LyricsDocument?> TryParseLyricsDocumentAsync(string path, CancellationToken cancellationToken)
     {
         DateTimeOffset lastWriteTimeUtc;
+        long length;
         try
         {
-            lastWriteTimeUtc = new DateTimeOffset(File.GetLastWriteTimeUtc(path), TimeSpan.Zero);
+            var file = new FileInfo(path);
+            lastWriteTimeUtc = new DateTimeOffset(file.LastWriteTimeUtc, TimeSpan.Zero);
+            length = file.Length;
         }
         catch (IOException)
         {
@@ -240,7 +361,8 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
             return null;
         }
 
-        if (_parseCache.TryGetValue(path, out var cached) && cached.LastWriteTimeUtc == lastWriteTimeUtc)
+        if (_parseCache.TryGetValue(path, out var cached) && cached.LastWriteTimeUtc == lastWriteTimeUtc
+            && cached.Length == length)
         {
             return cached.Document;
         }
@@ -275,7 +397,7 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
             return null;
         }
 
-        _parseCache[path] = new CachedDocument(lastWriteTimeUtc, document);
+        _parseCache[path] = new CachedDocument(lastWriteTimeUtc, length, document);
         return document;
     }
 
@@ -311,12 +433,7 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
             _ => 0,
         };
 
-        var titleScore = titleEvidence switch
-        {
-            TitleEvidenceStrength.Strong => 60,
-            TitleEvidenceStrength.Weak => 10,
-            _ => 0,
-        };
+        var titleScore = GetTitleScore(titleEvidence);
         if (durationScore == 0 && titleScore == 0)
         {
             return null;
@@ -345,5 +462,5 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
             : Math.Abs(documentDuration - player.Duration);
     }
 
-    private sealed record CachedDocument(DateTimeOffset LastWriteTimeUtc, LyricsDocument Document);
+    private sealed record CachedDocument(DateTimeOffset LastWriteTimeUtc, long Length, LyricsDocument Document);
 }

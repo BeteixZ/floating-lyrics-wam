@@ -62,13 +62,42 @@ public sealed class FontFamilyResolverTests
         Assert.Equal(yaHei.FontUri, FindRun(second, "A").GlyphTypeface.FontUri);
     });
 
+    [Theory]
+    [InlineData("MingLiU", false)]
+    [InlineData("MingLiU", true)]
+    [InlineData("Sarasa Gothic J", false)]
+    [InlineData("Sarasa Gothic J", true)]
+    [InlineData("Microsoft YaHei UI", false)]
+    [InlineData("Microsoft YaHei UI", true)]
+    public void Resolve_JapaneseKanaAndKanjiUseTheSelectedCjkFont(string cjkFont, bool semiBold) => OnSta(() =>
+    {
+        var weight = semiBold ? FontWeights.SemiBold : FontWeights.Normal;
+        var typeface = new Typeface(new FontFamily(cjkFont), FontStyles.Normal, weight, FontStretches.Normal);
+        // The physical font check runs wherever this optional Windows/user font is installed.
+        if (!typeface.TryGetGlyphTypeface(out var expected)) return;
+        const string japanese = "見慣れてる景色があったからカタカナーｶﾅ、。";
+        var runs = GlyphRuns(FontFamilyResolver.Resolve("Arial", cjkFont), "A" + japanese, weight);
+        foreach (var character in japanese.Distinct())
+        {
+            Assert.Equal(expected.FontUri, FindRun(runs, character.ToString()).GlyphTypeface.FontUri);
+            Assert.DoesNotContain((ushort)0, FindRun(runs, character.ToString()).GlyphIndices);
+        }
+        if (TryGlyphTypeface("Arial", out var latin) && !semiBold)
+        {
+            Assert.Equal(latin!.FontUri, FindRun(runs, "A").GlyphTypeface.FontUri);
+        }
+    });
+
     [Fact]
     public void Resolve_MissingChineseFontFallsBackWithoutLosingGlyphs() => OnSta(() =>
     {
         if (!TryGlyphTypeface(FontFamilyResolver.DefaultChineseFontName, out var expected)) return;
-        var runs = GlyphRuns(FontFamilyResolver.Resolve("Arial", "AppleMusicLyrics Missing CJK Font 8D2093"), "A中");
-        Assert.Equal(expected!.FontUri, FindRun(runs, "中").GlyphTypeface.FontUri);
-        Assert.DoesNotContain((ushort)0, FindRun(runs, "中").GlyphIndices);
+        var runs = GlyphRuns(FontFamilyResolver.Resolve("Arial", "AppleMusicLyrics Missing CJK Font 8D2093"), "A中あア");
+        foreach (var text in new[] { "中", "あ", "ア" })
+        {
+            Assert.Equal(expected!.FontUri, FindRun(runs, text).GlyphTypeface.FontUri);
+            Assert.DoesNotContain((ushort)0, FindRun(runs, text).GlyphIndices);
+        }
         Assert.DoesNotContain((ushort)0, FindRun(runs, "A").GlyphIndices);
     });
 
@@ -113,10 +142,10 @@ public sealed class FontFamilyResolverTests
     private static GlyphRun FindRun(IEnumerable<GlyphRun> runs, string text)
         => runs.First(run => new string(run.Characters.ToArray()).Contains(text, StringComparison.Ordinal));
 
-    private static IReadOnlyList<GlyphRun> GlyphRuns(FontFamily family, string text)
+    private static IReadOnlyList<GlyphRun> GlyphRuns(FontFamily family, string text, FontWeight? weight = null)
     {
         var formatted = new FormattedText(text, CultureInfo.GetCultureInfo("en-US"), FlowDirection.LeftToRight,
-            new Typeface(family, FontStyles.Normal, FontWeights.Normal, FontStretches.Normal), 32, Brushes.White, 1.0);
+            new Typeface(family, FontStyles.Normal, weight ?? FontWeights.Normal, FontStretches.Normal), 32, Brushes.White, 1.0);
         var drawing = new DrawingGroup();
         using (var context = drawing.Open()) context.DrawText(formatted, new Point());
         var runs = new List<GlyphRun>();

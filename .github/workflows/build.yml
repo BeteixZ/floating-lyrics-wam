@@ -45,18 +45,18 @@ jobs:
         run: dotnet format AppleMusicLyrics.sln --verify-no-changes --severity warn --no-restore
 
       - name: Test
-        run: dotnet test AppleMusicLyrics.sln -c $env:CONFIGURATION --no-build -v minimal --collect:"Code Coverage" --results-directory .\TestResults
+        run: dotnet test AppleMusicLyrics.sln -c $env:CONFIGURATION --no-build -v minimal --collect:"Code Coverage" --results-directory .\artifacts\test-results
 
       - name: Upload coverage baseline
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: code-coverage
-          path: TestResults/
+          path: artifacts/test-results/
           if-no-files-found: warn
 
       - name: Publish WPF App
-        run: dotnet publish .\src\AppleMusicLyrics.App\AppleMusicLyrics.App.csproj -c $env:CONFIGURATION -r win-x64 -p:PublishSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o .\artifacts\publish\win-x64
+        run: ./build.ps1
 
       - name: Create Release Zip
         id: package

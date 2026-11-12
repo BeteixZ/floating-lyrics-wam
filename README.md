@@ -67,8 +67,8 @@ Important settings include:
 - **Apply native timing correction**: honors Apple Music's TTML `lyricOffset` metadata.
 - **Compatibility mode**: allows non-Apple media sessions; disabled by default to prevent another player or browser from taking over.
 - **Low-confidence candidates**: trades matching accuracy for coverage; disabled by default.
-- **Word-by-word highlighting**: follows real QRC/YRC word timing when available. With online lyrics enabled, it also requests background checks for word timing missing from the current lyrics. Lyrics without usable word timestamps keep the ordinary line display.
-- **Show translations**: displays a translated line beneath the original when the lyric source provides a matching timestamped translation. With online lyrics enabled, it also requests background checks for missing translations. The app does not generate translations.
+- **Word-by-word highlighting**: prioritizes Apple Music's native TTML word timestamps; QRC/YRC timing is a fallback. With online lyrics enabled, background checks can fill missing timing only when it reliably aligns with the original lyrics. Lyrics without usable word timestamps keep the ordinary line display; word clocks are never synthesized.
+- **Show translations**: prioritizes Apple's supplied translation, associated with the original line by its native key. With online lyrics enabled, background checks can fill missing translations without replacing Apple's text or timing. The app does not generate translations. Availability depends on what Apple Music has cached for that song; not every track has translations or word timing.
 - **Online lyrics**: the online settings control Apple catalog verification and external lyric lookup. Initial lookup tries LRCLIB synchronized lyrics, QQ Music, and NetEase Cloud Music before using LRCLIB plain lyrics. Missing enabled features can trigger further background checks even when Apple or LRCLIB already supplies synchronized lines. Online service changes require an app restart; highlighting and translation toggles apply immediately.
 - **Keep lyric cache**: the Advanced tab can retain completed lyrics from all three external providers across restarts, including supplied translations, line timing, and word timing. The shared capacity defaults to 64 MB and can be set from 1 to 1024 MB. Older, least recently used entries are removed when the quota is reached or reduced. Current disk usage is shown beside a one-click Clear cache action, which also works when retention or online lyrics are disabled. Clearing refreshes the usage immediately and preserves settings and the current lyric display. The retention switch and capacity apply immediately; retention remains disabled by default, preserving existing settings.
 - **Pure mode drag opacity**: controls visibility while repositioning the card.
@@ -83,7 +83,7 @@ Apple catalog verification and external lyric lookup are enabled by default and 
 - **Apple iTunes Search API**: when local candidates are ambiguous, the app sends title and artist to verify the Apple catalog song ID.
 - **LRCLIB**: the app sends title, artist, album, and duration for exact lookup, with title/artist search fallback. Synchronized lyrics are used when available; plain-only lyrics are displayed with an approximate evenly projected timeline and identified as `lrclib-plain` in diagnostics.
 - **QQ Music**: the app sends title and artist to search QQ Music, then requests lyrics by the matched song ID. It is queried for missing lyrics or enabled word timing/translations missing from an existing Apple or LRCLIB result. QRC line and word timing is preserved, along with supplied translated lyrics.
-- **NetEase Cloud Music**: the app sends title and artist to search NetEase, then requests lyrics by the matched song ID when earlier sources have no usable lyrics or lack an enabled feature. YRC and older klyric word timing is preserved, with LRC fallback and supplied translated lyrics.
+- **NetEase Cloud Music**: the app sends title and artist to search NetEase, then requests lyrics by the matched song ID when earlier sources have no usable lyrics or lack an enabled feature. When artist names differ across languages, it verifies the candidate's artist ID and aliases through NetEase artist metadata before accepting the recording. YRC and older klyric word timing is preserved, with LRC fallback and supplied translated lyrics.
 
 The QQ and NetEase integrations use the request formats from the maintained LyricsKit fork linked below. They require no developer API key or account login. Their endpoints are undocumented platform interfaces and can change or reject requests. Server-issued anonymous cookies may be used in memory; the app does not read browser or player account cookies.
 
@@ -92,12 +92,12 @@ Requests run in cancellable background operations with bounded timeouts. When di
 ## How lyric selection works
 
 1. Read Apple Music playback metadata through Windows System Media Transport Controls.
-2. Scan Apple Music's local lyric cache and parse timed TTML.
-3. Accept a close, unambiguous local match or verify ambiguous candidates against Apple's catalog.
+2. Scan Apple Music's local cache, including legacy `ttmlLyrics` and current localized `syllable-lyrics` responses. Parse native line/word timestamps and keyed translations, keeping auxiliary backing vocals and romanization out of the main lyric. Prefer richer native versions of the same Apple song ID without treating duplicate cache versions as different tracks.
+3. Accept a close, unambiguous local match or verify candidates against Apple's catalog. If duration matching finds nothing, also look up cached lyrics by the verified Apple song ID: a TTML timeline can end at the last lyric, before the recording finishes. If keyword search omits the release, verify cached IDs through Apple's lookup endpoint, requiring exact title/artist agreement and a matching audio duration.
 4. Display a verified local match immediately. If no verified local lyrics exist and online lyrics are enabled, try LRCLIB, QQ Music, and NetEase Cloud Music in that order, showing a usable synchronized result as soon as it is available. Apply title, artist, and available duration checks to external candidates. Explicit featured-artist credits such as `(feat. Twista)` can be omitted by a source's title; matching normalizes those credits while rejecting conflicting guest credits and different live/remix/intro variants.
-5. If highlighting or translations are enabled but missing, continue checking online sources in the background. Current lyrics stay visible during these checks; a matching source with richer data can replace them. Word timestamps and translations are used only when supplied by the source.
+5. If highlighting or translations are enabled but missing, continue checking online sources in the background. An Apple result remains the primary text and timeline: only safely aligned, missing features can be added, and existing native words/translations are preserved. Without an Apple result, a richer external source may replace another external result without losing enabled features. Word timestamps and translations are used only when supplied by the source.
 6. Use LRCLIB plain lyrics if no synchronized external result is available, with an approximate timeline.
-7. Keep media/cache/network polling low-frequency while projecting playback and switching lines locally on visual frames.
+7. Keep media/cache/network polling low-frequency while projecting playback and switching lines locally on visual frames. Recheck only the selected Apple catalog ID for later native feature upgrades, so opening Apple's lyrics panel after the initial match can reveal native words/translations without allowing the next song's prefetch to take over.
 
 A missing lyric is preferred over displaying a low-confidence wrong lyric unless the user explicitly enables low-confidence candidates.
 
@@ -113,8 +113,11 @@ A missing lyric is preferred over displaying a low-confidence wrong lyric unless
 ```powershell
 dotnet restore AppleMusicLyrics.sln
 dotnet build AppleMusicLyrics.sln -c Release --no-restore
-dotnet test AppleMusicLyrics.sln -c Release --no-build
+dotnet test AppleMusicLyrics.sln -c Release --no-build --results-directory artifacts/test-results
 ```
+
+Build outputs and intermediate files stay under `artifacts/bin/` and `artifacts/obj/`,
+separated by project and configuration.
 
 ### Run
 
@@ -124,9 +127,22 @@ dotnet run --project src/AppleMusicLyrics.App/AppleMusicLyrics.App.csproj
 
 ### Publish
 
+Run:
+
 ```powershell
-dotnet publish src/AppleMusicLyrics.App/AppleMusicLyrics.App.csproj -c Release -r win-x64 -p:PublishSingleFile=true -o artifacts/publish/win-x64
+./build.ps1
 ```
+
+When the app is closed, the script replaces `artifacts/publish/win-x64/` after a
+successful publish, removing stale package files. If the app is running when the
+build starts or finishes, it publishes to `artifacts/publish/win-x64-yyyyMMdd-HHmmss-fff/`
+instead, leaving the running app and its files intact. The final `Latest build:`
+message gives the executable path. Each build while the app is running gets a new
+directory; existing timestamped builds are kept.
+
+All builds use a temporary publish directory first. Apart from this running-app
+exception, do not create local folders or ZIPs named after a task, date, or version.
+GitHub Release attachments remain versioned.
 
 ## Project structure
 

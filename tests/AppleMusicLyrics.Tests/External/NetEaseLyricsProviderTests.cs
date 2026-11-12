@@ -15,6 +15,39 @@ public sealed class NetEaseLyricsProviderTests
     private static readonly string MatchingSearch = Search(Song(123));
 
     [Fact]
+    public async Task FetchAsync_GetsAlbumVersionTranslationWhenAppleOmitsTheSuffix()
+    {
+        var player = new PlayerState("immature", "浜崎あゆみ", "loveppears", 0, 283, true);
+        var search = Search(
+            new
+            {
+                id = 1,
+                name = "immature (JT Original CM Version)",
+                duration = 283000,
+                artists = new[] { new { name = "浜崎あゆみ" } },
+                album = new { name = "LOVEppears" },
+            },
+            new
+            {
+                id = 22738112,
+                name = "immature (Album Version)",
+                duration = 283366,
+                artists = new[] { new { name = "浜崎あゆみ" } },
+                album = new { name = "LOVEppears" },
+            });
+        var handler = new RoutedHandler(search, _ => Lyrics(lrc: "[00:01.00]Synthetic original",
+            tlyric: "[00:01.00]合成译文"));
+        using var provider = new NetEaseLyricsProvider(messageHandler: handler);
+
+        var document = await provider.FetchAsync(player);
+
+        Assert.NotNull(document);
+        Assert.Equal("NETEASE_22738112", document.LyricsId);
+        Assert.Equal("合成译文", Assert.Single(document.Lines).Translation);
+        Assert.Equal(22738112, ReadSongId(Assert.Single(handler.LyricsRequests).Body!));
+    }
+
+    [Fact]
     public void EapiEncryption_MatchesIndependentKnownVector()
     {
         // Generated independently with Python cryptography AES/ECB + PKCS7 and hashlib MD5.
@@ -423,7 +456,8 @@ public sealed class NetEaseLyricsProviderTests
         };
         using var provider = new NetEaseLyricsProvider(messageHandler: handler);
 
-        await Assert.ThrowsAsync<HttpRequestException>(() => provider.FetchAsync(Player));
+        var error = await Assert.ThrowsAsync<ExternalLyricsServiceException>(() => provider.FetchAsync(Player));
+        Assert.Equal(503, error.ServiceCode);
     }
 
     [Fact]

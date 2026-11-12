@@ -5,6 +5,7 @@
 // 6f071990d0c9c6f48d29284db805990bffb912ed,
 // Sources/LyricsService/Provider/Services/NetEase.swift.
 
+using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
@@ -19,6 +20,7 @@ public sealed class NetEaseLyricsProvider : PlatformLyricsProvider
     private const string SearchUrl = "https://music.163.com/api/search/pc";
     private const string SearchUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Safari/605.1.15";
     private readonly LrcLyricsParser _lrcParser = new();
+    private readonly ConcurrentDictionary<long, string[]> _artistAliases = new();
 
     public NetEaseLyricsProvider(double timeoutSeconds = 6.0, HttpMessageHandler? messageHandler = null)
         : base(timeoutSeconds, messageHandler)
@@ -29,9 +31,11 @@ public sealed class NetEaseLyricsProvider : PlatformLyricsProvider
 
     protected override async Task<LyricsDocument?> FetchCoreAsync(PlayerState player, CancellationToken cancellationToken)
     {
-        var candidates = await SearchAsync(player, cancellationToken).ConfigureAwait(false);
-        var failures = new List<Exception>();
-        foreach (var candidate in candidates)
+        var search = await SearchAsync(player, cancellationToken).ConfigureAwait(false);
+        // Partial performer-verification failures are only harmless if another candidate
+        // actually supplies usable lyrics, not merely because it passed metadata scoring.
+        var failures = new List<Exception>(search.Failures);
+        foreach (var candidate in search.Candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
             try
@@ -116,7 +120,7 @@ public sealed class NetEaseLyricsProvider : PlatformLyricsProvider
             DurationSeconds: candidate.Duration);
     }
 
-    private async Task<IReadOnlyList<Candidate>> SearchAsync(PlayerState player, CancellationToken cancellationToken)
+    private async Task<SearchResult> SearchAsync(PlayerState player, CancellationToken cancellationToken)
     {
         var url = $"{SearchUrl}?s={Uri.EscapeDataString(PlatformLyricsSupport.SearchTerm(player))}&offset=0&limit=10&type=1";
         string? cookie = null;
@@ -140,7 +144,7 @@ public sealed class NetEaseLyricsProvider : PlatformLyricsProvider
         if (!root.TryGetProperty("result", out var result) || result.ValueKind == JsonValueKind.Null
             || !result.TryGetProperty("songs", out var songs) || songs.ValueKind == JsonValueKind.Null)
         {
-            return [];
+            return new SearchResult([], []);
         }
         if (songs.ValueKind != JsonValueKind.Array)
         {
@@ -148,6 +152,7 @@ public sealed class NetEaseLyricsProvider : PlatformLyricsProvider
         }
 
         var candidates = new List<Candidate>();
+        var aliasFailures = new List<Exception>();
         foreach (var song in songs.EnumerateArray())
         {
             if (!song.TryGetProperty("id", out var idElement) || !idElement.TryGetInt64(out var id) || id <= 0)
@@ -163,13 +168,70 @@ public sealed class NetEaseLyricsProvider : PlatformLyricsProvider
             double? duration = song.TryGetProperty("duration", out var durationElement) && durationElement.TryGetDouble(out var milliseconds)
                 && double.IsFinite(milliseconds) && milliseconds > 0 ? milliseconds / 1000.0 : null;
             var score = PlatformLyricsSupport.ScoreCandidate(player, title, artist, album, duration);
+            if (score == int.MinValue && !string.IsNullOrWhiteSpace(artist)
+                && song.TryGetProperty("artists", out artists) && artists.ValueKind == JsonValueKind.Array)
+            {
+                // Only resolve a performer alias after the title, recording variant and duration
+                // pass the normal guards. A search hit alone never proves performer identity.
+                var aliasScore = PlatformLyricsSupport.ScoreCandidate(player with { Artist = artist }, title, artist, album, duration);
+                if (aliasScore != int.MinValue)
+                {
+                    try
+                    {
+                        if (await IsVerifiedArtistAliasAsync(player.Artist!, artists, cancellationToken).ConfigureAwait(false))
+                            score = aliasScore;
+                    }
+                    catch (Exception error) when (error is HttpRequestException or JsonException)
+                    {
+                        aliasFailures.Add(error);
+                    }
+                }
+            }
             if (score != int.MinValue)
             {
                 candidates.Add(new Candidate(id, duration, score));
             }
         }
 
-        return candidates.OrderByDescending(candidate => candidate.Score).DistinctBy(candidate => candidate.Id).Take(3).ToArray();
+        if (candidates.Count == 0 && aliasFailures.Count > 0)
+            throw new AggregateException("NetEase performer aliases could not be verified.", aliasFailures);
+        return new SearchResult(
+            candidates.OrderByDescending(candidate => candidate.Score).DistinctBy(candidate => candidate.Id).Take(3).ToArray(),
+            aliasFailures);
+    }
+
+    private async Task<bool> IsVerifiedArtistAliasAsync(string playingArtist, JsonElement artists, CancellationToken cancellationToken)
+    {
+        foreach (var artist in artists.EnumerateArray())
+        {
+            if (!artist.TryGetProperty("id", out var idElement) || !idElement.TryGetInt64(out var id) || id <= 0)
+                continue;
+
+            if (!_artistAliases.TryGetValue(id, out var aliases))
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, $"https://music.163.com/api/artist/{id}");
+                request.Headers.Referrer = new Uri("https://music.163.com/");
+                request.Headers.TryAddWithoutValidation("User-Agent", SearchUserAgent);
+                using var response = await HttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+                using var json = await ReadResponseAsync(response, cancellationToken).ConfigureAwait(false);
+                if (!json.RootElement.TryGetProperty("artist", out var detail) || detail.ValueKind != JsonValueKind.Object
+                    || !detail.TryGetProperty("id", out var detailId) || !detailId.TryGetInt64(out var returnedId) || returnedId != id
+                    || MetadataMatching.Score(ReadString(artist, "name"), ReadString(detail, "name"), 1, 0) != 1)
+                    continue;
+
+                var names = new List<string?> { ReadString(detail, "name"), ReadString(detail, "trans") };
+                foreach (var field in new[] { "alias", "transNames" })
+                    if (detail.TryGetProperty(field, out var values) && values.ValueKind == JsonValueKind.Array)
+                        names.AddRange(values.EnumerateArray().Where(value => value.ValueKind == JsonValueKind.String)
+                            .Select(value => value.GetString()));
+                aliases = names.OfType<string>().Where(name => !string.IsNullOrWhiteSpace(name)).ToArray();
+                if (_artistAliases.Count >= 256) _artistAliases.Clear();
+                _artistAliases[id] = aliases;
+            }
+            if (aliases.Any(alias => MetadataMatching.Score(playingArtist, alias, 1, 0) == 1))
+                return true;
+        }
+        return false;
     }
 
     private static HttpRequestMessage CreateSearchRequest(string url, string? cookie)
@@ -202,7 +264,9 @@ public sealed class NetEaseLyricsProvider : PlatformLyricsProvider
         {
             var message = code.GetRawText();
             json.Dispose();
-            throw new HttpRequestException($"NetEase API returned code {message}.");
+            if (int.TryParse(message, out var serviceCode))
+                throw new ExternalLyricsServiceException("NetEase", serviceCode);
+            throw new JsonException("NetEase returned an invalid service code.");
         }
         return json;
     }
@@ -216,4 +280,5 @@ public sealed class NetEaseLyricsProvider : PlatformLyricsProvider
             ? value.GetString() : null;
 
     private sealed record Candidate(long Id, double? Duration, int Score);
+    private sealed record SearchResult(IReadOnlyList<Candidate> Candidates, IReadOnlyList<Exception> Failures);
 }

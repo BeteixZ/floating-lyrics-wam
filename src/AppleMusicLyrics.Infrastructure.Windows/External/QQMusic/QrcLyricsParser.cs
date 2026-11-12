@@ -34,7 +34,8 @@ internal static class QrcLyricsParser
     private static readonly Regex RecordingTag = new(@"^[ \t]*\[(ti|ar):([^\]\r\n]*)\]",
         RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
-    internal static LyricsDocument? ParseResponse(string response, string id, double? duration, PlayerState? player = null)
+    internal static LyricsDocument? ParseResponse(string response, string id, double? duration, PlayerState? player = null,
+        string? recordingAlbum = null, double? recordingDuration = null, string? recordingArtist = null)
     {
         // QQ wraps its XML payload in HTML comment markers.
         var outer = ReadXml(response.Replace("<!--", string.Empty, StringComparison.Ordinal)
@@ -45,7 +46,8 @@ internal static class QrcLyricsParser
             return null;
         }
         var originalContent = DecodeContent(text);
-        if (player is not null && !MatchesRecordingMetadata(originalContent, player))
+        if (player is not null && !MatchesRecordingMetadata(originalContent, player,
+            recordingAlbum, recordingDuration, recordingArtist))
         {
             return null;
         }
@@ -78,7 +80,8 @@ internal static class QrcLyricsParser
         return original;
     }
 
-    private static bool MatchesRecordingMetadata(string content, PlayerState player)
+    private static bool MatchesRecordingMetadata(string content, PlayerState player,
+        string? recordingAlbum, double? recordingDuration, string? recordingArtist)
     {
         string? title = null, artist = null;
         foreach (Match tag in RecordingTag.Matches(content))
@@ -98,9 +101,12 @@ internal static class QrcLyricsParser
             }
         }
         // Smartbox may omit a remix/live suffix that is retained in the actual QRC metadata.
-        // Missing tags add no evidence; lyric-end times are not recording-duration metadata.
+        // Keep search-verified audio evidence for the narrow Album Version alias. The display
+        // duration may be filled from the player; it is deliberately not used as this evidence.
+        // Present QRC tags still override search metadata and reject conflicting variants/artists.
         return (title is null && artist is null) || PlatformLyricsSupport.ScoreCandidate(player,
-            title ?? player.Title, artist ?? player.Artist, null, null) != int.MinValue;
+            title ?? player.Title, artist ?? recordingArtist ?? player.Artist,
+            recordingAlbum, recordingDuration) != int.MinValue;
     }
 
     private static string DecodeContent(string text)

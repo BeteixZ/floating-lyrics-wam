@@ -112,7 +112,8 @@ public sealed class ExternalLyricsCache
             // File timestamps give all sources one least-recently-used order across restarts.
             try { File.SetLastWriteTimeUtc(path, DateTime.UtcNow); }
             catch (Exception error) when (IsCacheFailure(error)) { }
-            TryEnforceLimit();
+            // Reads do not add bytes. Quota maintenance belongs to Store/Configure, not an
+            // O(N log N) directory scan on every hit while holding the shared provider lock.
             return true;
         }
     }
@@ -209,7 +210,10 @@ public sealed class ExternalLyricsCache
         "v1-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key))) + ".json");
 
     private static string BuildKey(string sourceName, PlayerState player) => JsonSerializer.Serialize(new TrackKey(
-        sourceName.Trim(), MetadataMatching.Normalize(player.Title), MetadataMatching.Normalize(player.Artist),
+        // LRCLIB documents saved before artist admission was enforced lack metadata to
+        // revalidate. Invalidate only that source's old keys, preserving all other providers.
+        sourceName.Trim() == "LRCLIB" ? "LRCLIB:artist-verified-v2" : sourceName.Trim(),
+        MetadataMatching.Normalize(player.Title), MetadataMatching.Normalize(player.Artist),
         MetadataMatching.Normalize(player.Album), player.Duration.ToString("R", System.Globalization.CultureInfo.InvariantCulture)));
 
     private static bool IsUsable(LyricsDocument? document)

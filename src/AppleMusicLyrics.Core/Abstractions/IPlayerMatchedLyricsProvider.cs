@@ -12,4 +12,15 @@ public interface IPlayerMatchedLyricsProvider : ILyricsDocumentProvider
     Task<IReadOnlyList<LyricsMatch>> FindCandidatesAsync(
         PlayerState player,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Finds an independently verified Apple catalog id, including documents whose lyric timeline
+    /// ends before the recording does. Implementations without id lookup may return null.
+    /// </summary>
+    Task<LyricsDocument?> FindByLyricsIdsAsync(
+        IReadOnlyList<string> lyricsIds,
+        CancellationToken cancellationToken = default) => Task.FromResult<LyricsDocument?>(null);
+
+    Task<IReadOnlyList<string>> GetCachedLyricsIdsAsync(CancellationToken cancellationToken = default) =>
+        Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
 }

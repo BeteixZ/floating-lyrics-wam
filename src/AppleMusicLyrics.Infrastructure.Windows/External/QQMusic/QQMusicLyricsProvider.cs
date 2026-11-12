@@ -27,8 +27,9 @@ public sealed class QQMusicLyricsProvider : PlatformLyricsProvider
     protected override async Task<LyricsDocument?> FetchCoreAsync(PlayerState player, CancellationToken cancellationToken)
     {
         var searches = await Task.WhenAll(
-            SearchAsync(player, smartbox: true, cancellationToken),
-            SearchAsync(player, smartbox: false, cancellationToken)).ConfigureAwait(false);
+            SearchWithBudgetAsync(player, smartbox: true, cancellationToken),
+            SearchWithBudgetAsync(player, smartbox: false, cancellationToken)).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         if (searches.All(result => result.Failure is not null))
         {
             throw new HttpRequestException("Both QQ Music search endpoints failed.",
@@ -51,7 +52,10 @@ public sealed class QQMusicLyricsProvider : PlatformLyricsProvider
                 new AggregateException(searches.Where(result => result.Failure is not null).Select(result => result.Failure!)));
         }
 
-        var failures = new List<Exception>();
+        // Metadata candidates are not a successful lookup until one yields usable lyrics.
+        // Retain partial search failures so an otherwise empty result can still be retried.
+        var failures = searches.Where(result => result.Failure is not null)
+            .Select(result => result.Failure!).ToList();
         foreach (var item in candidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -71,7 +75,8 @@ public sealed class QQMusicLyricsProvider : PlatformLyricsProvider
                 response.EnsureSuccessStatusCode();
                 var content = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
                 var document = QrcLyricsParser.ParseResponse(content, candidate.Id,
-                    candidate.Duration ?? (player.Duration > 0 ? player.Duration : null), player);
+                    candidate.Duration ?? (player.Duration > 0 ? player.Duration : null), player,
+                    candidate.Album, candidate.Duration, candidate.Artist);
                 if (document is { Lines.Count: > 0 })
                 {
                     return document;
@@ -93,6 +98,28 @@ public sealed class QQMusicLyricsProvider : PlatformLyricsProvider
                 new AggregateException(failures));
         }
         return null;
+    }
+
+    private async Task<SearchResult> SearchWithBudgetAsync(PlayerState player, bool smartbox, CancellationToken cancellationToken)
+    {
+        // One slow search must not consume the lyric-download budget or discard the other
+        // endpoint's successful candidates. Both searches still finish before ranking results.
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(FetchTimeout / 2);
+        var search = SearchAsync(player, smartbox, deadline.Token);
+        // A handler which ignores cancellation may finish after WaitAsync abandons it.
+        _ = search.ContinueWith(completed => { _ = completed.Exception; }, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        try
+        {
+            var result = await search.WaitAsync(deadline.Token).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            return result;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && deadline.IsCancellationRequested)
+        {
+            return new SearchResult([], new TimeoutException("QQ Music search endpoint exceeded its request budget."));
+        }
     }
 
     private async Task<SearchResult> SearchAsync(PlayerState player, bool smartbox, CancellationToken cancellationToken)
@@ -120,11 +147,12 @@ public sealed class QQMusicLyricsProvider : PlatformLyricsProvider
             var content = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             using var document = JsonDocument.Parse(content);
             var root = document.RootElement;
+            if (Property(root, "code") is { ValueKind: JsonValueKind.Number } rootCode && rootCode.GetInt32() != 0)
+                throw new ExternalLyricsServiceException("QQ Music", rootCode.GetInt32());
             var result = smartbox ? root : Property(root, "req_1");
             if (Property(result, "code") is { ValueKind: JsonValueKind.Number } code && code.GetInt32() != 0)
             {
-                return new SearchResult([], new HttpRequestException(
-                    $"QQ Music {(smartbox ? "smartbox" : "musicu")} search returned service code {code.GetInt32()}."));
+                return new SearchResult([], new ExternalLyricsServiceException("QQ Music", code.GetInt32()));
             }
             var song = smartbox ? Property(Property(result, "data"), "song")
                 : Property(Property(Property(result, "data"), "body"), "song");

@@ -1,4 +1,8 @@
+using System.Text.Json;
+using AppleMusicLyrics.Application.Services;
+using AppleMusicLyrics.Core.Abstractions;
 using AppleMusicLyrics.Core.Models;
+using AppleMusicLyrics.Core.Sync;
 using AppleMusicLyrics.Core.Parsing;
 using AppleMusicLyrics.Infrastructure.Windows.Cache;
 using Xunit;
@@ -226,6 +230,241 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
         var document = await scanner.GetLatestLyricsAsync();
 
         Assert.Null(document);
+    }
+
+    [Fact]
+    public async Task FindSyllableLyrics_DiscoversCurrentApiAndItsCatalogIdentity()
+    {
+        var path = CreateSyllableFile("syllable-lyrics[1].json", "AP_123", words: true, translation: true);
+        File.WriteAllText(Path.Combine(Path.GetDirectoryName(path)!, "account.json"), "{}");
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), [_root]);
+
+        Assert.Equal(path, Assert.Single(scanner.FindLyricsFiles([_root])));
+        var document = await scanner.GetLatestLyricsAsync();
+        Assert.Equal("AP_123", document?.LyricsId);
+        Assert.NotEmpty(Assert.Single(document!.Lines).Words!);
+        Assert.Equal("你好，世界", document.Lines[0].Translation);
+        Assert.Equal("AP_123", scanner.LoadLyricsMetadata(path)?.LyricsId);
+        Assert.Equal(["AP_123"], await scanner.GetCachedLyricsIdsAsync());
+    }
+
+    [Fact]
+    public async Task FindCandidates_DeduplicatesLegacyAndSyllableVersionsOfTheSameTrack()
+    {
+        _ = CreateLyricsFile("ttmlLyrics-newer.json", "AP_123", 0, "hello world", "180.000");
+        var rich = CreateSyllableFile("syllable-lyrics[1].json", "AP_123", words: true, translation: true);
+        File.SetLastWriteTimeUtc(rich, DateTime.UtcNow.AddMinutes(-10));
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), [_root]);
+
+        var candidate = Assert.Single(await scanner.FindCandidatesAsync(
+            new PlayerState("hello world", "Artist", "Album", 10, 180, true)));
+
+        Assert.Equal(rich, candidate.Document.SourceFile);
+        Assert.NotNull(candidate.Document.Lines[0].Words);
+        Assert.Equal("你好，世界", candidate.Document.Lines[0].Translation);
+    }
+
+    [Fact]
+    public async Task FindByLyricsIds_PrefersNativeFeaturesOverANewerBasicDocument()
+    {
+        _ = CreateLyricsFile("ttmlLyrics-newer.json", "AP_123", 0, "hello world", "180.000");
+        var rich = CreateSyllableFile("syllable-lyrics[1].json", "AP_123", words: true, translation: true);
+        File.SetLastWriteTimeUtc(rich, DateTime.UtcNow.AddHours(-1));
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), [_root]);
+
+        Assert.Equal(rich, (await scanner.FindByLyricsIdsAsync(["AP_123"]))?.SourceFile);
+    }
+
+    [Fact]
+    public async Task SameNativeFeatures_PrefersFinerWordTimingBeforeFileRecency()
+    {
+        var coarse = CreateLyricsFile("ttmlLyrics-coarse.json", "AP_123", 0, "hello world", "180.000");
+        File.WriteAllText(coarse, BuildLyricsJson("AP_123", "10.000", "12.000",
+            "<span begin=\\\"10.000\\\" end=\\\"12.000\\\">hello world</span>", "180.000"));
+        var fine = CreateSyllableFile("syllable-lyrics[1].json", "AP_123", words: true, translation: false);
+        File.SetLastWriteTimeUtc(fine, DateTime.UtcNow.AddMinutes(-10));
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), [_root]);
+
+        var byId = await scanner.FindByLyricsIdsAsync(["AP_123"]);
+        Assert.Equal(fine, byId?.SourceFile);
+        Assert.Equal(2, byId!.Lines[0].Words!.Count);
+        var candidate = Assert.Single(await scanner.FindCandidatesAsync(
+            new PlayerState("hello world", "Artist", "Album", 10, 180, true)));
+        Assert.Equal(fine, candidate.Document.SourceFile);
+    }
+
+    [Theory]
+    [InlineData("180.000", 0, 160)]
+    [InlineData("185.000", 5, 85)]
+    public async Task SameCatalogVersion_KeepsIdentityEvidenceButUsesPreferredDocumentsOwnDuration(
+        string nativeDuration, double expectedDelta, int expectedScore)
+    {
+        _ = CreateLyricsFile("ttmlLyrics-title.json", "AP_123", 0, "hello world", "180.000");
+        var rich = CreateSyllableFile("syllable-lyrics[1].json", "AP_123", words: true, translation: false);
+        var json = File.ReadAllText(rich).Replace("hello", "你好").Replace("world", "世界")
+            .Replace("180.000", nativeDuration);
+        File.WriteAllText(rich, json);
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), [_root]);
+
+        var candidate = Assert.Single(await scanner.FindCandidatesAsync(
+            new PlayerState("hello world", "Artist", "Album", 10.5, 180, true)));
+
+        Assert.Equal(rich, candidate.Document.SourceFile);
+        Assert.Equal("你好 世界", candidate.Document.Lines[0].Text);
+        Assert.True(candidate.HasContentMatch);
+        Assert.Equal(TitleEvidenceStrength.Strong, candidate.TitleEvidence);
+        Assert.Equal(expectedDelta, candidate.DurationDelta);
+        Assert.Equal(expectedScore, candidate.Score);
+
+        if (expectedDelta == 0)
+        {
+            var external = new CountingExternalProvider();
+            await using var runtime = new LyricsRuntimeService(scanner, new NativePlayerProvider(),
+                new LyricsSynchronizer(), new PlaybackClock())
+            {
+                PreferWordTimings = true,
+                ExternalLyricsProviders = [external],
+            };
+            var snapshot = await runtime.SnapshotAsync();
+            Assert.Equal(rich, snapshot.Document?.SourceFile);
+            Assert.Equal(LyricsResolutionSource.AppleMusicCache, snapshot.Resolution.Source);
+            Assert.Equal(0, external.CallCount);
+        }
+    }
+
+    [Fact]
+    public async Task DifferentCatalogIds_NeverShareTitleEvidence()
+    {
+        _ = CreateLyricsFile("ttmlLyrics-title.json", "AP_123", 0, "hello world", "180.000");
+        var other = CreateSyllableFile("syllable-lyrics[1].json", "AP_456", words: true, translation: false);
+        File.WriteAllText(other, File.ReadAllText(other).Replace("hello", "你好").Replace("world", "世界"));
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), [_root]);
+
+        var candidates = await scanner.FindCandidatesAsync(new PlayerState("hello world", "Artist", "Album", 1, 180, true));
+
+        Assert.Equal(2, candidates.Count);
+        var different = Assert.Single(candidates, candidate => candidate.Document.LyricsId == "AP_456");
+        Assert.False(different.HasContentMatch);
+        Assert.NotEqual(TitleEvidenceStrength.Strong, different.TitleEvidence);
+    }
+
+    [Fact]
+    public async Task FindByLyricsIds_NeverLetsRichAnotherTrackOverrideTheRequestedIdOrder()
+    {
+        var first = CreateLyricsFile("ttmlLyrics.json", "AP_1", 0, "hello world", "180.000");
+        _ = CreateSyllableFile("syllable-lyrics[1].json", "AP_2", words: true, translation: true);
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), [_root]);
+
+        Assert.Equal(first, (await scanner.FindByLyricsIdsAsync(["AP_1", "AP_2"]))?.SourceFile);
+        var candidates = await scanner.FindCandidatesAsync(new PlayerState("hello world", "Artist", null, 1, 180, true));
+        Assert.Equal(2, candidates.Count);
+    }
+
+    [Fact]
+    public async Task RewrittenLocalizedCache_ReparsesWhenHttpTimestampIsUnchangedButSizeChanges()
+    {
+        var path = CreateSyllableFile("syllable-lyrics[1].json", "AP_123", words: false, translation: false);
+        var time = File.GetLastWriteTimeUtc(path);
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), [_root]);
+        var first = await scanner.GetLatestLyricsAsync();
+        Assert.Null(first!.Lines[0].Words);
+        Assert.Null(first.Lines[0].Translation);
+
+        File.WriteAllText(path, BuildSyllableJson("AP_123", words: true, translation: true));
+        File.SetLastWriteTimeUtc(path, time);
+        var upgraded = await scanner.GetLatestLyricsAsync();
+
+        Assert.NotSame(first, upgraded);
+        Assert.NotEmpty(upgraded!.Lines[0].Words!);
+        Assert.Equal("你好，世界", upgraded.Lines[0].Translation);
+    }
+
+    [Fact]
+    public async Task IndexRefresh_DiscoversLateSyllableEndpointWhileRetainingLegacyCache()
+    {
+        _ = CreateLyricsFile("ttmlLyrics.json", "AP_123", 0, "hello world", "180.000");
+        var time = new ManualTimeProvider();
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), [_root], time)
+        {
+            FileIndexTtl = TimeSpan.FromSeconds(1),
+        };
+        Assert.Null((await scanner.FindByLyricsIdsAsync(["AP_123"]))!.Lines[0].Words);
+        var rich = CreateSyllableFile("syllable-lyrics[1].json", "AP_123", words: true, translation: true);
+        time.Advance(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(rich, (await scanner.FindByLyricsIdsAsync(["AP_123"]))?.SourceFile);
+        Assert.Equal(2, scanner.IndexRefreshCount);
+    }
+
+    [Fact]
+    public async Task NativeApiToRuntime_UsesAppleWordTimesAndTranslationsWithoutExternalRequests()
+    {
+        _ = CreateSyllableFile("syllable-lyrics[1].json", "AP_123", words: true, translation: true);
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), [_root]);
+        var external = new CountingExternalProvider();
+        await using var runtime = new LyricsRuntimeService(scanner, new NativePlayerProvider(),
+            new LyricsSynchronizer(), new PlaybackClock())
+        {
+            PreferWordTimings = true,
+            PreferTranslations = true,
+            ExternalLyricsProviders = [external],
+        };
+
+        var snapshot = await runtime.SnapshotAsync();
+
+        Assert.Equal(LyricsResolutionSource.AppleMusicCache, snapshot.Resolution.Source);
+        Assert.Equal("AP_123", snapshot.Document!.LyricsId);
+        var line = Assert.Single(snapshot.Document.Lines);
+        Assert.Equal(10, line.Begin);
+        Assert.Equal(10, line.Words![0].Begin);
+        Assert.True(LyricWordTiming.IsUsable(line));
+        Assert.Equal("你好，世界", line.Translation);
+        Assert.Equal(ExternalLyricsQueryState.Satisfied, snapshot.ExternalDiagnostics!.EnrichmentState);
+        Assert.Equal(0, external.CallCount);
+    }
+
+    private sealed class NativePlayerProvider : IPlayerSessionProvider
+    {
+        public Task<PlayerState?> GetCurrentPlayerStateAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<PlayerState?>(new PlayerState("hello world", "Artist", "Album", 10.5, 180, true));
+    }
+
+    private sealed class CountingExternalProvider : IExternalLyricsProvider
+    {
+        public string Name => "Unexpected external query";
+        public int CallCount { get; private set; }
+        public Task<LyricsDocument?> FetchAsync(PlayerState player, CancellationToken cancellationToken = default)
+        {
+            CallCount++;
+            return Task.FromResult<LyricsDocument?>(null);
+        }
+    }
+
+    private string CreateSyllableFile(string name, string id, bool words, bool translation)
+    {
+        var path = Path.Combine(CreateDirectory("INetCache", "B"), name);
+        File.WriteAllText(path, BuildSyllableJson(id, words, translation));
+        return path;
+    }
+
+    private static string BuildSyllableJson(string id, bool words, bool translation)
+    {
+        var text = words
+            ? "<span begin=\"10.000\" end=\"11.000\">hello</span> <span begin=\"11.000\" end=\"12.000\">world</span>"
+            : "hello world";
+        var localized = translation
+            ? "<head><metadata><itunes:iTunesMetadata><itunes:translations><itunes:translation type=\"subtitle\" xml:lang=\"zh-Hans\"><itunes:text for=\"native-27\">你好，世界</itunes:text></itunes:translation></itunes:translations></itunes:iTunesMetadata></metadata></head>"
+            : "";
+        var ttml = "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:itunes=\"http://music.apple.com/lyric-ttml-internal\">"
+            + localized + "<body dur=\"180.000\"><div><p begin=\"10.000\" end=\"12.000\" itunes:key=\"native-27\">" + text + "</p></div></body></tt>";
+        return JsonSerializer.Serialize(new
+        {
+            data = new[] { new { id = id[3..], type = "syllable-lyrics", attributes = new
+            {
+                playParams = new { id, catalogId = id[3..], kind = "lyric" },
+                ttmlLocalizations = ttml,
+            } } },
+        });
     }
 
     private string CreateLyricsFile(

@@ -9,6 +9,118 @@ namespace AppleMusicLyrics.Tests.Catalog;
 
 public sealed class ITunesCatalogSongResolverTests
 {
+    [Theory]
+    [InlineData("Welcome to Taichung City", "Flesh Juicer", 103222, 1545337667, true)]
+    [InlineData("Welcome to Taichung City", "Flesh Juicer", 183111, 1545337667, false)]
+    [InlineData("Welcome to Taichung City", "Flesh Juicer", 0, 1545337667, false)]
+    [InlineData("Welcome to Taichung City", "Another Artist", 103222, 1545337667, false)]
+    [InlineData("Another Song", "Flesh Juicer", 103222, 1545337667, false)]
+    [InlineData("Welcome to Taichung City", "Flesh Juicer", 103222, 1545337668, false)]
+    public async Task VerifyCachedLyricsIdsAsync_RequiresRequestedIdAndExactMetadataAndAudioDuration(
+        string title, string artist, int milliseconds, long id, bool accepted)
+    {
+        var handler = new StorefrontHandler(request =>
+        {
+            Assert.Equal("/lookup", request.RequestUri!.AbsolutePath);
+            Assert.Contains("id=1545337667", request.RequestUri.Query);
+            return System.Text.Json.JsonSerializer.Serialize(new
+            {
+                results = new[] { new { trackId = id, trackName = title, artistName = artist,
+                    collectionName = "Golden Taizi Bro", trackTimeMillis = milliseconds } },
+            });
+        });
+        using var resolver = new ITunesCatalogSongResolver("us", messageHandler: handler);
+        var player = new PlayerState("Welcome to Taichung City", "Flesh Juicer", "Golden Taizi Bro", 33, 103.222, true);
+
+        var result = await resolver.VerifyCachedLyricsIdsAsync(player, ["AP_1545337667-zh-Hant"]);
+
+        Assert.Equal(accepted ? new[] { "AP_1545337667" } : Array.Empty<string>(), result);
+        Assert.Equal(1, handler.RequestCount);
+        if (accepted)
+        {
+            Assert.Equal(result, await resolver.ResolveLyricsIdCandidatesAsync(player));
+            Assert.Equal(1, handler.RequestCount);
+        }
+    }
+
+    [Fact]
+    public async Task VerifyCachedLyricsIdsAsync_DoesNotReuseUnrelatedSearchOrVerificationIds()
+    {
+        var handler = new StorefrontHandler(request =>
+        {
+            var query = request.RequestUri!.Query;
+            var id = request.RequestUri.AbsolutePath == "/search" ? 111
+                : query.Contains("country=us", StringComparison.Ordinal) ? 0
+                : query.Contains("id=222", StringComparison.Ordinal) ? 222 : 333;
+            return id == 0 ? "{\"results\":[]}"
+                : System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    results = new[] { new { trackId = id, trackName = "Song", artistName = "Artist",
+                        collectionName = "Album", trackTimeMillis = 180000 } },
+                });
+        });
+        using var resolver = new ITunesCatalogSongResolver("us,cn", messageHandler: handler);
+        var player = new PlayerState("Song", "Artist", "Album", 1, 180, true);
+
+        Assert.Equal(["AP_111"], await resolver.ResolveLyricsIdCandidatesAsync(player));
+        Assert.Equal(["AP_222"], await resolver.VerifyCachedLyricsIdsAsync(player, ["AP_222-zh-Hant"]));
+        Assert.Equal(3, handler.RequestCount);
+        Assert.Equal(["AP_222"], await resolver.VerifyCachedLyricsIdsAsync(player, ["AP_222"]));
+        Assert.Equal(3, handler.RequestCount);
+        Assert.Equal(["AP_333"], await resolver.VerifyCachedLyricsIdsAsync(player, ["AP_333"]));
+        Assert.Equal(5, handler.RequestCount);
+        Assert.Equal(["AP_222"], await resolver.VerifyCachedLyricsIdsAsync(player, ["AP_222"]));
+        Assert.Equal(5, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task VerifyCachedLyricsIdsAsync_ContinuesAfterAFailedStorefrontAndRetriesItLater()
+    {
+        var handler = new StorefrontHandler(request => request.RequestUri!.Query.Contains("country=us", StringComparison.Ordinal)
+            ? throw new HttpRequestException("rate limited", null, HttpStatusCode.TooManyRequests)
+            : System.Text.Json.JsonSerializer.Serialize(new
+            {
+                results = new[] { new { trackId = 222, trackName = "Song", artistName = "Artist",
+                    collectionName = "Album", trackTimeMillis = 180000 } },
+            }));
+        using var resolver = new ITunesCatalogSongResolver("us,cn", messageHandler: handler);
+        var player = new PlayerState("Song", "Artist", "Album", 1, 180, true);
+
+        Assert.Equal(["AP_222"], await resolver.VerifyCachedLyricsIdsAsync(player, ["AP_222"]));
+        Assert.Equal(2, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task VerifyCachedLyricsIdsAsync_ReportsFailuresWithoutRememberingThemAsMisses()
+    {
+        var failing = true;
+        var handler = new StorefrontHandler(_ => failing
+            ? throw new HttpRequestException("offline")
+            : "{\"results\":[]}");
+        using var resolver = new ITunesCatalogSongResolver("us", messageHandler: handler);
+        var player = new PlayerState("Song", "Artist", "Album", 1, 180, true);
+
+        await Assert.ThrowsAsync<AggregateException>(() => resolver.VerifyCachedLyricsIdsAsync(player, ["AP_222"]));
+        failing = false;
+        Assert.Empty(await resolver.VerifyCachedLyricsIdsAsync(player, ["AP_222"]));
+        Assert.Equal(2, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task VerifyCachedLyricsIdsAsync_BoundsRequestsAndSkipsKnownMisses()
+    {
+        var handler = new StorefrontHandler(_ => "{\"results\":[]}");
+        using var resolver = new ITunesCatalogSongResolver("us,cn", messageHandler: handler);
+        var player = new PlayerState("Song", "Artist", "Album", 1, 180, true);
+        var cached = Enumerable.Range(1, 1000).Select(id => "AP_" + id).ToArray();
+
+        Assert.Empty(await resolver.VerifyCachedLyricsIdsAsync(player, cached));
+        // Two batches of 100 ids, each looked up in two storefronts.
+        Assert.Equal(4, handler.RequestCount);
+        Assert.Empty(await resolver.VerifyCachedLyricsIdsAsync(player, cached.Take(ITunesCatalogSongResolver.MaxVerifiedLookupIds).ToArray()));
+        Assert.Equal(4, handler.RequestCount);
+    }
+
     [Fact]
     public void CatalogLyricsId_RoundTripsTheCatalogSongId()
     {

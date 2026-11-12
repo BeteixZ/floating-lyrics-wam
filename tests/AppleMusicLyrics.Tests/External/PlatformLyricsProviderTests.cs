@@ -33,6 +33,49 @@ public sealed class PlatformLyricsProviderTests
     }
 
     [Theory]
+    [InlineData("immature", "immature (Album Version)")]
+    [InlineData("immature (Album Version)", "immature")]
+    [InlineData("immature", "immature [album version]")]
+    [InlineData("immature", "immature（Album Version）")]
+    public void ScoreCandidate_AcceptsAlbumVersionAliasWithMatchingRecordingEvidence(string playingTitle, string candidateTitle)
+    {
+        var player = new PlayerState(playingTitle, "浜崎あゆみ", "loveppears", 0, 283, true);
+        Assert.NotEqual(int.MinValue, PlatformLyricsSupport.ScoreCandidate(player,
+            candidateTitle, "浜崎あゆみ", "LOVEppears", 283.366));
+    }
+
+    [Theory]
+    [InlineData("Other Artist", "Album", 180.0, 180.0)]
+    [InlineData("Artist", "Other Album", 180.0, 180.0)]
+    [InlineData("Artist", "Album Deluxe", 180.0, 180.0)]
+    [InlineData("Artist", null, 180.0, 180.0)]
+    [InlineData("Artist", "Album", null, 180.0)]
+    [InlineData("Artist", "Album", 0.0, 180.0)]
+    [InlineData("Artist", "Album", 180.0, 0.0)]
+    [InlineData("Artist", "Album", 180.0, double.NaN)]
+    [InlineData("Artist", "Album", double.NaN, 180.0)]
+    [InlineData("Artist", "Album", 182.01, 180.0)]
+    public void ScoreCandidate_AlbumVersionAliasRequiresExactArtistAlbumAndCloseKnownDuration(
+        string artist, string? album, double? candidateDuration, double playingDuration)
+    {
+        Assert.Equal(int.MinValue, PlatformLyricsSupport.ScoreCandidate(Player with { Duration = playingDuration },
+            "Song (Album Version)", artist, album, candidateDuration));
+    }
+
+    [Theory]
+    [InlineData("Song", "Song (JT Original CM Version)")]
+    [InlineData("Song", "Song (Acoustic Version)")]
+    [InlineData("Song", "Song (Live) (Album Version)")]
+    [InlineData("Song (Live)", "Song (Album Version)")]
+    [InlineData("Song", "Song (Remix) (Album Version)")]
+    [InlineData("Song", "Other Song (Album Version)")]
+    public void ScoreCandidate_AlbumVersionAliasDoesNotAdmitOtherTitlesOrVersions(string playingTitle, string candidateTitle)
+    {
+        Assert.Equal(int.MinValue, PlatformLyricsSupport.ScoreCandidate(Player with { Title = playingTitle },
+            candidateTitle, "Artist", "Album", 180));
+    }
+
+    [Theory]
     [InlineData("One and Only (feat. Twista)", "One And Only")]
     [InlineData("One and Only [featuring Twista]", "One And Only")]
     [InlineData("One and Only（ft. Twista）", "One And Only")]

@@ -141,6 +141,71 @@ public sealed class ExternalLyricsCacheTests : IDisposable
     }
 
     [Fact]
+    public void TryGet_DoesNotSweepTheDirectoryButConfigurationStillEnforcesQuota()
+    {
+        var cache = CreateCache(1);
+        cache.Store("QQ Music", Player, RichDocument());
+        var entry = Assert.Single(Directory.GetFiles(_root));
+        File.SetLastWriteTimeUtc(entry, DateTime.UtcNow.AddDays(-1));
+        var temporary = entry + "." + new string('a', 32) + ".tmp";
+        File.WriteAllText(temporary, new string('x', 1_100_000));
+        File.SetLastWriteTimeUtc(temporary, DateTime.UtcNow.AddDays(-2));
+
+        for (var hit = 0; hit < 3; hit++) Assert.True(cache.TryGet("QQ Music", Player, out _));
+
+        // A hit only touches its own LRU timestamp. It does not enumerate/evict unrelated files.
+        Assert.True(File.Exists(temporary));
+        Assert.True(File.GetLastWriteTimeUtc(entry) > DateTime.UtcNow.AddHours(-1));
+        cache.Configure(true, 1);
+        Assert.False(File.Exists(temporary));
+        Assert.True(cache.TryGet("QQ Music", Player, out _));
+        Assert.True(cache.GetUsage().SizeBytes <= Megabyte);
+    }
+
+    [Fact]
+    public void Store_EvictsTheLeastRecentlyUsedEntryAfterReadOnlyTouches()
+    {
+        var cache = CreateCache(2);
+        cache.Store("QQ Music", Player, LargeDocument(800_000));
+        var qqPath = Assert.Single(Directory.GetFiles(_root));
+        File.SetLastWriteTimeUtc(qqPath, DateTime.UtcNow.AddDays(-2));
+        cache.Store("NetEase Cloud Music", Player, LargeDocument(800_000));
+        var netEasePath = Assert.Single(Directory.GetFiles(_root), path => path != qqPath);
+        File.SetLastWriteTimeUtc(netEasePath, DateTime.UtcNow.AddDays(-1));
+        Assert.True(cache.TryGet("QQ Music", Player, out _));
+
+        cache.Store("LRCLIB", Player, LargeDocument(800_000));
+
+        Assert.True(File.Exists(qqPath));
+        Assert.False(File.Exists(netEasePath));
+        Assert.True(cache.TryGet("LRCLIB", Player, out _));
+        Assert.True(cache.GetUsage().SizeBytes <= 2 * Megabyte);
+    }
+
+    [Fact]
+    public void TryGet_DoesNotReuseLegacyLrcLibEntriesWithoutArtistValidation()
+    {
+        var cache = CreateCache();
+        Directory.CreateDirectory(_root);
+        var legacyKey = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            Source = "LRCLIB", Title = "syntheticsong", Artist = "syntheticartist", Album = "syntheticalbum", Duration = "180",
+        });
+        var legacyPath = Path.Combine(_root, "v1-" + Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(legacyKey))) + ".json");
+        File.WriteAllText(legacyPath, System.Text.Json.JsonSerializer.Serialize(new
+        {
+            Version = 1, Key = legacyKey, Document = RichDocument() with { LyricsId = "legacy-unverified" },
+        }));
+
+        Assert.False(cache.TryGet("LRCLIB", Player, out _));
+        cache.Store("LRCLIB", Player, RichDocument() with { LyricsId = "verified" });
+        Assert.True(cache.TryGet("LRCLIB", Player, out var verified));
+        Assert.Equal("verified", verified!.LyricsId);
+        Assert.True(File.Exists(legacyPath)); // Old entries remain managed by quota/clear, not destroyed on read.
+    }
+
+    [Fact]
     public void Store_SkipsOversizedEntriesAndRemovesTemporaryFiles()
     {
         var cache = CreateCache(1);

@@ -5,6 +5,7 @@
     <UseWPF>true</UseWPF>
     <UseWindowsForms>true</UseWindowsForms>
     <PublishSingleFile>true</PublishSingleFile>
+    <PublishDir Condition="'$(RuntimeIdentifier)' != ''">$(ArtifactsPath)\publish\$(RuntimeIdentifier)\</PublishDir>
     <SelfContained>false</SelfContained>
     <DebugType>none</DebugType>
     <ApplicationIcon>icon.ico</ApplicationIcon>

@@ -25,9 +25,10 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
     private string? _sessionKey;
     private DateTimeOffset _sessionChangedAt;
     private DateTimeOffset _lastScanAt = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastNativeRefreshAt = DateTimeOffset.MinValue;
     private int _unproductiveIdleRescans;
     private double? _lastRawPositionSeconds;
-    private double _matchedAgainstDuration;
+    private double _resolutionDuration;
     private int _catalogAttemptCount;
     private bool _catalogLookupComplete;
     private DateTimeOffset _catalogNextAttemptAt = DateTimeOffset.MinValue;
@@ -49,6 +50,8 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
     private ExternalLyricsQueryState _fallbackState;
     private ExternalLyricsQueryState _enrichmentState;
     private EnrichmentScope? _enrichmentScope;
+    private LyricsDocument? _enrichmentNativeAnchor;
+    private LyricsDocument? _enrichmentExternalSeed;
     private EnrichmentAttempt? _enrichmentAttempt;
     private EnrichmentUpdate? _enrichedLyrics;
     private int _enrichmentAttemptCount;
@@ -74,7 +77,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
         _catalogResolver = catalogResolver;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _sessionChangedAt = _timeProvider.GetUtcNow();
-        _frameBasis = new FrameBasis(CreateNoPlayerSnapshot(), _timeProvider.GetTimestamp());
+        _frameBasis = new FrameBasis(CreateNoPlayerSnapshot(), _timeProvider.GetTimestamp(), 0);
     }
 
     public double LyricsOffsetSeconds
@@ -109,8 +112,8 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
     /// <summary>
     /// How long after a track change we keep re-evaluating which cached file belongs to the new
     /// song. Apple writes the real file at (or just after) the switch and also prefetches the
-    /// <em>next</em> track's file; once this window closes the chosen document is frozen, so a
-    /// later prefetch can no longer replace the lyrics mid-song.
+    /// <em>next</em> track's file; once this window closes the chosen identity is frozen. Only a
+    /// richer native document for that same catalog id may refresh the selected timeline.
     /// </summary>
     public TimeSpan MatchWindow { get; init; } = TimeSpan.FromSeconds(5);
 
@@ -126,6 +129,9 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
     /// externally-sourced track no longer walks the whole cache directory every second.
     /// </summary>
     public TimeSpan MaxIdleRescanInterval { get; init; } = TimeSpan.FromSeconds(8);
+
+    /// <summary>Bounded same-id refreshes can discover Apple's late syllable/translation cache.</summary>
+    public TimeSpan NativeRefreshInterval { get; init; } = TimeSpan.FromSeconds(2);
 
     public TimeSpan CatalogRetryBaseDelay { get; init; } = TimeSpan.FromSeconds(2);
 
@@ -192,9 +198,9 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
 
         if (snapshot.Player.Playing)
         {
-            estimatedPosition += Math.Max(
+            estimatedPosition += Math.Min(basis.RemainingExtrapolationSeconds, Math.Max(
                 0,
-                _timeProvider.GetElapsedTime(basis.CapturedTimestamp, _timeProvider.GetTimestamp()).TotalSeconds);
+                _timeProvider.GetElapsedTime(basis.CapturedTimestamp, _timeProvider.GetTimestamp()).TotalSeconds));
         }
 
         if (snapshot.Player.Duration > 0)
@@ -219,7 +225,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
     {
         Volatile.Write(
             ref _frameBasis,
-            new FrameBasis(snapshot, _timeProvider.GetTimestamp()));
+            new FrameBasis(snapshot, _timeProvider.GetTimestamp(), _playbackClock.RemainingExtrapolationSeconds));
         return snapshot;
     }
 
@@ -265,7 +271,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
         _sessionKey = null;
         _lastRawPositionSeconds = null;
         _sessionChangedAt = _timeProvider.GetUtcNow();
-        _matchedAgainstDuration = 0;
+        _resolutionDuration = 0;
         ResetCatalogLookup();
         CancelExternalFetch();
         ResetEnrichmentLookup();
@@ -284,9 +290,10 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
         if (sessionChanged)
         {
             _currentDocument = null;
-            _matchedAgainstDuration = 0;
+            _resolutionDuration = 0;
             ResetCatalogLookup();
             _lastScanAt = DateTimeOffset.MinValue;
+            _lastNativeRefreshAt = DateTimeOffset.MinValue;
             _unproductiveIdleRescans = 0;
             CancelExternalFetch();
             ResetEnrichmentLookup();
@@ -299,15 +306,10 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
                 "Track changed; searching the Apple Music lyric cache.");
         }
 
-        if (_lyricsProvider is not IPlayerMatchedLyricsProvider matchedLyricsProvider)
-        {
-            return await ResolveWithoutMatchingAsync(player, cancellationToken).ConfigureAwait(false);
-        }
-
         // SMTC publishes the new title and the new timeline independently, so right after a track
         // change the duration is briefly 0 or still the previous song's. Matching on that produces
         // a confident wrong answer, so hold whatever we have until it settles.
-        if (player.Duration <= 0)
+        if (!double.IsFinite(player.Duration) || player.Duration <= 0)
         {
             _resolution = CreateResolution(
                 LyricsResolutionStatus.WaitingForMetadata,
@@ -315,28 +317,43 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             return _currentDocument;
         }
 
-        // The duration arriving (or correcting itself) after the title means the input we matched
-        // against has changed — reopen the window and decide again. Clearing the matched duration
-        // makes this fire once per change; otherwise every later poll would reset the lookups
-        // again and a catalog or external answer for the corrected duration could never land.
-        if (_matchedAgainstDuration > 0 && Math.Abs(player.Duration - _matchedAgainstDuration) > 1.0)
+        // Scope every decision (including external hits and definitive misses) to the metadata
+        // used to make it, not only to successful local matches. Keep the anchor during transient
+        // zero-duration reports and small jitter, and reopen once per significant correction.
+        if (_resolutionDuration > 0 && Math.Abs(player.Duration - _resolutionDuration) > 1.0)
         {
+            _trackGeneration++;
             _currentDocument = null;
-            _matchedAgainstDuration = 0;
             ResetCatalogLookup();
             CancelExternalFetch();
+            ResetEnrichmentLookup();
+            _fallbackDiagnostics = CreateProviderDiagnostics(ExternalLyricsQueryStage.Fallback);
+            _fallbackState = ExternalLyricsQueryState.NotStarted;
             _sessionChangedAt = _timeProvider.GetUtcNow();
+            _lastScanAt = DateTimeOffset.MinValue;
+            _lastNativeRefreshAt = DateTimeOffset.MinValue;
             _unproductiveIdleRescans = 0;
+            _resolutionDuration = player.Duration;
             _resolution = CreateResolution(
                 LyricsResolutionStatus.SearchingLocal,
                 "Track duration changed; re-evaluating lyric candidates.");
+        }
+        else if (_resolutionDuration <= 0)
+        {
+            _resolutionDuration = player.Duration;
+        }
+
+        if (_lyricsProvider is not IPlayerMatchedLyricsProvider matchedLyricsProvider)
+        {
+            return await ResolveWithoutMatchingAsync(player, cancellationToken).ConfigureAwait(false);
         }
 
         var now = _timeProvider.GetUtcNow();
         var withinMatchWindow = now - _sessionChangedAt <= MatchWindow;
         if (_currentDocument is not null && !withinMatchWindow)
         {
-            return _currentDocument;
+            return await RefreshNativeDocumentAsync(matchedLyricsProvider, player, now, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         if (!withinMatchWindow && now - _lastScanAt < GetIdleRescanDelay())
@@ -349,22 +366,14 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             LyricsResolutionStatus.SearchingLocal,
             "Scanning the Apple Music lyric cache.");
         var candidates = await matchedLyricsProvider.FindCandidatesAsync(player, cancellationToken).ConfigureAwait(false);
-        if (candidates.Count == 0)
-        {
-            _resolution = CreateResolution(
-                LyricsResolutionStatus.Unavailable,
-                "No local lyric candidate matched the active track.");
-            RecordUnproductiveRescan(withinMatchWindow);
-            return _currentDocument;
-        }
-
         var selection = await SelectCandidateAsync(candidates, player, cancellationToken).ConfigureAwait(false);
         _resolution = selection.Resolution;
         if (selection.Document is not null)
         {
             _currentDocument = selection.Document;
-            _matchedAgainstDuration = player.Duration;
-            CancelExternalFetch();
+            _lastNativeRefreshAt = now;
+            // A late Apple cache file can still need features from the accepted external result.
+            CancelExternalFetch(preserveDocument: true);
         }
         else
         {
@@ -372,6 +381,61 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
         }
 
         return _currentDocument;
+    }
+
+    private async Task<LyricsDocument?> RefreshNativeDocumentAsync(IPlayerMatchedLyricsProvider provider,
+        PlayerState player, DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        var current = _currentDocument!;
+        if (CatalogLyricsId.ToCatalogId(current.LyricsId) is null
+            || now - _lastNativeRefreshAt < NativeRefreshInterval) return current;
+        _lastNativeRefreshAt = now;
+        var generation = _trackGeneration;
+        LyricsDocument? refreshed;
+        try
+        {
+            // Never reopen broad candidate selection outside MatchWindow: prefetched next-track
+            // lyrics must not displace an already selected identity, regardless of feature richness.
+            refreshed = await provider.FindByLyricsIdsAsync([current.LyricsId!], cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (Exception) { return current; } // Optional cache refresh must not blank accepted lyrics.
+        if (generation != _trackGeneration || !ReferenceEquals(_currentDocument, current)) return _currentDocument;
+        if (refreshed is not { Lines.Count: > 0 } || ReferenceEquals(refreshed, current)
+            || !CatalogLyricsId.Matches(current.LyricsId, refreshed.LyricsId)
+            || !IsNativeRefreshDurationValid(current, refreshed, player)
+            || !HasMoreNativeFeatures(current, refreshed)) return current;
+        _currentDocument = refreshed;
+        _resolution = _resolution with
+        {
+            Status = LyricsResolutionStatus.Resolved,
+            Summary = "Updated the selected Apple Music native lyrics with richer same-id cache data.",
+        };
+        return refreshed;
+    }
+
+    private static bool IsNativeRefreshDurationValid(LyricsDocument current, LyricsDocument refreshed, PlayerState player)
+    {
+        if (refreshed.DurationSeconds is double duration && (!double.IsFinite(duration) || duration <= 0)) return false;
+        if (MatchesPlayer(refreshed, player)) return true;
+        // An independently verified short TTML body can end before the audio. A feature-only
+        // refresh with that identical declared duration retains the existing catalog evidence.
+        return current.DurationSeconds is > 0 && refreshed.DurationSeconds is > 0
+            && double.IsFinite(current.DurationSeconds.Value)
+            && Math.Abs(current.DurationSeconds.Value - refreshed.DurationSeconds.Value) <= .001;
+    }
+
+    private static bool HasMoreNativeFeatures(LyricsDocument current, LyricsDocument candidate)
+    {
+        var words = current.Lines.Count(HasUsableWords);
+        var translations = current.Lines.Count(line => AppleMusicLyrics.Core.Parsing.LyricsTranslationFilter.IsMeaningful(line.Translation));
+        var newWords = candidate.Lines.Count(HasUsableWords);
+        var newTranslations = candidate.Lines.Count(line => AppleMusicLyrics.Core.Parsing.LyricsTranslationFilter.IsMeaningful(line.Translation));
+        var fragments = current.Lines.Where(HasUsableWords).Sum(line => line.Words!.Count);
+        var newFragments = candidate.Lines.Where(HasUsableWords).Sum(line => line.Words!.Count);
+        return newWords >= words && newTranslations >= translations
+            && (newWords > words || newTranslations > translations || newFragments > fragments);
     }
 
     private TimeSpan GetIdleRescanDelay()
@@ -447,6 +511,23 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
                 }
             }
 
+            // TTML body duration can end at the last lyric, long before the audio finishes.
+            // The catalog already checked the recording's title, artist and audio duration, so
+            // use its id to recover files excluded by the ordinary duration-only discovery.
+            var verified = await ((IPlayerMatchedLyricsProvider)_lyricsProvider)
+                .FindByLyricsIdsAsync(_catalogLyricsIds, cancellationToken).ConfigureAwait(false);
+            if (verified is { Lines.Count: > 0 }
+                && _catalogLyricsIds.Any(id => CatalogLyricsId.Matches(verified.LyricsId, id)))
+            {
+                var duration = verified.DurationSeconds ?? verified.Lines.Max(line => line.End);
+                var selected = new LyricsMatch(verified, 0, Math.Abs(player.Duration - duration));
+                return ResolvedSelection(
+                    [.. candidates, selected], selected, LyricsResolutionConfidence.High,
+                    LyricsResolutionSource.CatalogVerifiedCache,
+                    "The Apple catalog verified a cached lyric id whose timeline differs from the audio duration.",
+                    _catalogLyricsIds);
+            }
+
             // The catalog named this song's ids and none of them is cached. Every candidate that
             // carries a comparable "AP_<catalog id>" is therefore positively a different song.
             var unrulable = plausible
@@ -508,7 +589,9 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             null,
             CreateResolution(
                 LyricsResolutionStatus.Unavailable,
-                "Local cache files were found, but all were outside the duration tolerance.",
+                candidates.Count == 0
+                    ? "No local lyric candidate matched the active track."
+                    : "Local cache files were found, but all were outside the duration tolerance.",
                 candidates));
     }
 
@@ -625,6 +708,26 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             var lyricsIds = await _catalogResolver!
                 .ResolveLyricsIdCandidatesAsync(player, cancellationToken)
                 .ConfigureAwait(false);
+            if (_lyricsProvider is IPlayerMatchedLyricsProvider matched)
+            {
+                var cachedIds = await matched.GetCachedLyricsIdsAsync(cancellationToken).ConfigureAwait(false);
+                // A first-storefront hit may identify a different regional release of this song.
+                // Verify the actual local ids whenever search cannot name a file we possess.
+                if (cachedIds.Count > 0 && !cachedIds.Any(cached => lyricsIds.Any(id => CatalogLyricsId.Matches(cached, id))))
+                {
+                    try
+                    {
+                        var verified = await _catalogResolver.VerifyCachedLyricsIdsAsync(player, cachedIds, cancellationToken)
+                            .ConfigureAwait(false);
+                        lyricsIds = verified.Concat(lyricsIds).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                    }
+                    catch (Exception) when (!cancellationToken.IsCancellationRequested)
+                    {
+                        // Verification is a supplementary check. A lookup failure (for example a
+                        // rate limit) must not discard the ids the successful search already found.
+                    }
+                }
+            }
             return new CatalogFetchResult(lyricsIds, false, null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -652,7 +755,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             return false;
         }
 
-        // An adopted external document belongs to this track until a local selection cancels it.
+        // An adopted external document belongs to this track, including after a local selection.
         // Idle rescans and a late catalog check report their own interim status, but must not
         // blank lyrics that are already on screen.
         if (_externalDocument is not null)
@@ -826,7 +929,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             : new ExternalFetchResult(null, false, null);
     }
 
-    private void CancelExternalFetch()
+    private void CancelExternalFetch(bool preserveDocument = false)
     {
         DrainProviderDiagnostics(_externalDiagnosticUpdates, _fallbackDiagnostics);
         if (_externalFetch is not null)
@@ -840,7 +943,10 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
         _externalFetch = null;
         _externalDiagnosticUpdates = null;
         _externalFetchGeneration = 0;
-        _externalDocument = null;
+        if (!preserveDocument)
+        {
+            _externalDocument = null;
+        }
         _externalAttemptCount = 0;
         _externalLookupComplete = false;
         _externalNextAttemptAt = DateTimeOffset.MinValue;
@@ -848,11 +954,14 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
 
     private LyricsDocument? ResolveEnrichedDocument(PlayerState player, LyricsDocument? baseDocument)
     {
-        var scope = new EnrichmentScope(_trackGeneration, player.Duration, PreferWordTimings, PreferTranslations);
-        if (_enrichmentScope != scope)
+        var nativeAnchor = baseDocument is not null && ReferenceEquals(baseDocument, _currentDocument) ? baseDocument : null;
+        var scope = new EnrichmentScope(_trackGeneration, player.Duration, PreferWordTimings, PreferTranslations,
+            nativeAnchor is not null);
+        if (_enrichmentScope != scope || !ReferenceEquals(_enrichmentNativeAnchor, nativeAnchor))
         {
             ResetEnrichmentLookup();
             _enrichmentScope = scope;
+            _enrichmentNativeAnchor = nativeAnchor;
         }
         if ((!scope.Words && !scope.Translation) || ExternalLyricsProviders.Count == 0
             || !double.IsFinite(player.Duration) || player.Duration <= 0)
@@ -861,10 +970,39 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
         }
 
         var selected = baseDocument;
-        if (_enrichedLyrics is not null
-            && (selected is null || IsRicherDocument(selected, _enrichedLyrics.Document, scope)))
+        if (scope.NativeAnchor)
         {
-            selected = _enrichedLyrics.Document;
+            // Cached enrichment is valid only for this exact immutable native anchor. Reuse its
+            // merged snapshot, never an external provider's identity or primary timeline.
+            selected = _enrichedLyrics?.Document ?? baseDocument;
+            if (_externalDocument is not null && !ReferenceEquals(_enrichmentExternalSeed, _externalDocument))
+            {
+                // Alignment depends on the immutable native anchor and seed, not the next poll.
+                // Remember misses too; otherwise a late native result re-normalizes both whole
+                // songs every 200 ms while retaining the same external fallback.
+                var merged = SelectEnrichment(selected!, _externalDocument, scope);
+                _enrichmentExternalSeed = _externalDocument;
+                if (!ReferenceEquals(selected, merged))
+                {
+                    selected = merged;
+                    _enrichedLyrics = new EnrichmentUpdate(merged, "accepted external lyrics");
+                }
+            }
+        }
+        else
+        {
+            if (_externalDocument is not null
+                && (selected is null || IsRicherDocument(selected, _externalDocument, scope))) selected = _externalDocument;
+            if (_enrichedLyrics is not null
+                && (selected is null || IsRicherDocument(selected, _enrichedLyrics.Document, scope))) selected = _enrichedLyrics.Document;
+        }
+
+        void AdoptUpdate(EnrichmentUpdate update)
+        {
+            var adopted = selected is null ? update.Document : SelectEnrichment(selected, update.Document, scope);
+            if (ReferenceEquals(adopted, selected)) return;
+            selected = adopted;
+            _enrichedLyrics = update with { Document = adopted };
         }
 
         if (_enrichmentAttempt is { } attempt)
@@ -872,11 +1010,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             DrainProviderDiagnostics(attempt.Diagnostics, _enrichmentDiagnostics);
             while (attempt.Updates.TryDequeue(out var update))
             {
-                if (selected is null || IsRicherDocument(selected, update.Document, scope))
-                {
-                    selected = update.Document;
-                    _enrichedLyrics = update;
-                }
+                AdoptUpdate(update);
             }
 
             if (attempt.Fetch.IsCompleted)
@@ -886,11 +1020,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
                 // enqueued, so drain once more before releasing this attempt's queue.
                 while (attempt.Updates.TryDequeue(out var update))
                 {
-                    if (selected is null || IsRicherDocument(selected, update.Document, scope))
-                    {
-                        selected = update.Document;
-                        _enrichedLyrics = update;
-                    }
+                    AdoptUpdate(update);
                 }
                 var transientFailure = attempt.Fetch.Status == TaskStatus.RanToCompletion
                     && attempt.Fetch.Result.IsTransientFailure;
@@ -913,6 +1043,15 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
         if (selected is null)
         {
             return null;
+        }
+        // Satisfaction describes the selected document, not every later result for this track.
+        if (_enrichmentState == ExternalLyricsQueryState.Satisfied && !HasRequestedFeatures(selected, scope))
+        {
+            _enrichmentLookupComplete = false;
+            _enrichmentAttemptCount = 0;
+            _enrichmentNextAttemptAt = DateTimeOffset.MinValue;
+            _enrichmentDiagnostics = CreateProviderDiagnostics(ExternalLyricsQueryStage.Enrichment);
+            _enrichmentState = ExternalLyricsQueryState.NotStarted;
         }
         if (HasRequestedFeatures(selected, scope))
         {
@@ -941,17 +1080,33 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
 
         if (_enrichedLyrics is not null && ReferenceEquals(selected, _enrichedLyrics.Document))
         {
+            _resolution = scope.NativeAnchor
+                ? _resolution with
+                {
+                    Status = LyricsResolutionStatus.Resolved,
+                    Summary = $"Apple Music native lyrics remain primary; missing features supplemented by {_enrichedLyrics.ProviderName}.",
+                }
+                : CarryCandidateEvidence(LyricsResolutionStatus.Resolved,
+                    LyricsResolutionConfidence.Medium, LyricsResolutionSource.ExternalProvider,
+                    $"Using richer lyrics from {_enrichedLyrics.ProviderName}.");
+        }
+        else if (ReferenceEquals(selected, _externalDocument) && !ReferenceEquals(selected, baseDocument))
+        {
             _resolution = CarryCandidateEvidence(LyricsResolutionStatus.Resolved,
                 LyricsResolutionConfidence.Medium, LyricsResolutionSource.ExternalProvider,
-                $"Using richer lyrics from {_enrichedLyrics.ProviderName}.");
+                "Keeping the accepted external lyrics because they provide additional requested features.");
         }
         if (!HasRequestedFeatures(selected, scope))
         {
             var missing = scope.Words && !HasUsableWords(selected)
-                ? scope.Translation && !HasTranslation(selected) ? "word timings and translations" : "word timings"
+                ? scope.Translation && !HasTranslation(selected, scope.NativeAnchor) ? "word timings and translations" : "word timings"
                 : "translations";
-            var source = _enrichedLyrics is not null && ReferenceEquals(selected, _enrichedLyrics.Document)
-                ? $"Lyrics from {_enrichedLyrics.ProviderName} remain visible" : "Existing lyrics remain visible";
+            var source = scope.NativeAnchor
+                ? _enrichedLyrics is not null
+                    ? $"Apple Music native lyrics with supplementary features from {_enrichedLyrics.ProviderName} remain visible"
+                    : "Apple Music native lyrics remain visible"
+                : _enrichedLyrics is not null && ReferenceEquals(selected, _enrichedLyrics.Document)
+                    ? $"Lyrics from {_enrichedLyrics.ProviderName} remain visible" : "Existing lyrics remain visible";
             _resolution = _resolution with
             {
                 Status = LyricsResolutionStatus.Resolved,
@@ -986,12 +1141,17 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
                 var document = await fetch.WaitAsync(cancellationToken).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
                 var resultDiagnostic = DescribeDocument(diagnostic, document);
-                if (document is not null && IsRicherDocument(best, document, scope))
+                var adopted = document is null ? best : SelectEnrichment(best, document, scope);
+                if (!ReferenceEquals(adopted, best))
                 {
+                    if (scope.NativeAnchor) resultDiagnostic = resultDiagnostic with
+                    {
+                        Detail = "Supplemented missing native features without replacing Apple's text or timeline.",
+                    };
                     diagnostics.Enqueue(new ProviderDiagnosticUpdate(index, resultDiagnostic));
-                    best = document;
-                    updates.Enqueue(new EnrichmentUpdate(document, provider.Name));
-                    if (HasRequestedFeatures(document, scope))
+                    best = adopted;
+                    updates.Enqueue(new EnrichmentUpdate(adopted, provider.Name));
+                    if (HasRequestedFeatures(adopted, scope))
                     {
                         return new EnrichmentFetchResult(false);
                     }
@@ -1022,6 +1182,11 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
         return new EnrichmentFetchResult(failed);
     }
 
+    private static LyricsDocument SelectEnrichment(LyricsDocument current, LyricsDocument candidate, EnrichmentScope scope) =>
+        scope.NativeAnchor
+            ? NativeLyricsFeatureMerger.MergeMissingFeatures(current, candidate, scope.Words, scope.Translation)
+            : IsRicherDocument(current, candidate, scope) ? candidate : current;
+
     private static bool IsRicherDocument(LyricsDocument current, LyricsDocument candidate, EnrichmentScope scope)
     {
         if (candidate.Lines.Count == 0 || string.Equals(candidate.Status, "plain", StringComparison.OrdinalIgnoreCase))
@@ -1042,19 +1207,17 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
     }
 
     private static bool HasRequestedFeatures(LyricsDocument document, EnrichmentScope scope) =>
-        (!scope.Words || HasUsableWords(document)) && (!scope.Translation || HasTranslation(document));
+        (!scope.Words || HasUsableWords(document)) && (!scope.Translation || HasTranslation(document, scope.NativeAnchor));
 
     private static bool HasUsableWords(LyricsDocument document) => document.Lines.Any(HasUsableWords);
 
-    private static bool HasUsableWords(LyricsLine line) => line.Words is { Count: > 0 } words
-        && words.All(word => double.IsFinite(word.Begin) && double.IsFinite(word.End)
-            && word.Begin >= 0 && word.End > word.Begin && !string.IsNullOrEmpty(word.Text))
-        && string.Equals(string.Concat(words.Select(word => word.Text)).Trim(), line.Text.Trim(), StringComparison.Ordinal);
+    private static bool HasUsableWords(LyricsLine line) => LyricWordTiming.IsUsable(line);
 
-    private static bool HasTranslation(LyricsDocument document) => document.Lines.Any(HasMeaningfulTranslation);
+    private static bool HasTranslation(LyricsDocument document, bool native = false) => native
+        ? document.Lines.Any(line => AppleMusicLyrics.Core.Parsing.LyricsTranslationFilter.IsMeaningful(line.Translation))
+        : document.Lines.Any(HasMeaningfulTranslation);
 
-    private static bool HasMeaningfulTranslation(LyricsLine line) => !string.IsNullOrWhiteSpace(line.Translation)
-        && MetadataMatching.Normalize(line.Translation) != MetadataMatching.Normalize(line.Text);
+    private static bool HasMeaningfulTranslation(LyricsLine line) => NativeLyricsFeatureMerger.HasMeaningfulTranslation(line);
 
     private ExternalLyricsDiagnostic[] CreateProviderDiagnostics(ExternalLyricsQueryStage stage, int attempt = 0) =>
         ExternalLyricsProviders.Select(provider => new ExternalLyricsDiagnostic(provider.Name, stage,
@@ -1073,7 +1236,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             _fallbackDiagnostics.Select(diagnostic => diagnostic.Attempt).DefaultIfEmpty().Max(),
             _enrichmentAttemptCount,
             PreferWordTimings && (document is null || !HasUsableWords(document)),
-            PreferTranslations && (document is null || !HasTranslation(document)));
+            PreferTranslations && (document is null || !HasTranslation(document, _currentDocument is not null)));
     }
 
     private static void DrainProviderDiagnostics(ConcurrentQueue<ProviderDiagnosticUpdate>? updates,
@@ -1145,6 +1308,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
         {
             return ExternalLyricsDiagnosticReason.PlainLyricsOnly;
         }
+        if (scope.NativeAnchor) return ExternalLyricsDiagnosticReason.NoAdditionalRequestedFeatures;
         var losesWords = scope.Words && HasUsableWords(current) && !HasUsableWords(candidate);
         var losesTranslation = scope.Translation && HasTranslation(current) && !HasTranslation(candidate);
         return losesWords && losesTranslation ? ExternalLyricsDiagnosticReason.WouldLoseWordsAndTranslations
@@ -1155,21 +1319,23 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
 
     private static ExternalLyricsDiagnostic DescribeFailure(ExternalLyricsDiagnostic diagnostic, Exception error)
     {
-        var reason = error switch
-        {
-            OperationCanceledException or TimeoutException => ExternalLyricsFailureReason.Timeout,
-            HttpRequestException { StatusCode: not null } => ExternalLyricsFailureReason.HttpError,
-            HttpRequestException => ExternalLyricsFailureReason.NetworkError,
-            JsonException or InvalidDataException => ExternalLyricsFailureReason.InvalidResponse,
-            _ => ExternalLyricsFailureReason.Other,
-        };
-        var status = error is HttpRequestException { StatusCode: { } httpStatus } ? (int?)httpStatus : null;
+        var causes = EnumerateFailureCauses(error).ToArray();
+        var serviceCode = causes.OfType<ExternalLyricsServiceException>().FirstOrDefault()?.ServiceCode;
+        var httpError = causes.OfType<HttpRequestException>().FirstOrDefault(cause => cause.StatusCode.HasValue);
+        var status = httpError?.StatusCode is { } httpStatus ? (int?)httpStatus : null;
+        var reason = serviceCode.HasValue ? ExternalLyricsFailureReason.ServiceError
+            : status.HasValue ? ExternalLyricsFailureReason.HttpError
+            : causes.Any(cause => cause is OperationCanceledException or TimeoutException) ? ExternalLyricsFailureReason.Timeout
+            : causes.Any(cause => cause is JsonException or InvalidDataException) ? ExternalLyricsFailureReason.InvalidResponse
+            : causes.Any(cause => cause is HttpRequestException) ? ExternalLyricsFailureReason.NetworkError
+            : ExternalLyricsFailureReason.Other;
         // Never include exception messages: they can contain request URLs, cookies,
         // payload excerpts, or local paths. The type and classified reason suffice.
         var detail = reason switch
         {
             ExternalLyricsFailureReason.Timeout => "The provider request timed out.",
             ExternalLyricsFailureReason.HttpError => $"The provider returned HTTP {status}.",
+            ExternalLyricsFailureReason.ServiceError => $"The provider returned service code {serviceCode}.",
             ExternalLyricsFailureReason.NetworkError => "The provider could not be reached.",
             ExternalLyricsFailureReason.InvalidResponse => "The provider returned an invalid response.",
             _ => "The provider request failed.",
@@ -1181,7 +1347,24 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             FailureReason = reason,
             HttpStatusCode = status,
             Detail = detail,
+            ServiceCode = serviceCode,
         };
+    }
+
+    private static IEnumerable<Exception> EnumerateFailureCauses(Exception error)
+    {
+        yield return error;
+        if (error is AggregateException aggregate)
+        {
+            foreach (var inner in aggregate.InnerExceptions)
+                foreach (var cause in EnumerateFailureCauses(inner))
+                    yield return cause;
+        }
+        else if (error.InnerException is { } inner)
+        {
+            foreach (var cause in EnumerateFailureCauses(inner))
+                yield return cause;
+        }
     }
 
     private void CancelEnrichmentAttempt()
@@ -1203,6 +1386,8 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
     {
         CancelEnrichmentAttempt();
         _enrichmentScope = null;
+        _enrichmentNativeAnchor = null;
+        _enrichmentExternalSeed = null;
         _enrichedLyrics = null;
         _enrichmentAttemptCount = 0;
         _enrichmentLookupComplete = false;
@@ -1415,7 +1600,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             player.Album ?? string.Empty);
     }
 
-    private sealed record FrameBasis(RuntimeSnapshot Snapshot, long CapturedTimestamp);
+    private sealed record FrameBasis(RuntimeSnapshot Snapshot, long CapturedTimestamp, double RemainingExtrapolationSeconds);
 
     private sealed record CatalogFetchResult(
         IReadOnlyList<string> LyricsIds,
@@ -1429,7 +1614,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
 
     private sealed record CandidateSelection(LyricsDocument? Document, LyricsResolution Resolution);
 
-    private sealed record EnrichmentScope(int TrackGeneration, double Duration, bool Words, bool Translation);
+    private sealed record EnrichmentScope(int TrackGeneration, double Duration, bool Words, bool Translation, bool NativeAnchor);
     private sealed record EnrichmentUpdate(LyricsDocument Document, string ProviderName);
     private sealed record EnrichmentFetchResult(bool IsTransientFailure);
     private sealed record EnrichmentAttempt(CancellationTokenSource Cancellation,

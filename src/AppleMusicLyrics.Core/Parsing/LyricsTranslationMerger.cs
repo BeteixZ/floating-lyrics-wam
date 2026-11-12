@@ -10,10 +10,14 @@ public static class LyricsTranslationMerger
         if (original.Count == 0 || translated.Count == 0) return original;
         var normalizedOriginal = original.Select(line => MetadataMatching.Normalize(line.Text)).ToArray();
         var skipTranslated = new bool[translated.Count];
+        var cleanedTranslated = new string?[translated.Count];
         for (var candidate = 0; candidate < translated.Count; candidate++)
         {
             var normalized = MetadataMatching.Normalize(translated[candidate].Text);
-            skipTranslated[candidate] = string.IsNullOrWhiteSpace(translated[candidate].Text)
+            cleanedTranslated[candidate] = LyricsTranslationFilter.Clean(translated[candidate].Text);
+            // Placeholder ("//") and credit rows still occupy their timestamp, so they consume
+            // nothing here and cannot claim a neighbouring lyric's slot either.
+            skipTranslated[candidate] = cleanedTranslated[candidate] is null
                 || original.Select((line, index) => (line, index)).Any(item =>
                     normalizedOriginal[item.index] == normalized
                     && Math.Abs(item.line.Begin - translated[candidate].Begin) <= 0.5);
@@ -22,7 +26,8 @@ public static class LyricsTranslationMerger
         for (var index = 0; index < original.Count; index++)
         {
             var line = original[index];
-            if (!string.IsNullOrWhiteSpace(line.Translation)) continue;
+            // A placeholder or credit left by an earlier source may still be filled by a later one.
+            if (LyricsTranslationFilter.IsMeaningful(line.Translation)) continue;
             for (var candidate = 0; candidate < translated.Count; candidate++)
             {
                 if (skipTranslated[candidate]) continue;
@@ -42,7 +47,7 @@ public static class LyricsTranslationMerger
             if (usedOriginal.Contains(pair.Original) || usedTranslated.Contains(pair.Translated)) continue;
             usedOriginal.Add(pair.Original);
             usedTranslated.Add(pair.Translated);
-            result[pair.Original] = original[pair.Original] with { Translation = translated[pair.Translated].Text.Trim() };
+            result[pair.Original] = original[pair.Original] with { Translation = cleanedTranslated[pair.Translated] };
         }
         return result;
     }

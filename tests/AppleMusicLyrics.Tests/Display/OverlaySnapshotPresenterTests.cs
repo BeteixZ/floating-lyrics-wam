@@ -18,6 +18,7 @@ public sealed class OverlaySnapshotPresenterTests
             new ActiveLyricState(null, null, null, line), LyricsResolution.NoPlayer);
         var presentation = OverlaySnapshotPresenter.CreateLyrics(snapshot, _english);
         Assert.Equal("original", presentation.CurrentText);
+        Assert.Empty(presentation.NextText);
         Assert.Same(line, presentation.DisplayedLine);
         Assert.Equal("译文", presentation.TranslationText);
         Assert.False(presentation.Animate);
@@ -220,6 +221,94 @@ public sealed class OverlaySnapshotPresenterTests
         var result = OverlaySnapshotPresenter.CreateLyrics(snapshot, _english);
         Assert.Contains(_english.Text("Debug.TranslationVisible"), result.PathText);
         Assert.Equal("第二行译文", result.TranslationText);
+    }
+
+    [Fact]
+    public void CreateLyrics_PreludeDoesNotRepeatTheFirstLineWhenLaterLinesExist()
+    {
+        var first = new LyricsLine(10, 12, "first");
+        var second = new LyricsLine(15, 18, "second");
+        var snapshot = BuildDiagnosticSnapshot(null) with
+        {
+            Document = new LyricsDocument("intro", "ok", "test", DateTimeOffset.UtcNow, [first, second]),
+            ActiveLyric = new ActiveLyricState(null, null, null, first),
+        };
+
+        var result = OverlaySnapshotPresenter.CreateLyrics(snapshot, _english);
+
+        Assert.Equal("first", result.CurrentText);
+        Assert.Empty(result.PreviousText);
+        Assert.Empty(result.NextText);
+        Assert.False(result.Animate);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CreateLyrics_CompactModeSkipsDetailedProviderEnumeration(bool withoutDocument)
+    {
+        var providers = new TrackingReadOnlyList<ExternalLyricsDiagnostic>(
+            [new("QQ Music", ExternalLyricsQueryStage.Enrichment, ExternalLyricsQueryOutcome.Failed,
+                ExceptionType: "HttpRequestException", HttpStatusCode: 503)]);
+        var diagnostics = new ExternalLyricsDiagnostics(providers, ExternalLyricsQueryState.Completed,
+            ExternalLyricsQueryState.Completed, 1, 1, true, true);
+        var snapshot = BuildDiagnosticSnapshot(diagnostics);
+        if (withoutDocument) snapshot = snapshot with { Document = null };
+
+        var compact = OverlaySnapshotPresenter.CreateLyrics(snapshot, _english, includeDetailedDiagnostics: false);
+
+        Assert.Empty(compact.PathText);
+        Assert.NotEmpty(compact.DebugSummaryText);
+        Assert.Equal(0, providers.EnumerationCount);
+        // The optional flag defaults to the old full-report behavior for diagnostic/API callers.
+        var detailed = OverlaySnapshotPresenter.CreateLyrics(snapshot, _english);
+        Assert.NotEmpty(detailed.PathText);
+        Assert.Contains("HTTP 503", detailed.PathText);
+        Assert.True(providers.EnumerationCount > 0);
+        Assert.Equal(detailed.CurrentText, compact.CurrentText);
+        Assert.Equal(detailed.StatusText, compact.StatusText);
+        Assert.Equal(detailed.DebugSummaryText, compact.DebugSummaryText);
+    }
+
+    [Fact]
+    public void CreateLyrics_CachesDocumentStatisticsByReferenceWithoutCachingLocalizedText()
+    {
+        var first = new LyricsLine(0, 2, "original", Words: [new LyricWord(0, 2, "original")], Translation: "译文");
+        // A duplicate original is not a meaningful translation.
+        var second = new LyricsLine(2, 4, "same", Translation: " SAME! ");
+        var lines = new TrackingReadOnlyList<LyricsLine>([first, second]);
+        var snapshot = BuildDiagnosticSnapshot(null) with
+        {
+            Document = new LyricsDocument("cached", "ok", "test", DateTimeOffset.UtcNow, lines),
+            ActiveLyric = new ActiveLyricState(0, null, first, second),
+        };
+
+        var english = OverlaySnapshotPresenter.CreateLyrics(snapshot, _english, includeDetailedDiagnostics: false);
+        var chinese = OverlaySnapshotPresenter.CreateLyrics(snapshot, new LocalizationManager(preference: "zh-CN"),
+            showTranslation: false, includeDetailedDiagnostics: false);
+
+        Assert.Equal(1, lines.EnumerationCount);
+        Assert.Contains("words 1/2", english.DebugSummaryText);
+        Assert.Contains("translations 1/2", english.DebugSummaryText);
+        Assert.NotEqual(english.StatusText, chinese.StatusText);
+        Assert.NotEqual(english.DebugSummaryText, chinese.DebugSummaryText);
+        // A new document record is a new statistics snapshot, even if all of its values are equal.
+        var replacement = snapshot with { Document = snapshot.Document! with { } };
+        OverlaySnapshotPresenter.CreateLyrics(replacement, _english, includeDetailedDiagnostics: false);
+        Assert.Equal(2, lines.EnumerationCount);
+    }
+
+    private sealed class TrackingReadOnlyList<T>(IReadOnlyList<T> items) : IReadOnlyList<T>
+    {
+        public int EnumerationCount { get; private set; }
+        public int Count => items.Count;
+        public T this[int index] => items[index];
+        public IEnumerator<T> GetEnumerator()
+        {
+            EnumerationCount++;
+            return items.GetEnumerator();
+        }
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
     private static RuntimeSnapshot BuildDiagnosticSnapshot(ExternalLyricsDiagnostics? diagnostics)

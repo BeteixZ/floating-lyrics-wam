@@ -20,10 +20,9 @@ public sealed class LrcLibLyricsProvider : IExternalLyricsProvider, IDisposable
 {
     private const string BaseUrl = "https://lrclib.net/api";
     private const int MaxCacheEntries = 512;
-    // Version 3 invalidates plain-only entries cached before synchronized search results were
-    // preferred over an exact endpoint's stale plain text. LRCLIB entry 115521 for Ethel Cain's
-    // "Family Tree (Intro)" is one real example whose plain text belongs partly to another song.
-    private const int PersistentCacheVersion = 3;
+    // Older search results were allowed through without performer identity evidence.
+    // Their documents do not retain artist metadata, so they cannot be revalidated on load.
+    private const int PersistentCacheVersion = 4;
     private static readonly TimeSpan PersistentMissLifetime = TimeSpan.FromDays(7);
 
     // The service asks clients to identify themselves rather than pretend to be a browser.
@@ -56,6 +55,7 @@ public sealed class LrcLibLyricsProvider : IExternalLyricsProvider, IDisposable
 
     public async Task<LyricsDocument?> FetchAsync(PlayerState player, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(player.Title) || string.IsNullOrWhiteSpace(player.Artist))
         {
             return null;
@@ -85,6 +85,7 @@ public sealed class LrcLibLyricsProvider : IExternalLyricsProvider, IDisposable
 
         // A completed lookup with no synchronized lyrics is definitive and may be cached. Network
         // failures throw before this point and are retried by LyricsRuntimeService instead.
+        cancellationToken.ThrowIfCancellationRequested();
         RememberCompletedLookup(key, document);
         return document;
     }
@@ -296,10 +297,19 @@ public sealed class LrcLibLyricsProvider : IExternalLyricsProvider, IDisposable
     private static int ScoreResult(PlayerState player, JsonElement result)
     {
         var titleScore = MetadataMatching.Score(player.Title, TryGetString(result, "trackName"), exact: 40, partial: 18);
-        var artistScore = MetadataMatching.Score(player.Artist, TryGetString(result, "artistName"), exact: 30, partial: 14);
+        var artist = TryGetString(result, "artistName");
+        var artistScore = MetadataMatching.Score(player.Artist, artist, exact: 30, partial: 14);
+        if (artistScore == 0 && artist is not null)
+        {
+            artistScore = artist.Split([',', '/', '&', ';'], StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Select(part => MetadataMatching.Score(player.Artist, part, exact: 30, partial: 14))
+                .DefaultIfEmpty(0).Max();
+        }
         var albumScore = MetadataMatching.Score(player.Album, TryGetString(result, "albumName"), exact: 20, partial: 8);
 
-        if (titleScore == 0)
+        // Search filters are not identity evidence: same-title recordings by another artist
+        // must never become acceptable merely because their audio durations happen to agree.
+        if (titleScore == 0 || artistScore == 0)
         {
             return int.MinValue;
         }

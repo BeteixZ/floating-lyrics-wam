@@ -24,6 +24,9 @@ public abstract class PlatformLyricsProvider : IExternalLyricsProvider, IDisposa
 
     protected HttpClient HttpClient { get; }
 
+    /// <summary>The complete lookup budget, including search and lyric downloads.</summary>
+    protected TimeSpan FetchTimeout => _timeout;
+
     public abstract string Name { get; }
 
     public async Task<LyricsDocument?> FetchAsync(PlayerState player, CancellationToken cancellationToken = default)

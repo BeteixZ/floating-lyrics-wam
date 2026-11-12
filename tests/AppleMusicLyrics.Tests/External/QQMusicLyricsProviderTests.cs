@@ -12,6 +12,19 @@ namespace AppleMusicLyrics.Tests.External;
 
 public sealed class QQMusicLyricsProviderTests
 {
+    [Theory]
+    [InlineData("{\"code\":2001}")]
+    [InlineData("{\"code\":0,\"req_1\":{\"code\":2001}}")]
+    public async Task FetchAsync_PreservesServiceCodeFromRootOrSearchModule(string payload)
+    {
+        var handler = new RoutedHandler((request, _) => Task.FromResult(request.Uri.Host == "u.y.qq.com"
+            ? JsonResponse(payload) : JsonResponse("{\"code\":0,\"data\":{\"song\":{\"itemlist\":[]}}}")));
+        using var provider = new QQMusicLyricsProvider(messageHandler: handler);
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => provider.FetchAsync(Player));
+        var causes = Assert.IsType<AggregateException>(error.InnerException);
+        Assert.Equal(2001, Assert.IsType<ExternalLyricsServiceException>(Assert.Single(causes.InnerExceptions)).ServiceCode);
+    }
+
     private static readonly PlayerState Player = new("Example", "Singer", "Album", 0, 20, true);
     private const string Candidate = """{"id":42,"mid":"mid42","name":"Example","singer":[{"name":"Singer"}],"album":{"name":"Album"},"interval":20}""";
     // Synthetic XML, generated independently using a Python transcription of the upstream
@@ -214,6 +227,115 @@ public sealed class QQMusicLyricsProviderTests
         Assert.Equal("fallback", (await provider.FetchAsync(Player))!.Lines[0].Text);
     }
 
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    [InlineData(false, true)]
+    public async Task FetchAsync_PreservesSuccessfulSearchWhenOtherEndpointHangs(bool hangSmartbox, bool ignoreCancellation)
+    {
+        var abandoned = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var endpointCanceled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new RoutedHandler(async (request, token) =>
+        {
+            if (request.Uri.AbsolutePath.Contains("lyric_download", StringComparison.Ordinal))
+                return XmlResponse("[00:01.00]Successful fallback");
+            if (request.Uri.AbsolutePath.Contains("smartbox", StringComparison.Ordinal) == hangSmartbox)
+            {
+                using var registration = token.Register(() => endpointCanceled.TrySetResult());
+                return ignoreCancellation ? await abandoned.Task : await abandoned.Task.WaitAsync(token);
+            }
+            return SearchResponse(request, Candidate);
+        });
+        using var provider = new QQMusicLyricsProvider(timeoutSeconds: 2, messageHandler: handler);
+        try
+        {
+            var document = await provider.FetchAsync(Player).WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Equal("Successful fallback", Assert.Single(document!.Lines).Text);
+            await endpointCanceled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.Single(handler.Requests, request => request.Uri.AbsolutePath.Contains("lyric_download", StringComparison.Ordinal));
+        }
+        finally
+        {
+            // Complete an uncooperative simulated handler so the test never leaves it running.
+            abandoned.TrySetResult(JsonResponse("{}"));
+        }
+    }
+
+    [Fact]
+    public async Task FetchAsync_PartialSearchTimeoutRemainsRetryableWhenCandidateHasNoLyrics()
+    {
+        var failSearch = true;
+        var handler = new RoutedHandler(async (request, token) =>
+        {
+            if (request.Uri.AbsolutePath.Contains("smartbox", StringComparison.Ordinal) && failSearch)
+                await Task.Delay(Timeout.Infinite, token);
+            return request.Uri.AbsolutePath.Contains("lyric_download", StringComparison.Ordinal)
+                ? XmlResponse(failSearch ? string.Empty : "[00:01.00]Recovered lyrics")
+                : SearchResponse(request, Candidate);
+        });
+        using var provider = new QQMusicLyricsProvider(timeoutSeconds: 2, messageHandler: handler);
+
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => provider.FetchAsync(Player));
+        var failures = Assert.IsType<AggregateException>(error.InnerException);
+        Assert.IsType<TimeoutException>(Assert.Single(failures.InnerExceptions));
+        failSearch = false;
+        Assert.Equal("Recovered lyrics", Assert.Single((await provider.FetchAsync(Player))!.Lines).Text);
+        Assert.Equal(2, handler.Requests.Count(request => request.Uri.AbsolutePath.Contains("lyric_download", StringComparison.Ordinal)));
+    }
+
+    [Theory]
+    [InlineData("Example", "Example (Album Version)", "Example (Album Version)")]
+    [InlineData("Example (Album Version)", "Example", "Example")]
+    [InlineData("Example", "Example", "Example (Album Version)")]
+    public async Task FetchAsync_PreservesAlbumVersionEvidenceThroughQrcValidation(
+        string playingTitle, string searchTitle, string lyricTitle)
+    {
+        var candidate = Candidate.Replace("\"name\":\"Example\"", "\"name\":\"" + searchTitle + "\"", StringComparison.Ordinal);
+        var handler = new RoutedHandler((request, _) => Task.FromResult(
+            request.Uri.AbsolutePath.Contains("lyric_download", StringComparison.Ordinal)
+                ? XmlResponse("[ti:" + lyricTitle + "]\n[ar:Singer]\n[1000,1000]Original(1000,1000)", "[00:01.00]译文")
+                : SearchResponse(request, candidate)));
+        using var provider = new QQMusicLyricsProvider(messageHandler: handler);
+
+        var line = Assert.Single((await provider.FetchAsync(Player with { Title = playingTitle }))!.Lines);
+        Assert.Equal("Original", line.Text);
+        Assert.Equal("译文", line.Translation);
+        Assert.Equal(new LyricWord(1, 2, "Original"), Assert.Single(line.Words!));
+    }
+
+    [Theory]
+    [InlineData(null, 20.0)]
+    [InlineData("Other Album", 20.0)]
+    [InlineData("Album", null)]
+    [InlineData("Album", 23.0)]
+    public async Task FetchAsync_DoesNotInventAlbumVersionEvidenceFromPlayerOrLyricTimeline(string? album, double? duration)
+    {
+        var candidate = JsonSerializer.Serialize(new { id = 42, name = "Example",
+            singer = new[] { new { name = "Singer" } }, album = new { name = album }, interval = duration });
+        var handler = new RoutedHandler((request, _) => Task.FromResult(
+            request.Uri.AbsolutePath.Contains("lyric_download", StringComparison.Ordinal)
+                ? XmlResponse("[ti:Example (Album Version)]\n[ar:Singer]\n[1000,19000]Wrong alias evidence(1000,19000)")
+                : request.Uri.Host == "u.y.qq.com" ? SearchResponse(request, candidate)
+                : JsonResponse("{\"code\":0,\"data\":{\"song\":{\"itemlist\":[]}}}")));
+        using var provider = new QQMusicLyricsProvider(messageHandler: handler);
+
+        Assert.Null(await provider.FetchAsync(Player));
+        Assert.Single(handler.Requests, request => request.Uri.AbsolutePath.Contains("lyric_download", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("Example (Live) (Album Version)")]
+    [InlineData("Example (Remix) (Album Version)")]
+    [InlineData("Example (Acoustic Version)")]
+    public async Task FetchAsync_AlbumVersionEvidenceStillRejectsOtherQrcVersions(string lyricTitle)
+    {
+        using var provider = new QQMusicLyricsProvider(messageHandler: SuccessHandler(
+            "[ti:" + lyricTitle + "]\n[ar:Singer]\n[1000,1000]Wrong version(1000,1000)"));
+        Assert.Null(await provider.FetchAsync(Player));
+    }
+
     [Fact]
     public async Task FetchAsync_RejectsRemixHiddenBySmartboxWhenMusicuFails()
     {
@@ -223,7 +345,11 @@ public sealed class QQMusicLyricsProviderTests
                 : request.Uri.AbsolutePath.Contains("lyric_download", StringComparison.Ordinal) ? XmlResponse(lyric)
                 : SearchResponse(request, Candidate)));
         using var provider = new QQMusicLyricsProvider(messageHandler: handler);
-        Assert.Null(await provider.FetchAsync(Player));
+        // The remix remains rejected, but the failed alternative search means the whole
+        // lookup is incomplete rather than a definitive no-lyrics answer.
+        var error = await Assert.ThrowsAsync<HttpRequestException>(() => provider.FetchAsync(Player));
+        var failures = Assert.IsType<AggregateException>(error.InnerException);
+        Assert.Equal(2001, Assert.IsType<ExternalLyricsServiceException>(Assert.Single(failures.InnerExceptions)).ServiceCode);
         Assert.Single(handler.Requests, request => request.Uri.AbsolutePath.Contains("lyric_download", StringComparison.Ordinal));
     }
 
@@ -389,6 +515,29 @@ public sealed class QQMusicLyricsProviderTests
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fetch);
         Assert.Equal(2, count);
+    }
+
+    [Fact]
+    public async Task FetchAsync_CallerCancellationIsNotConvertedIntoPartialSearchTimeout()
+    {
+        var hangingStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new RoutedHandler(async (request, token) =>
+        {
+            if (request.Uri.AbsolutePath.Contains("smartbox", StringComparison.Ordinal))
+            {
+                hangingStarted.TrySetResult();
+                await Task.Delay(Timeout.Infinite, token);
+            }
+            return SearchResponse(request, Candidate);
+        });
+        using var provider = new QQMusicLyricsProvider(messageHandler: handler);
+        using var cancellation = new CancellationTokenSource();
+        var fetch = provider.FetchAsync(Player, cancellation.Token);
+        await hangingStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fetch);
+        Assert.DoesNotContain(handler.Requests, request => request.Uri.AbsolutePath.Contains("lyric_download", StringComparison.Ordinal));
     }
 
     [Fact]

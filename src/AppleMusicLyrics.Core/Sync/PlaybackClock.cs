@@ -33,6 +33,10 @@ public sealed class PlaybackClock
     // across a lyric boundary. Still fast enough to absorb a 0.1s correction in under half a second.
     private const double OffsetSlewRatePerSecond = 0.25;
 
+    // Whole-second SMTC reports normally arrive about a second apart. Allow several missed edges,
+    // but never let a buffering/abandoned Playing session advance through the rest of a song.
+    private const double MaxExtrapolationSeconds = 3.0;
+
     private readonly TimeProvider _timeProvider;
     private readonly double[] _samples = new double[MaxSamples];
     private long _startTimestamp;
@@ -43,6 +47,8 @@ public sealed class PlaybackClock
     private double _playbackElapsed;
     private double _lastObservedSeconds;
     private double _lastRawPosition;
+    private double _lastRawChangeElapsed;
+    private bool _rawStalled;
     private bool _playing;
     private bool _initialized;
 
@@ -62,6 +68,8 @@ public sealed class PlaybackClock
         _playbackElapsed = 0;
         _lastObservedSeconds = 0;
         _lastRawPosition = 0;
+        _lastRawChangeElapsed = 0;
+        _rawStalled = false;
         _playing = false;
         _initialized = false;
     }
@@ -72,36 +80,55 @@ public sealed class PlaybackClock
         var wallDelta = Math.Max(0, now - _lastObservedSeconds);
 
         // Accumulated against the *previous* playing state: this interval has already elapsed.
-        if (_playing)
-        {
-            _playbackElapsed += wallDelta;
-        }
-
+        // Both polls and visual reads share the same finite projection horizon.
+        var remaining = RemainingBudgetSeconds;
+        var advancingDelta = _playing ? Math.Min(wallDelta, remaining) : 0;
+        var wasStalled = _rawStalled || (_playing && wallDelta >= remaining);
+        _playbackElapsed += advancingDelta;
         _lastObservedSeconds = now;
 
         if (!_initialized)
         {
-            Reseed(rawPosition);
+            Reseed(rawPosition, playing);
             _playing = playing;
             _initialized = true;
             return;
         }
 
-        if (Math.Abs(rawPosition - _lastRawPosition) > 0.0005)
+        var rawChanged = Math.Abs(rawPosition - _lastRawPosition) > 0.0005;
+        if (rawChanged)
         {
             var predicted = _playbackElapsed + _offset;
-            if (Math.Abs(rawPosition - predicted) > DiscontinuitySeconds)
+            if (!_playing || !playing || wasStalled || Math.Abs(rawPosition - predicted) > DiscontinuitySeconds)
             {
-                Reseed(rawPosition);
+                // A paused seek or the first new edge after a stall is authoritative, even if
+                // the jump is small. Old phase samples no longer describe this playback epoch.
+                Reseed(rawPosition, playing);
             }
             else
             {
                 AddSample(rawPosition - _playbackElapsed);
                 _lastRawPosition = rawPosition;
+                _lastRawChangeElapsed = _playbackElapsed;
+                _rawStalled = false;
             }
         }
+        else if (!_playing && playing)
+        {
+            // Paused wall time must not consume the watchdog. A resume starts a fresh grace period.
+            _lastRawChangeElapsed = _playbackElapsed;
+            _rawStalled = false;
+        }
+        else
+        {
+            _rawStalled = wasStalled;
+        }
 
-        SlewOffset(wallDelta);
+        // Do not converge phase while paused (including repeated pause polls) or after a stall.
+        if (_playing && playing && !_rawStalled)
+        {
+            SlewOffset(advancingDelta);
+        }
         _playing = playing;
     }
 
@@ -115,20 +142,34 @@ public sealed class PlaybackClock
         var elapsed = _playbackElapsed;
         if (_playing)
         {
-            elapsed += Math.Max(0, CurrentSeconds - _lastObservedSeconds);
+            elapsed += Math.Min(Math.Max(0, CurrentSeconds - _lastObservedSeconds), RemainingBudgetSeconds);
         }
 
         return Math.Max(0, elapsed + _offset);
     }
 
+    /// <summary>
+    /// How many more seconds may be projected beyond the position returned by
+    /// <see cref="GetEstimatedPosition"/> at the current instant without another raw position edge.
+    /// A snapshot consumer can capture this budget alongside that position and cap its own frame
+    /// projection. Paused, uninitialized and stale clocks have no remaining projection budget.
+    /// </summary>
+    public double RemainingExtrapolationSeconds => !_initialized || !_playing ? 0
+        : Math.Max(0, RemainingBudgetSeconds - Math.Max(0, CurrentSeconds - _lastObservedSeconds));
+
+    private double RemainingBudgetSeconds => Math.Max(0,
+        MaxExtrapolationSeconds - (_playbackElapsed - _lastRawChangeElapsed));
+
     private double CurrentSeconds => _timeProvider.GetElapsedTime(_startTimestamp).TotalSeconds;
 
-    private void Reseed(double rawPosition)
+    private void Reseed(double rawPosition, bool playing)
     {
         _sampleCount = 0;
         _sampleCursor = 0;
         _lastRawPosition = rawPosition;
-        _targetOffset = rawPosition + InitialPhasePrior - _playbackElapsed;
+        _lastRawChangeElapsed = _playbackElapsed;
+        _rawStalled = false;
+        _targetOffset = rawPosition + (playing ? InitialPhasePrior : 0) - _playbackElapsed;
 
         // A seek or track change must land immediately; easing in would drag the old song's phase
         // across the boundary.

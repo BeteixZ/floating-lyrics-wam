@@ -18,6 +18,9 @@ internal static class PlatformLyricsSupport
     private static readonly Regex TrailingFeaturing = new(
         @"(?:\s*[-–—]\s*|\s+)" + FeaturingPrefix + @"\s+(?<guest>[^()\[\]（）]+)(?=\s*[(\[（]|\z)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    private static readonly Regex AlbumVersionSuffix = new(
+        @"\s*(?:\(\s*album\s+version\s*\)|\[\s*album\s+version\s*\]|（\s*album\s+version\s*）)\s*\z",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     public static string SearchTerm(PlayerState player) => $"{ParseTitle(player.Title).Title} {player.Artist?.Trim()}";
 
@@ -26,6 +29,14 @@ internal static class PlatformLyricsSupport
         var playerTitle = ParseTitle(player.Title);
         var candidateTitle = ParseTitle(title);
         var titleScore = MetadataMatching.Score(playerTitle.Title, candidateTitle.Title, exact: 40, partial: 18);
+        var sameVariants = SameVariants(player.Title, title);
+        if ((titleScore == 0 || !sameVariants)
+            && playerTitle.Guests.SetEquals(candidateTitle.Guests)
+            && IsVerifiedAlbumVersionAlias(player, playerTitle.Title, candidateTitle.Title, artist, album, duration))
+        {
+            titleScore = 40;
+            sameVariants = true;
+        }
         var artistScore = MetadataMatching.Score(player.Artist, artist, exact: 30, partial: 14);
         if (artistScore == 0 && artist is not null)
         {
@@ -33,7 +44,7 @@ internal static class PlatformLyricsSupport
                 .Select(part => MetadataMatching.Score(player.Artist, part, exact: 30, partial: 14))
                 .DefaultIfEmpty(0).Max();
         }
-        if (titleScore == 0 || artistScore == 0 || !SameVariants(player.Title, title)
+        if (titleScore == 0 || artistScore == 0 || !sameVariants
             || (playerTitle.Guests.Count > 0 && candidateTitle.Guests.Count > 0
                 && !playerTitle.Guests.SetEquals(candidateTitle.Guests)))
         {
@@ -52,6 +63,27 @@ internal static class PlatformLyricsSupport
         }
 
         return titleScore + artistScore + MetadataMatching.Score(player.Album, album, exact: 8, partial: 4) + durationScore;
+    }
+
+    private static bool IsVerifiedAlbumVersionAlias(
+        PlayerState player, string playingTitle, string candidateTitle, string? artist, string? album, double? duration)
+    {
+        // Some catalogues append "(Album Version)" to the same album track. Require
+        // independent recording evidence before relaxing the normal variant guard.
+        if (MetadataMatching.Score(player.Artist, artist, exact: 1, partial: 0) != 1
+            || MetadataMatching.Score(player.Album, album, exact: 1, partial: 0) != 1
+            || !double.IsFinite(player.Duration) || player.Duration <= 0
+            || duration is not > 0 || !double.IsFinite(duration.Value)
+            || Math.Abs(player.Duration - duration.Value) > 2)
+        {
+            return false;
+        }
+
+        var playingBase = AlbumVersionSuffix.Replace(playingTitle, "");
+        var candidateBase = AlbumVersionSuffix.Replace(candidateTitle, "");
+        return (playingBase != playingTitle || candidateBase != candidateTitle)
+            && !VariantPattern.IsMatch(playingBase) && !VariantPattern.IsMatch(candidateBase)
+            && MetadataMatching.Score(playingBase, candidateBase, exact: 1, partial: 0) == 1;
     }
 
     private static (string Title, HashSet<string> Guests) ParseTitle(string? title)

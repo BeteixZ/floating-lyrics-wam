@@ -12,6 +12,35 @@ namespace AppleMusicLyrics.Tests.Services;
 
 public sealed class LyricsRuntimeServiceTests
 {
+    [Theory]
+    [InlineData("service", ExternalLyricsFailureReason.ServiceError)]
+    [InlineData("http", ExternalLyricsFailureReason.HttpError)]
+    [InlineData("timeout", ExternalLyricsFailureReason.Timeout)]
+    [InlineData("json", ExternalLyricsFailureReason.InvalidResponse)]
+    [InlineData("network", ExternalLyricsFailureReason.NetworkError)]
+    public async Task SnapshotAsync_ClassifiesNestedProviderFailuresWithoutExposingMessages(
+        string kind, ExternalLyricsFailureReason expected)
+    {
+        Exception cause = kind switch
+        {
+            "service" => new ExternalLyricsServiceException("QQ Music", 2001),
+            "http" => new HttpRequestException("private", null, System.Net.HttpStatusCode.Forbidden),
+            "timeout" => new TimeoutException("private"),
+            "json" => new System.Text.Json.JsonException("private"),
+            _ => new HttpRequestException("private"),
+        };
+        var failure = new DelegateEnrichmentProvider("Source", (_, _) => Task.FromException<LyricsDocument?>(
+            new HttpRequestException("private URL", new AggregateException(cause))));
+        await using var runtime = EnrichmentRuntime(RichDocument("AP_local"), [failure], translation: true);
+
+        var snapshot = await WaitForSnapshotAsync(runtime, s => s.ExternalDiagnostics!.Providers.Any(p => p.Outcome == ExternalLyricsQueryOutcome.Failed));
+        var diagnostic = Assert.Single(snapshot.ExternalDiagnostics!.Providers, p => p.Outcome == ExternalLyricsQueryOutcome.Failed);
+        Assert.Equal(expected, diagnostic.FailureReason);
+        Assert.Equal(kind == "service" ? (int?)2001 : null, diagnostic.ServiceCode);
+        Assert.Equal(kind == "http" ? (int?)403 : null, diagnostic.HttpStatusCode);
+        Assert.DoesNotContain("private", diagnostic.Detail!);
+    }
+
     [Fact]
     public async Task SnapshotAsync_UsesPlaybackClockToAdvanceLyricSelection()
     {
@@ -1311,13 +1340,112 @@ public sealed class LyricsRuntimeServiceTests
         Assert.Same(local, (await runtime.SnapshotAsync()).Document);
         completion.SetResult(rich);
 
-        var upgraded = await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, rich));
+        var upgraded = await WaitForSnapshotAsync(runtime, snapshot => HasRuntimeFeatures(snapshot, words: true, translation: true));
 
-        Assert.Equal(LyricsResolutionSource.ExternalProvider, upgraded.Resolution.Source);
+        AssertNativeAnchor(local, upgraded.Document);
+        Assert.Equal(LyricsResolutionSource.AppleMusicCache, upgraded.Resolution.Source);
         Assert.Contains("QQ Music", upgraded.Resolution.Summary);
         Assert.Equal(0, skipped.CallCount);
-        // Repeated local candidate adoption must not cancel or forget the independent enrichment.
-        Assert.Same(rich, (await runtime.SnapshotAsync()).Document);
+        // Repeated local candidate adoption must not cancel or forget the safely merged snapshot.
+        Assert.Same(upgraded.Document, (await runtime.SnapshotAsync()).Document);
+    }
+
+    [Theory]
+    [InlineData(true, true, false)]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, false)]
+    [InlineData(true, true, true)]
+    public async Task SnapshotAsync_KeepsRequestedFallbackFeaturesWhenLocalLyricsArriveLate(
+        bool words, bool translation, bool localHasFeatures)
+    {
+        var local = RichDocument("AP_late", words: localHasFeatures, translation: localHasFeatures);
+        var rich = RichDocument("QQ_rich", words: true, translation: true);
+        var candidates = new CandidateLyricsProvider([]);
+        var failed = new DelegateEnrichmentProvider("LRCLIB",
+            (_, _) => Task.FromException<LyricsDocument?>(new HttpRequestException("offline")));
+        var provider = new DelegateEnrichmentProvider("QQ Music", (_, _) => Task.FromResult<LyricsDocument?>(rich));
+        var skipped = new StubExternalProvider(RichDocument("NE_unneeded", words: true, translation: true));
+        await using var runtime = EnrichmentRuntime(local, [failed, provider, skipped], words, translation,
+            lyricsProvider: candidates);
+
+        await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, rich));
+        candidates.Candidates = [new LyricsMatch(local, 100, 0, HasContentMatch: true)];
+
+        for (var poll = 0; poll < 3; poll++)
+        {
+            var snapshot = await runtime.SnapshotAsync();
+            AssertNativeAnchor(local, snapshot.Document);
+            Assert.True(HasRuntimeFeatures(snapshot, words, translation));
+            if (localHasFeatures || (!words && !translation)) Assert.Same(local, snapshot.Document);
+            Assert.Same(snapshot.Document, runtime.GetFrameSnapshot().Document);
+            Assert.Equal(LyricsResolutionSource.AppleMusicCache, snapshot.Resolution.Source);
+            Assert.False(snapshot.ExternalDiagnostics!.MissingWordTimings);
+            Assert.False(snapshot.ExternalDiagnostics.MissingTranslations);
+            Assert.DoesNotContain("did not provide an adoptable result", snapshot.Resolution.Summary);
+        }
+        Assert.Equal(1, failed.CallCount);
+        Assert.Equal(1, provider.CallCount);
+        Assert.Equal(0, skipped.CallCount);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SnapshotAsync_DiscardsRetainedFallbackWhenTrackOrDurationChanges(bool changeTrack)
+    {
+        var local = RichDocument("AP_late");
+        var rich = RichDocument("QQ_previous", words: true, translation: true);
+        var candidates = new CandidateLyricsProvider([]);
+        var player = new MutableEnrichmentPlayer(new PlayerState("Song", "Artist", "Album", 1, 180, true));
+        var provider = new DelegateEnrichmentProvider("QQ Music", (state, _) =>
+            Task.FromResult<LyricsDocument?>(state.Title == "Song" && state.Duration == 180 ? rich : null));
+        await using var runtime = EnrichmentRuntime(local, [provider], words: true, translation: true,
+            lyricsProvider: candidates, playerProvider: player);
+
+        await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, rich));
+        candidates.Candidates = [new LyricsMatch(local, 100, 0, HasContentMatch: true)];
+        var native = await runtime.SnapshotAsync();
+        AssertNativeAnchor(local, native.Document);
+        Assert.True(HasRuntimeFeatures(native, words: true, translation: true));
+
+        player.State = changeTrack ? player.State with { Title = "Next song" } : player.State with { Duration = 200 };
+        var nextLocal = RichDocument("AP_next") with { DurationSeconds = player.State.Duration };
+        candidates.Candidates = [new LyricsMatch(nextLocal, 100, 0, HasContentMatch: true)];
+
+        var next = await runtime.SnapshotAsync();
+        Assert.Same(nextLocal, next.Document);
+        Assert.True(next.ExternalDiagnostics!.MissingWordTimings);
+        Assert.True(next.ExternalDiagnostics.MissingTranslations);
+        Assert.NotEqual(ExternalLyricsQueryState.Satisfied, next.ExternalDiagnostics.EnrichmentState);
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_ReopensSatisfiedEnrichmentWhenLocalFeaturesDisappear()
+    {
+        var completeLocal = RichDocument("AP_complete", words: true, translation: true);
+        var basicLocal = RichDocument("AP_basic");
+        var rich = RichDocument("QQ_rich", words: true, translation: true);
+        var candidates = new CandidateLyricsProvider([new LyricsMatch(completeLocal, 100, 0, HasContentMatch: true)]);
+        var completion = new TaskCompletionSource<LyricsDocument?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = new DelegateEnrichmentProvider("QQ Music", (_, _) => completion.Task);
+        await using var runtime = EnrichmentRuntime(completeLocal, [provider], words: true, translation: true,
+            lyricsProvider: candidates);
+
+        var complete = await runtime.SnapshotAsync();
+        Assert.Equal(ExternalLyricsQueryState.Satisfied, complete.ExternalDiagnostics!.EnrichmentState);
+        Assert.Equal(0, provider.CallCount);
+        candidates.Candidates = [new LyricsMatch(basicLocal, 100, 0, HasContentMatch: true)];
+
+        var searching = await runtime.SnapshotAsync();
+        Assert.Same(basicLocal, searching.Document);
+        Assert.Equal(ExternalLyricsQueryState.Querying, searching.ExternalDiagnostics!.EnrichmentState);
+        Assert.True(searching.ExternalDiagnostics.MissingTranslations);
+        await provider.Started.WaitAsync(TimeSpan.FromSeconds(2));
+        completion.SetResult(rich);
+        var merged = await WaitForSnapshotAsync(runtime, snapshot => HasRuntimeFeatures(snapshot, words: true, translation: true));
+        AssertNativeAnchor(basicLocal, merged.Document);
+        Assert.Equal(1, provider.CallCount);
     }
 
     [Fact]
@@ -1358,17 +1486,20 @@ public sealed class LyricsRuntimeServiceTests
         await slow.Started.WaitAsync(TimeSpan.FromSeconds(2));
         var partial = await runtime.SnapshotAsync().WaitAsync(TimeSpan.FromSeconds(1));
 
-        Assert.Same(wordDocument, partial.Document);
+        AssertNativeAnchor(local, partial.Document);
+        Assert.True(HasRuntimeFeatures(partial, words: true));
         Assert.False(completion.Task.IsCompleted);
-        Assert.Same(wordDocument, runtime.GetFrameSnapshot().Document);
+        Assert.Same(partial.Document, runtime.GetFrameSnapshot().Document);
         completion.SetResult(completeDocument);
-        await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, completeDocument));
+        var complete = await WaitForSnapshotAsync(runtime, snapshot => HasRuntimeFeatures(snapshot, words: true, translation: true));
+        AssertNativeAnchor(local, complete.Document);
+        Assert.Same(partial.Document!.Lines[0].Words, complete.Document!.Lines[0].Words);
     }
 
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task SnapshotAsync_DoesNotTradeAwayAnExistingRequestedFeature(bool baselineWords)
+    public async Task SnapshotAsync_MergesComplementaryFeaturesWithoutTradingAwayNativeData(bool baselineWords)
     {
         var local = RichDocument("AP_local", words: baselineWords, translation: !baselineWords);
         var otherFeatureOnly = RichDocument("QQ_incomplete", words: !baselineWords, translation: baselineWords);
@@ -1377,18 +1508,14 @@ public sealed class LyricsRuntimeServiceTests
 
         Assert.Same(local, (await runtime.SnapshotAsync()).Document);
         await provider.Started.WaitAsync(TimeSpan.FromSeconds(2));
-        for (var poll = 0; poll < 10; poll++)
-        {
-            Assert.Same(local, (await runtime.SnapshotAsync()).Document);
-            await Task.Delay(1);
-        }
+        var completed = await WaitForSnapshotAsync(runtime, snapshot => HasRuntimeFeatures(snapshot, words: true, translation: true));
+        AssertNativeAnchor(local, completed.Document);
+        Assert.Equal(LyricsResolutionSource.AppleMusicCache, completed.Resolution.Source);
         Assert.Equal(1, provider.CallCount);
-        var completed = await runtime.SnapshotAsync();
         var diagnostic = Assert.Single(completed.ExternalDiagnostics!.Providers,
             item => item.Stage == ExternalLyricsQueryStage.Enrichment);
-        Assert.Equal(ExternalLyricsQueryOutcome.Rejected, diagnostic.Outcome);
-        Assert.Equal(baselineWords ? ExternalLyricsDiagnosticReason.WouldLoseWordTimings
-            : ExternalLyricsDiagnosticReason.WouldLoseTranslations, diagnostic.Reason);
+        Assert.Equal(ExternalLyricsQueryOutcome.Success, diagnostic.Outcome);
+        Assert.Equal(ExternalLyricsDiagnosticReason.None, diagnostic.Reason);
         Assert.Equal(baselineWords ? 1 : 0, diagnostic.TranslatedLineCount);
         Assert.Equal(baselineWords ? 0 : 1, diagnostic.WordLineCount);
     }
@@ -1479,7 +1606,8 @@ public sealed class LyricsRuntimeServiceTests
         Assert.Same(local, (await runtime.SnapshotAsync()).Document);
         runtime.PreferWordTimings = true;
 
-        await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, rich));
+        var merged = await WaitForSnapshotAsync(runtime, snapshot => HasRuntimeFeatures(snapshot, words: true));
+        AssertNativeAnchor(local, merged.Document);
         Assert.Equal(2, provider.CallCount);
     }
 
@@ -1568,9 +1696,9 @@ public sealed class LyricsRuntimeServiceTests
             : Task.FromResult<LyricsDocument?>(rich));
         await using var runtime = EnrichmentRuntime(local, [provider], words: true);
 
-        var upgraded = await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, rich));
+        var upgraded = await WaitForSnapshotAsync(runtime, snapshot => HasRuntimeFeatures(snapshot, words: true));
 
-        Assert.Same(rich, upgraded.Document);
+        AssertNativeAnchor(local, upgraded.Document);
         Assert.Equal(2, provider.CallCount);
     }
 
@@ -1607,37 +1735,36 @@ public sealed class LyricsRuntimeServiceTests
     }
 
     [Fact]
-    public async Task SnapshotAsync_ReportsTranslationRejectedToRetainWordsWhileAnotherSourceIsPending()
+    public async Task SnapshotAsync_ReportsTranslationSupplementToNativeWordsAndSkipsLaterSources()
     {
         var local = RichDocument("AP_words", words: true);
         var translated = RichDocument("NE_translation", translation: true);
-        var translationSource = new DelegateEnrichmentProvider("NetEase Cloud Music", (_, _) => Task.FromResult<LyricsDocument?>(translated));
         var completion = new TaskCompletionSource<LyricsDocument?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var pending = new DelegateEnrichmentProvider("Pending", (_, _) => completion.Task);
+        var translationSource = new DelegateEnrichmentProvider("NetEase Cloud Music", (_, _) => completion.Task);
+        var pending = new DelegateEnrichmentProvider("Pending", (_, _) => Task.FromResult<LyricsDocument?>(null));
         await using var runtime = EnrichmentRuntime(local, [translationSource, pending], words: true, translation: true);
 
         await runtime.SnapshotAsync();
-        await pending.Started.WaitAsync(TimeSpan.FromSeconds(2));
+        await translationSource.Started.WaitAsync(TimeSpan.FromSeconds(2));
         var during = await runtime.SnapshotAsync();
         var duringSources = during.ExternalDiagnostics!.Providers.Where(item => item.Stage == ExternalLyricsQueryStage.Enrichment).ToArray();
-
         Assert.Same(local, during.Document);
-        Assert.Equal(ExternalLyricsQueryState.Querying, during.ExternalDiagnostics.EnrichmentState);
-        Assert.Equal(ExternalLyricsQueryOutcome.Rejected, duringSources[0].Outcome);
-        Assert.Equal(ExternalLyricsDiagnosticReason.WouldLoseWordTimings, duringSources[0].Reason);
-        Assert.Equal(1, duringSources[0].TranslatedLineCount);
-        Assert.Equal(ExternalLyricsQueryOutcome.Querying, duringSources[1].Outcome);
+        Assert.Equal(ExternalLyricsQueryOutcome.Querying, duringSources[0].Outcome);
         Assert.True(during.ExternalDiagnostics.MissingTranslations);
         Assert.False(during.ExternalDiagnostics.MissingWordTimings);
-        completion.SetResult(null);
+        completion.SetResult(translated);
 
-        var complete = await WaitForSnapshotAsync(runtime,
-            snapshot => snapshot.ExternalDiagnostics?.EnrichmentState == ExternalLyricsQueryState.Completed);
-        var completedSource = complete.ExternalDiagnostics!.Providers.Single(item =>
-            item.Stage == ExternalLyricsQueryStage.Enrichment && item.Source == "Pending");
-        Assert.Equal(ExternalLyricsQueryOutcome.NoResult, completedSource.Outcome);
-        // Published snapshots are immutable even as the next poll adopts more evidence.
-        Assert.Equal(ExternalLyricsQueryOutcome.Querying, duringSources[1].Outcome);
+        var complete = await WaitForSnapshotAsync(runtime, snapshot => HasRuntimeFeatures(snapshot, words: true, translation: true));
+        AssertNativeAnchor(local, complete.Document);
+        Assert.Equal(LyricsResolutionSource.AppleMusicCache, complete.Resolution.Source);
+        var completedSources = complete.ExternalDiagnostics!.Providers.Where(item => item.Stage == ExternalLyricsQueryStage.Enrichment).ToArray();
+        Assert.Equal(ExternalLyricsQueryOutcome.Success, completedSources[0].Outcome);
+        Assert.Equal(1, completedSources[0].TranslatedLineCount);
+        Assert.Equal(0, completedSources[0].WordLineCount);
+        Assert.Equal(ExternalLyricsQueryOutcome.Skipped, completedSources[1].Outcome);
+        Assert.Equal(0, pending.CallCount);
+        // Published snapshots remain immutable after adoption of the supplementary translation.
+        Assert.Equal(ExternalLyricsQueryOutcome.Querying, duringSources[0].Outcome);
     }
 
     [Fact]
@@ -1702,6 +1829,32 @@ public sealed class LyricsRuntimeServiceTests
             PreferTranslations = translation,
             ExternalRetryBaseDelay = TimeSpan.Zero,
         };
+
+    private static bool HasRuntimeFeatures(RuntimeSnapshot snapshot, bool words = false, bool translation = false) =>
+        snapshot.Document is { } document && (!words || document.Lines.Any(LyricWordTiming.IsUsable))
+        && (!translation || document.Lines.Any(line => !string.IsNullOrWhiteSpace(line.Translation)));
+
+    private static void AssertNativeAnchor(LyricsDocument native, LyricsDocument? actual)
+    {
+        Assert.NotNull(actual);
+        Assert.Equal(native.LyricsId, actual.LyricsId);
+        Assert.Equal(native.SourceFile, actual.SourceFile);
+        Assert.Equal(native.Status, actual.Status);
+        Assert.Equal(native.UpdatedAt, actual.UpdatedAt);
+        Assert.Equal(native.DurationSeconds, actual.DurationSeconds);
+        Assert.Equal(native.NativeOffsetSeconds, actual.NativeOffsetSeconds);
+        Assert.Equal(native.LeadingSilenceSeconds, actual.LeadingSilenceSeconds);
+        Assert.Equal(native.Lines.Count, actual.Lines.Count);
+        for (var index = 0; index < native.Lines.Count; index++)
+        {
+            Assert.Equal(native.Lines[index].Text, actual.Lines[index].Text);
+            Assert.Equal(native.Lines[index].Begin, actual.Lines[index].Begin);
+            Assert.Equal(native.Lines[index].End, actual.Lines[index].End);
+            if (native.Lines[index].Words is { Count: > 0 }) Assert.Same(native.Lines[index].Words, actual.Lines[index].Words);
+            if (!string.IsNullOrWhiteSpace(native.Lines[index].Translation))
+                Assert.Equal(native.Lines[index].Translation, actual.Lines[index].Translation);
+        }
+    }
 
     private static LyricsDocument RichDocument(string id, bool words = false, bool translation = false) =>
         BuildDocument(id, 180, "hello world") with

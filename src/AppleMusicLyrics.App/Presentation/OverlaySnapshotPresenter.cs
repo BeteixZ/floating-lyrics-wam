@@ -1,5 +1,7 @@
+using System.Runtime.CompilerServices;
 using AppleMusicLyrics.Core.Models;
 using AppleMusicLyrics.Core.Matching;
+using AppleMusicLyrics.Core.Parsing;
 using AppleMusicLyrics.App.Localization;
 
 namespace AppleMusicLyrics.App.Presentation;
@@ -20,6 +22,10 @@ public sealed record LyricsPresentation(
 
 public static class OverlaySnapshotPresenter
 {
+    // Runtime documents are immutable snapshots. Reference keys avoid record/list equality work;
+    // weak ownership allows completed tracks (and their text) to be collected normally.
+    private static readonly ConditionalWeakTable<LyricsDocument, DocumentStatistics> Statistics = new();
+
     public static PlayerPresentation CreatePlayer(RuntimeSnapshot snapshot, LocalizationManager? localization = null)
     {
         var text = localization ?? LocalizationManager.Instance;
@@ -43,7 +49,13 @@ public static class OverlaySnapshotPresenter
             $"{status}: {artist} - {title}");
     }
 
-    public static LyricsPresentation CreateLyrics(RuntimeSnapshot snapshot, LocalizationManager? localization = null, bool showTranslation = true)
+    /// <summary>
+    /// Creates the compact overlay and, by default, the full diagnostics report for existing callers.
+    /// Overlays which only use <see cref="LyricsPresentation.DebugSummaryText"/> can opt out of
+    /// building <see cref="LyricsPresentation.PathText"/> by setting includeDetailedDiagnostics false.
+    /// </summary>
+    public static LyricsPresentation CreateLyrics(RuntimeSnapshot snapshot, LocalizationManager? localization = null,
+        bool showTranslation = true, bool includeDetailedDiagnostics = true)
     {
         var text = localization ?? LocalizationManager.Instance;
         var resolutionLabel = FormatResolutionLabel(snapshot.Resolution, text);
@@ -51,7 +63,7 @@ public static class OverlaySnapshotPresenter
         {
             return new LyricsPresentation(
                 resolutionLabel,
-                BuildDebugText(snapshot, null, null, 0, 0, showTranslation, text),
+                includeDetailedDiagnostics ? BuildDebugText(snapshot, null, null, 0, 0, showTranslation, text) : string.Empty,
                 string.Empty,
                 GetResolutionPlaceholder(snapshot.Resolution, text),
                 snapshot.Resolution.Status == LyricsResolutionStatus.FetchingExternal
@@ -68,8 +80,9 @@ public static class OverlaySnapshotPresenter
         var currentText = displayedLine?.Text
             ?? text.Text("Lyrics.NoDisplayableLines");
         var source = GetSourceLabel(snapshot.Document, snapshot.Resolution, text);
-        var wordLines = snapshot.Document.Lines.Count(line => line.Words is { Count: > 0 });
-        var translatedLines = snapshot.Document.Lines.Count(HasTranslation);
+        var statistics = Statistics.GetValue(snapshot.Document, static document => new DocumentStatistics(document));
+        var wordLines = statistics.WordLines;
+        var translatedLines = statistics.TranslatedLines;
         var features = wordLines > 0
             ? text.Text(translatedLines > 0 ? "Lyrics.FeatureWordsTranslation" : "Lyrics.FeatureWords")
             : translatedLines > 0 ? text.Text("Lyrics.FeatureLinesTranslation")
@@ -78,14 +91,18 @@ public static class OverlaySnapshotPresenter
                 ? text.Text("Lyrics.FeaturePlain") : text.Text("Lyrics.FeatureLines");
         return new LyricsPresentation(
             $"{source} | {features}",
-            BuildDebugText(snapshot, displayedLine, source, wordLines, translatedLines, showTranslation, text),
+            includeDetailedDiagnostics
+                ? BuildDebugText(snapshot, displayedLine, source, wordLines, translatedLines, showTranslation, text)
+                : string.Empty,
             snapshot.ActiveLyric.PreviousLine?.Text ?? string.Empty,
             currentText,
-            snapshot.ActiveLyric.NextLine?.Text ?? string.Empty,
+            // During the prelude the next line is already promoted to the current preview slot.
+            // Keep the secondary slot empty rather than duplicating that same first line.
+            snapshot.ActiveLyric.CurrentLine is null ? string.Empty : snapshot.ActiveLyric.NextLine?.Text ?? string.Empty,
             snapshot.Player?.Playing ?? false,
             Animate: snapshot.ActiveLyric.CurrentLine is not null,
             DisplayedLine: displayedLine,
-            TranslationText: displayedLine?.Translation,
+            TranslationText: LyricsTranslationFilter.Clean(displayedLine?.Translation),
             DebugSummaryText: BuildDebugSummary(snapshot, source, wordLines, translatedLines, showTranslation, text));
     }
 
@@ -131,6 +148,7 @@ public static class OverlaySnapshotPresenter
                 if (provider.FailureReason != ExternalLyricsFailureReason.None)
                     details.Add(text.Text("Debug.Failure." + provider.FailureReason));
                 if (provider.HttpStatusCode is { } status) details.Add("HTTP " + status);
+                if (provider.ServiceCode is { } serviceCode) details.Add(text.Format("Debug.ServiceCode", serviceCode));
                 if (!string.IsNullOrWhiteSpace(provider.ExceptionType)) details.Add(provider.ExceptionType);
                 rows.Add(text.Format("Debug.Provider", provider.Source, text.Text("Debug.Stage." + provider.Stage),
                     outcome, details.Count == 0 ? string.Empty : " · " + string.Join(" · ", details)));
@@ -163,7 +181,26 @@ public static class OverlaySnapshotPresenter
             ? "Debug.TranslationNotChecked" : "Debug.TranslationNotReturned");
     }
 
-    private static bool HasTranslation(LyricsLine line) => !string.IsNullOrWhiteSpace(line.Translation)
+    private sealed class DocumentStatistics
+    {
+        public int WordLines { get; }
+        public int TranslatedLines { get; }
+
+        public DocumentStatistics(LyricsDocument document)
+        {
+            var wordLines = 0;
+            var translatedLines = 0;
+            foreach (var line in document.Lines)
+            {
+                if (line.Words is { Count: > 0 }) wordLines++;
+                if (HasTranslation(line)) translatedLines++;
+            }
+            WordLines = wordLines;
+            TranslatedLines = translatedLines;
+        }
+    }
+
+    private static bool HasTranslation(LyricsLine line) => LyricsTranslationFilter.IsMeaningful(line.Translation)
         && MetadataMatching.Normalize(line.Translation) != MetadataMatching.Normalize(line.Text);
 
     private static string GetSourceLabel(LyricsDocument document, LyricsResolution resolution, LocalizationManager text)

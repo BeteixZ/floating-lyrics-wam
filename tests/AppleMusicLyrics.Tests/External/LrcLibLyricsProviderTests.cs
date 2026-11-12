@@ -35,6 +35,48 @@ public sealed class LrcLibLyricsProviderTests
         Assert.Equal(0, handler.SearchCount);
     }
 
+    [Theory]
+    [InlineData("Different Artist")]
+    [InlineData("Different Artist / Another Singer")]
+    [InlineData(null)]
+    [InlineData("")]
+    public async Task FetchAsync_RejectsSearchResultsWithoutMatchingArtistDespiteExactTitleAlbumAndDuration(string? artist)
+    {
+        var handler = new RoutedHandler
+        {
+            OnGet = new HttpResponseMessage(HttpStatusCode.NotFound),
+            OnSearch = Json(System.Text.Json.JsonSerializer.Serialize(new[]
+            {
+                new { id = 99, trackName = Player.Title, artistName = artist, albumName = Player.Album,
+                    duration = Player.Duration, syncedLyrics = "[00:01.00]Wrong performer" },
+            })),
+        };
+        using var provider = new LrcLibLyricsProvider(messageHandler: handler);
+
+        Assert.Null(await provider.FetchAsync(Player));
+        Assert.Equal(1, handler.SearchCount);
+    }
+
+    [Theory]
+    [InlineData("Madonna")]
+    [InlineData("Madonna, Guest Singer")]
+    [InlineData("Guest Singer / Madonna")]
+    public async Task FetchAsync_AcceptsVerifiedArtistWithinJointCredits(string artist)
+    {
+        var handler = new RoutedHandler
+        {
+            OnGet = new HttpResponseMessage(HttpStatusCode.NotFound),
+            OnSearch = Json(System.Text.Json.JsonSerializer.Serialize(new[]
+            {
+                new { id = 99, trackName = Player.Title, artistName = artist, duration = Player.Duration,
+                    syncedLyrics = "[00:01.00]Correct performer" },
+            })),
+        };
+        using var provider = new LrcLibLyricsProvider(messageHandler: handler);
+
+        Assert.Equal("LRCLIB_99", (await provider.FetchAsync(Player))?.LyricsId);
+    }
+
     [Fact]
     public async Task FetchAsync_FallsBackToSearchWhenTheExactLookupMisses()
     {
@@ -307,6 +349,54 @@ public sealed class LrcLibLyricsProviderTests
                 Directory.Delete(root, recursive: true);
             }
         }
+    }
+
+    [Fact]
+    public async Task FetchAsync_DoesNotReusePersistentEntriesFromBeforeArtistValidation()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "AppleMusicLyrics.Tests", Guid.NewGuid().ToString("N"));
+        var cachePath = Path.Combine(root, "lrclib-cache.json");
+        try
+        {
+            using (var first = new LrcLibLyricsProvider(messageHandler: new RoutedHandler
+            {
+                OnGet = Json("""{"id":1,"syncedLyrics":"[00:01.00]Unverified old recording"}"""),
+            }, persistentCachePath: cachePath))
+            {
+                Assert.NotNull(await first.FetchAsync(Player));
+            }
+            var legacy = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(cachePath))!;
+            legacy["Version"] = 3;
+            File.WriteAllText(cachePath, legacy.ToJsonString());
+            var handler = new RoutedHandler
+            {
+                OnGet = Json("""{"id":2,"syncedLyrics":"[00:01.00]Fresh exact recording"}"""),
+            };
+            using var restarted = new LrcLibLyricsProvider(messageHandler: handler, persistentCachePath: cachePath);
+
+            Assert.Equal("LRCLIB_2", (await restarted.FetchAsync(Player))?.LyricsId);
+            Assert.Equal(1, handler.GetCount);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task FetchAsync_HonorsCancellationOnAnInMemoryCacheHit()
+    {
+        var handler = new RoutedHandler
+        {
+            OnGet = Json("""{"id":1,"syncedLyrics":"[00:01.00]Cached recording"}"""),
+        };
+        using var provider = new LrcLibLyricsProvider(messageHandler: handler);
+        Assert.NotNull(await provider.FetchAsync(Player));
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => provider.FetchAsync(Player, cancellation.Token));
+        Assert.Equal(1, handler.GetCount);
     }
 
     [Fact]

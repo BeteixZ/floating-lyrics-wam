@@ -1,5 +1,10 @@
 <Project>
   <PropertyGroup>
+    <UseArtifactsOutput>true</UseArtifactsOutput>
+    <ArtifactsPath>$(MSBuildThisFileDirectory)artifacts</ArtifactsPath>
+    <!-- WPF's randomly named temporary projects must reuse the app's output folder. -->
+    <ArtifactsProjectName>$([System.Text.RegularExpressions.Regex]::Replace('$(MSBuildProjectName)', '_[^_]+_wpftmp$', ''))</ArtifactsProjectName>
+    <VSTestResultsDirectory Condition="'$(VSTestResultsDirectory)' == ''">$(ArtifactsPath)\test-results</VSTestResultsDirectory>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>

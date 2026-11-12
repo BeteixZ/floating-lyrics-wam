@@ -122,6 +122,131 @@ public sealed class PlaybackClockTests
         Assert.Equal(atPause, clock.GetEstimatedPosition(), 6);
     }
 
+    [Theory]
+    [InlineData(0.2)] // Target offset is above the current phase.
+    [InlineData(1.0)] // Target offset is below it.
+    public void Update_RepeatedPausePollsDoNotSlewAnUnsettledPhase(double firstEdgeAt)
+    {
+        var time = new ManualTimeProvider();
+        var clock = new PlaybackClock(time);
+        clock.Update(0, playing: true);
+        time.Advance(TimeSpan.FromSeconds(firstEdgeAt));
+        clock.Update(1, playing: true);
+        time.Advance(TimeSpan.FromSeconds(0.1));
+        clock.Update(1, playing: false);
+        var atPause = clock.GetEstimatedPosition();
+
+        for (var poll = 0; poll < 50; poll++)
+        {
+            time.Advance(TimeSpan.FromSeconds(0.2));
+            clock.Update(1, playing: false);
+            Assert.Equal(atPause, clock.GetEstimatedPosition(), 9);
+            Assert.Equal(0, clock.RemainingExtrapolationSeconds);
+        }
+    }
+
+    [Fact]
+    public void GetEstimatedPosition_BoundsExtrapolationWithoutAnotherPoll()
+    {
+        var time = new ManualTimeProvider();
+        var clock = new PlaybackClock(time);
+        clock.Update(10, playing: true);
+        Assert.Equal(3, clock.RemainingExtrapolationSeconds, 6);
+        time.Advance(TimeSpan.FromSeconds(0.5));
+        Assert.Equal(11, clock.GetEstimatedPosition(), 6);
+        Assert.Equal(2.5, clock.RemainingExtrapolationSeconds, 6);
+
+        time.Advance(TimeSpan.FromSeconds(30));
+        Assert.Equal(13.5, clock.GetEstimatedPosition(), 6);
+        Assert.Equal(0, clock.RemainingExtrapolationSeconds);
+        clock.Update(10, playing: true);
+        Assert.Equal(13.5, clock.GetEstimatedPosition(), 6);
+    }
+
+    [Fact]
+    public void Update_StalePlayingPollsFreezeElapsedAndUnsettledPhase()
+    {
+        var time = new ManualTimeProvider();
+        var clock = new PlaybackClock(time);
+        clock.Update(0, playing: true);
+        time.Advance(TimeSpan.FromSeconds(0.2));
+        clock.Update(1, playing: true);
+        time.Advance(TimeSpan.FromSeconds(3));
+        var atHorizon = clock.GetEstimatedPosition();
+
+        for (var poll = 0; poll < 50; poll++)
+        {
+            clock.Update(1, playing: true);
+            Assert.Equal(atHorizon, clock.GetEstimatedPosition(), 9);
+            Assert.Equal(0, clock.RemainingExtrapolationSeconds, 9);
+            time.Advance(TimeSpan.FromSeconds(0.2));
+        }
+    }
+
+    [Fact]
+    public void Update_ReseedsAfterAStallAndContinuesWithFreshEdges()
+    {
+        var time = new ManualTimeProvider();
+        var clock = new PlaybackClock(time);
+        clock.Update(10, playing: true);
+        time.Advance(TimeSpan.FromSeconds(20));
+        clock.Update(10, playing: true);
+        Assert.Equal(13.5, clock.GetEstimatedPosition(), 6);
+
+        // A small raw change after the stall must not be folded into the stale median.
+        clock.Update(11, playing: true);
+        Assert.Equal(11.5, clock.GetEstimatedPosition(), 6);
+        Assert.Equal(3, clock.RemainingExtrapolationSeconds, 6);
+        time.Advance(TimeSpan.FromSeconds(1));
+        clock.Update(12, playing: true);
+        Assert.InRange(clock.GetEstimatedPosition(), 12, 12.6);
+        time.Advance(TimeSpan.FromSeconds(1));
+        clock.Update(13, playing: true);
+        Assert.InRange(clock.GetEstimatedPosition(), 13, 13.6);
+    }
+
+    [Fact]
+    public void Update_PausedSeekSnapsEvenWhenSmallAndResumeDoesNotAccumulatePauseTime()
+    {
+        var time = new ManualTimeProvider();
+        var clock = new PlaybackClock(time);
+        clock.Update(10, playing: true);
+        time.Advance(TimeSpan.FromSeconds(0.2));
+        clock.Update(10, playing: false);
+        time.Advance(TimeSpan.FromSeconds(30));
+        clock.Update(11, playing: false);
+        Assert.Equal(11, clock.GetEstimatedPosition(), 6);
+        time.Advance(TimeSpan.FromSeconds(30));
+        clock.Update(11, playing: false);
+        Assert.Equal(11, clock.GetEstimatedPosition(), 6);
+
+        clock.Update(11, playing: true);
+        Assert.Equal(11, clock.GetEstimatedPosition(), 6);
+        Assert.Equal(3, clock.RemainingExtrapolationSeconds, 6);
+        time.Advance(TimeSpan.FromSeconds(1));
+        clock.Update(12, playing: true);
+        Assert.Equal(12, clock.GetEstimatedPosition(), 6);
+    }
+
+    [Fact]
+    public void Update_LongPauseDoesNotConsumeResumeWatchdogBudget()
+    {
+        var time = new ManualTimeProvider();
+        var clock = new PlaybackClock(time);
+        clock.Update(40, playing: true);
+        time.Advance(TimeSpan.FromSeconds(0.5));
+        clock.Update(40, playing: false);
+        var atPause = clock.GetEstimatedPosition();
+        time.Advance(TimeSpan.FromMinutes(5));
+        clock.Update(40, playing: false);
+        Assert.Equal(atPause, clock.GetEstimatedPosition(), 6);
+
+        clock.Update(40, playing: true);
+        time.Advance(TimeSpan.FromSeconds(1.2));
+        Assert.Equal(atPause + 1.2, clock.GetEstimatedPosition(), 6);
+        Assert.Equal(1.8, clock.RemainingExtrapolationSeconds, 6);
+    }
+
     [Fact]
     public void Reset_ClearsTheEstimate()
     {

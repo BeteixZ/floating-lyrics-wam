@@ -12,9 +12,11 @@ public static class FontFamilyResolver
     public const string FallbackFontName = "Segoe UI";
     public const string DefaultChineseFontName = "Microsoft YaHei UI";
 
-    // Keep Latin text independent even when its chosen family also contains Chinese glyphs.
-    private const string ChineseUnicodeRanges =
-        "2E80-2FFF,3000-303F,3100-312F,31A0-31EF,3400-4DBF,4E00-9FFF,F900-FAFF,FE10-FE1F,FE30-FE6F,FF00-FFEF,20000-3FFFF";
+    // Keep Latin text independent even when its chosen family contains CJK glyphs.
+    // Route kana with Han characters so Japanese lyrics use the same selected family
+    // instead of mixing its kanji with the system's unrelated kana fallback.
+    private const string ChineseAndJapaneseUnicodeRanges =
+        "2E80-2FFF,3000-30FF,3100-312F,31A0-31FF,3400-4DBF,4E00-9FFF,F900-FAFF,FE10-FE1F,FE30-FE6F,FF00-FFEF,1AFF0-1B16F,20000-3FFFF";
 
     public static MediaFontFamily Resolve(string? fontName)
     {
@@ -52,7 +54,7 @@ public static class FontFamilyResolver
         family.FamilyNames.Add(XmlLanguage.GetLanguage("en-US"), "Apple Music Lyrics Composite");
         family.FamilyMaps.Add(new FontFamilyMap
         {
-            Unicode = ChineseUnicodeRanges,
+            Unicode = ChineseAndJapaneseUnicodeRanges,
             Target = $"{chineseName}, {DefaultChineseFontName}, Microsoft YaHei, SimSun, Global User Interface",
         });
         family.FamilyMaps.Add(new FontFamilyMap

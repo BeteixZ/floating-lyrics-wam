@@ -18,7 +18,7 @@ public enum ExternalLyricsDiagnosticReason
     Canceled,
 }
 
-public enum ExternalLyricsFailureReason { None, Timeout, HttpError, NetworkError, InvalidResponse, Other }
+public enum ExternalLyricsFailureReason { None, Timeout, HttpError, NetworkError, InvalidResponse, Other, ServiceError }
 
 /// <summary>
 /// One provider's latest attempt in a lookup stage. NoResult only means that the
@@ -38,7 +38,8 @@ public sealed record ExternalLyricsDiagnostic(
     string? ExceptionType = null,
     ExternalLyricsFailureReason FailureReason = ExternalLyricsFailureReason.None,
     int? HttpStatusCode = null,
-    string? Detail = null);
+    string? Detail = null,
+    int? ServiceCode = null);
 
 /// <summary>Immutable, track-scoped evidence published by the player poll.</summary>
 public sealed record ExternalLyricsDiagnostics(
