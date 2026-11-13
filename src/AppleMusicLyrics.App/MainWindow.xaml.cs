@@ -578,7 +578,7 @@ public partial class MainWindow : Window
             ?? snapshot.Document?.Lines.FirstOrDefault();
         if (!ReferenceEquals(_displayedLyricLine, line)) return;
         _karaokeTextController.Update(LyricsTiming.GetPosition(snapshot.Document, snapshot.Player,
-            _settings.LyricsOffsetSeconds, _settings.ApplyNativeLyricOffset));
+            _runtimeService.LyricsOffsetSeconds, _settings.ApplyNativeLyricOffset));
     }
 
     private void SetTranslation(string? translation)
@@ -1508,8 +1508,16 @@ public partial class MainWindow : Window
     private void OpenSettingsWindow()
     {
         var cacheGeneration = _externalLyricsCache?.Generation;
+        // Show the offset actually in effect so the slider reflects a per-song calibration.
+        var dialogSettings = _settings;
+        if (_settings.PerSongOffsetEnabled)
+        {
+            dialogSettings = _settings.Clone();
+            dialogSettings.LyricsOffsetSeconds = _runtimeService.LyricsOffsetSeconds;
+        }
+
         var settingsWindow = new SettingsWindow(
-            _settings,
+            dialogSettings,
             previewSettings => ApplySettings(previewSettings, persist: true, cacheGeneration),
             lyricsCache: _externalLyricsCache,
             openDiagnostics: OpenDiagnosticsWindow)
@@ -1612,6 +1620,8 @@ public partial class MainWindow : Window
         var currentHeight = Height;
         var currentPureMode = _settings.PureMode;
         var cacheWasEnabled = _settings.PersistExternalLyricsCache;
+        var offsetChanged = sourceSettings.LyricsOffsetSeconds != _settings.LyricsOffsetSeconds;
+        var perSongOffsetWasEnabled = _settings.PerSongOffsetEnabled;
         var requestedPureMode = sourceSettings.PureMode;
 
         CancelPureModeBoundsAnimation();
@@ -1628,7 +1638,20 @@ public partial class MainWindow : Window
         _settings.PureMode = currentPureMode;
 
         _playerProvider.AllowNonAppleMediaSessions = _settings.AllowNonAppleMediaSessions;
-        _runtimeService.LyricsOffsetSeconds = _settings.LyricsOffsetSeconds;
+        _runtimeService.PerSongOffsetEnabled = _settings.PerSongOffsetEnabled;
+        if (offsetChanged || !_settings.PerSongOffsetEnabled)
+        {
+            _runtimeService.LyricsOffsetSeconds = _settings.LyricsOffsetSeconds;
+            if (offsetChanged)
+            {
+                _runtimeService.RememberCurrentOffset();
+            }
+        }
+        else if (!perSongOffsetWasEnabled)
+        {
+            _runtimeService.ApplyPerSongOffset();
+        }
+
         _runtimeService.ApplyNativeLyricOffset = _settings.ApplyNativeLyricOffset;
         _runtimeService.AllowLowConfidenceLyrics = _settings.AllowLowConfidenceLyrics;
         _runtimeService.PreferWordTimings = _settings.WordHighlightEnabled;
@@ -2044,6 +2067,7 @@ public partial class MainWindow : Window
         target.PlayerPollInterval = copy.PlayerPollInterval;
         target.LyricsOffsetSeconds = copy.LyricsOffsetSeconds;
         target.ApplyNativeLyricOffset = copy.ApplyNativeLyricOffset;
+        target.PerSongOffsetEnabled = copy.PerSongOffsetEnabled;
         target.AllowNonAppleMediaSessions = copy.AllowNonAppleMediaSessions;
         target.AllowLowConfidenceLyrics = copy.AllowLowConfidenceLyrics;
         target.CatalogLookupEnabled = copy.CatalogLookupEnabled;

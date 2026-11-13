@@ -1902,6 +1902,77 @@ public sealed class LyricsRuntimeServiceTests
             Task.FromResult<PlayerState?>(State);
     }
 
+    [Fact]
+    public async Task SnapshotAsync_SongChangeAppliesSavedPerSongOffset()
+    {
+        var offsets = new MemorySongOffsetStore();
+        offsets.RememberOffset("Artist", "Song B", 1.25);
+        await using var runtime = new LyricsRuntimeService(
+            new StubLyricsProvider(BuildDocument("per-song", 180, "line")),
+            new SequencePlayerProvider([
+                new PlayerState("Song A", "Artist", null, 0.0, 180, true),
+                new PlayerState("Song B", "Artist", null, 0.0, 180, true),
+            ]),
+            new LyricsSynchronizer(),
+            new PlaybackClock(),
+            lyricsOffsetSeconds: 0.78)
+        {
+            PerSongOffsetEnabled = true,
+            SongOffsets = offsets,
+        };
+
+        await runtime.SnapshotAsync();
+        Assert.Equal(0.78, runtime.LyricsOffsetSeconds);
+
+        await runtime.SnapshotAsync();
+        Assert.Equal(1.25, runtime.LyricsOffsetSeconds);
+    }
+
+    [Fact]
+    public async Task RememberCurrentOffset_PersistsCalibrationForPlayingSong()
+    {
+        var offsets = new MemorySongOffsetStore();
+        await using var runtime = new LyricsRuntimeService(
+            new StubLyricsProvider(BuildDocument("remember", 180, "line")),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", null, 0.0, 180, true)),
+            new LyricsSynchronizer(),
+            new PlaybackClock(),
+            lyricsOffsetSeconds: 0.78)
+        {
+            PerSongOffsetEnabled = true,
+            SongOffsets = offsets,
+        };
+
+        await runtime.SnapshotAsync();
+        runtime.LyricsOffsetSeconds = 1.1;
+        runtime.RememberCurrentOffset();
+
+        Assert.Equal(1.1, offsets.TryGetOffset("Artist", "Song"));
+    }
+
+    [Fact]
+    public async Task SnapshotAsync_DisabledPerSongOffsetKeepsGlobalValue()
+    {
+        var offsets = new MemorySongOffsetStore();
+        offsets.RememberOffset("Artist", "Song", 1.25);
+        await using var runtime = new LyricsRuntimeService(
+            new StubLyricsProvider(BuildDocument("disabled", 180, "line")),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", null, 0.0, 180, true)),
+            new LyricsSynchronizer(),
+            new PlaybackClock(),
+            lyricsOffsetSeconds: 0.78)
+        {
+            PerSongOffsetEnabled = false,
+            SongOffsets = offsets,
+        };
+
+        await runtime.SnapshotAsync();
+        Assert.Equal(0.78, runtime.LyricsOffsetSeconds);
+
+        runtime.RememberCurrentOffset();
+        Assert.Equal(1.25, offsets.TryGetOffset("Artist", "Song"));
+    }
+
     private static LyricsDocument BuildDocument(
         string lyricsId,
         double durationSeconds,
@@ -2152,5 +2223,16 @@ public sealed class LyricsRuntimeServiceTests
         {
             return Task.FromResult<PlayerState?>(_states.Count > 1 ? _states.Dequeue() : _states.Peek());
         }
+    }
+
+    private sealed class MemorySongOffsetStore : ISongOffsetStore
+    {
+        private readonly Dictionary<string, double> _offsets = new(StringComparer.Ordinal);
+
+        public double? TryGetOffset(string? artist, string? title) =>
+            _offsets.TryGetValue($"{artist}|{title}", out var offset) ? offset : null;
+
+        public void RememberOffset(string? artist, string? title, double offsetSeconds) =>
+            _offsets[$"{artist}|{title}"] = offsetSeconds;
     }
 }

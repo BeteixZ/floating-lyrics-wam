@@ -19,6 +19,10 @@ public sealed class AppSettings
     // the particular master being played. Only a minority of documents carry one.
     public bool ApplyNativeLyricOffset { get; set; } = true;
 
+    // Remember the offset adjusted for each song and reapply it when that song plays again.
+    // Songs without a saved offset keep using LyricsOffsetSeconds.
+    public bool PerSongOffsetEnabled { get; set; } = true;
+
     // Other SMTC applications can publish plausible metadata and previously hijacked matching.
     // Keep the fallback opt-in because this application targets Apple Music by default.
     public bool AllowNonAppleMediaSessions { get; set; }
@@ -148,6 +152,7 @@ public sealed class AppSettings
             PlayerPollInterval = PlayerPollInterval,
             LyricsOffsetSeconds = LyricsOffsetSeconds,
             ApplyNativeLyricOffset = ApplyNativeLyricOffset,
+            PerSongOffsetEnabled = PerSongOffsetEnabled,
             AllowNonAppleMediaSessions = AllowNonAppleMediaSessions,
             AllowLowConfidenceLyrics = AllowLowConfidenceLyrics,
             CatalogLookupEnabled = CatalogLookupEnabled,

@@ -544,6 +544,7 @@
                    for this hand-tuned value sits about half a second higher than it used to. -->
                   <Slider x:Name="LyricsOffsetSlider" Style="{StaticResource ModernSliderStyle}" Minimum="-0.20" Maximum="1.60" TickFrequency="0.02" Value="0.78" ValueChanged="SliderValueChanged" />
                   <CheckBox Style="{StaticResource ToggleStyle}" Content="{loc:Loc Settings.Toggle.NativeOffset}" ToolTip="{loc:Loc Settings.ToolTip.NativeOffset}" IsChecked="{Binding Settings.ApplyNativeLyricOffset, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" />
+                  <CheckBox Style="{StaticResource ToggleStyle}" Content="{loc:Loc Settings.Toggle.PerSongOffset}" ToolTip="{loc:Loc Settings.ToolTip.PerSongOffset}" IsChecked="{Binding Settings.PerSongOffsetEnabled, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" />
                 </StackPanel>
               </Border>
             </StackPanel>

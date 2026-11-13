@@ -21,6 +21,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
     private readonly TimeProvider _timeProvider;
     private FrameBasis _frameBasis;
     private double _lyricsOffsetSeconds;
+    private PlayerState? _currentPlayer;
     private LyricsDocument? _currentDocument;
     private string? _sessionKey;
     private DateTimeOffset _sessionChangedAt;
@@ -90,6 +91,15 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
     /// Whether to honour the <c>lyricOffset</c> Apple ships inside a TTML document.
     /// </summary>
     public bool ApplyNativeLyricOffset { get; set; } = true;
+
+    /// <summary>
+    /// Reapply the offset previously calibrated for each song when that song plays again.
+    /// Songs without a saved entry keep the current global offset.
+    /// </summary>
+    public bool PerSongOffsetEnabled { get; set; }
+
+    /// <summary>Storage for per-song offsets; required when <see cref="PerSongOffsetEnabled"/> is on.</summary>
+    public ISongOffsetStore? SongOffsets { get; init; }
 
     /// <summary>
     /// Allows duration-only or otherwise unverifiable local candidates to be displayed. Disabled
@@ -254,10 +264,38 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             _playbackClock.Reset();
         }
 
+        _currentPlayer = player;
+        if (sessionChanged)
+        {
+            ApplyPerSongOffset();
+        }
+
         _playbackClock.Update(player.Position, player.Playing);
         _sessionKey = currentSessionKey;
         _lastRawPositionSeconds = player.Position;
         return sessionChanged;
+    }
+
+    /// <summary>Reapply the saved offset for the playing song, if per-song offsets are enabled.</summary>
+    public void ApplyPerSongOffset()
+    {
+        if (PerSongOffsetEnabled && SongOffsets is not null && _currentPlayer is { } player)
+        {
+            var saved = SongOffsets.TryGetOffset(player.Artist, player.Title);
+            if (saved.HasValue)
+            {
+                _lyricsOffsetSeconds = saved.Value;
+            }
+        }
+    }
+
+    /// <summary>Persist the current offset for the playing song so it survives restarts.</summary>
+    public void RememberCurrentOffset()
+    {
+        if (PerSongOffsetEnabled && SongOffsets is not null && _currentPlayer is { } player)
+        {
+            SongOffsets.RememberOffset(player.Artist, player.Title, _lyricsOffsetSeconds);
+        }
     }
 
     private void ResetClockState()
@@ -269,6 +307,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
 
         _playbackClock.Reset();
         _sessionKey = null;
+        _currentPlayer = null;
         _lastRawPositionSeconds = null;
         _sessionChangedAt = _timeProvider.GetUtcNow();
         _resolutionDuration = 0;

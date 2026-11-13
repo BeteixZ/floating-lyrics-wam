@@ -30,6 +30,16 @@ public sealed class IniSettingsStoreTests : IDisposable
     }
 
     [Fact]
+    public void SaveLoad_PreservesPerSongOffsetToggle()
+    {
+        var path = Path.Combine(_root, "per-song-offset.ini");
+        var store = new IniSettingsStore(path);
+        Assert.True(new AppSettings().PerSongOffsetEnabled);
+        store.Save(new AppSettings { PerSongOffsetEnabled = false });
+        Assert.False(store.Load().PerSongOffsetEnabled);
+    }
+
+    [Fact]
     public void Load_LockedFileFallsBackToDefaults()
     {
         var path = Path.Combine(_root, "locked.ini");

@@ -56,6 +56,8 @@ public static class AppCompositionRoot
             catalogResolver)
         {
             ApplyNativeLyricOffset = settings.ApplyNativeLyricOffset,
+            PerSongOffsetEnabled = settings.PerSongOffsetEnabled,
+            SongOffsets = new SongOffsetStore(GetWritableDataPath("song-offsets.json")),
             AllowLowConfidenceLyrics = settings.AllowLowConfidenceLyrics,
             PreferWordTimings = settings.WordHighlightEnabled,
             PreferTranslations = settings.ShowTranslation,
