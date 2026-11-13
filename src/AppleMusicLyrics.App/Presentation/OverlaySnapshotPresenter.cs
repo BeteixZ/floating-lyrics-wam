@@ -18,6 +18,7 @@ public sealed record LyricsPresentation(
     bool Animate,
     LyricsLine? DisplayedLine = null,
     string? TranslationText = null,
+    string? RomanizationText = null,
     string DebugSummaryText = "");
 
 public static class OverlaySnapshotPresenter
@@ -103,6 +104,7 @@ public static class OverlaySnapshotPresenter
             Animate: snapshot.ActiveLyric.CurrentLine is not null,
             DisplayedLine: displayedLine,
             TranslationText: LyricsTranslationFilter.Clean(displayedLine?.Translation),
+            RomanizationText: displayedLine?.Romanization,
             DebugSummaryText: BuildDebugSummary(snapshot, source, wordLines, translatedLines, showTranslation, text));
     }
 

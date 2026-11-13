@@ -85,6 +85,7 @@ public sealed class TtmlLyricsParser
         var body = xml.Descendants().FirstOrDefault(element => element.Name.LocalName == "body");
         var paragraphs = body?.Descendants().Where(element => element.Name.LocalName == "p") ?? [];
         var translations = ReadTranslations(xml);
+        var (romanizationsByKey, romanizationsByBegin) = ReadRomanizations(paragraphs);
         var lines = new List<LyricsLine>();
 
         foreach (var paragraph in paragraphs)
@@ -95,21 +96,28 @@ public sealed class TtmlLyricsParser
 
             var fragments = new List<TextFragment>();
             var inlineTranslations = new List<string>();
+            var inlineRomanizations = new List<string>();
             var invalidWordTiming = false;
-            ReadInline(paragraph, null, begin.Value, end.Value, fragments, inlineTranslations, ref invalidWordTiming);
+            ReadInline(paragraph, null, begin.Value, end.Value, fragments, inlineTranslations, inlineRomanizations, ref invalidWordTiming);
             var (text, words) = NormalizeFragments(fragments);
             if (string.IsNullOrWhiteSpace(text)) continue;
 
             var key = AttributeValue(paragraph, "key") ?? paragraph.Attribute(XNamespace.Xml + "id")?.Value;
             var translation = key is not null && translations.TryGetValue(key, out var matched)
                 ? matched : inlineTranslations.FirstOrDefault();
+            var romanization = inlineRomanizations.Count > 0
+                ? CollapseWhitespace(string.Join(' ', inlineRomanizations))
+                : key is not null && romanizationsByKey.TryGetValue(key, out var keyedRomanization)
+                    ? keyedRomanization
+                    : romanizationsByBegin.TryGetValue(begin.Value, out var timedRomanization) ? timedRomanization : null;
             var line = new LyricsLine(
                 Begin: begin.Value,
                 End: end.Value,
                 Text: text,
                 SongPart: ResolveSongPart(paragraph),
                 Words: invalidWordTiming ? null : words,
-                Translation: translation);
+                Translation: translation,
+                Romanization: romanization);
             if (line.Words is not null && !LyricWordTiming.IsUsable(line)) line = line with { Words = null };
             lines.Add(line);
         }
@@ -146,11 +154,31 @@ public sealed class TtmlLyricsParser
             (char[]?)null, StringSplitOptions.RemoveEmptyEntries)
         .Contains(role, StringComparer.OrdinalIgnoreCase) == true;
 
+    private static bool IsRomanizationRole(XElement element) => HasRole(element, "x-roman") || HasRole(element, "x-romanization");
+
     private static bool IsHiddenAuxiliary(XElement element) => HasRole(element, "x-bg")
-        || HasRole(element, "x-roman") || HasRole(element, "x-romanization")
+        || IsRomanizationRole(element)
         || AttributeValue(element, "ruby") is "text" or "textContainer";
 
     private static bool IsAuxiliary(XElement element) => IsHiddenAuxiliary(element) || HasRole(element, "x-translation");
+
+    private static (Dictionary<string, string> ByKey, Dictionary<double, string> ByBegin) ReadRomanizations(
+        IEnumerable<XElement> paragraphs)
+    {
+        var byKey = new Dictionary<string, string>(StringComparer.Ordinal);
+        var byBegin = new Dictionary<double, string>();
+        foreach (var paragraph in paragraphs)
+        {
+            if (!IsRomanizationRole(paragraph)) continue;
+            var content = PlainContent(paragraph);
+            if (string.IsNullOrWhiteSpace(content)) continue;
+            var key = AttributeValue(paragraph, "key") ?? paragraph.Attribute(XNamespace.Xml + "id")?.Value;
+            if (key is not null) byKey.TryAdd(key, content);
+            var begin = TryParseTimeAttribute(paragraph, "begin");
+            if (begin.HasValue) byBegin.TryAdd(begin.Value, content);
+        }
+        return (byKey, byBegin);
+    }
 
     private static Dictionary<string, string> ReadTranslations(XDocument xml)
     {
@@ -190,7 +218,7 @@ public sealed class TtmlLyricsParser
     }
 
     private static void ReadInline(XElement parent, WordTiming? inherited, double lineBegin, double lineEnd,
-        List<TextFragment> fragments, List<string> translations, ref bool invalidTiming)
+        List<TextFragment> fragments, List<string> translations, List<string> romanizations, ref bool invalidTiming)
     {
         foreach (var node in parent.Nodes())
         {
@@ -200,6 +228,12 @@ public sealed class TtmlLyricsParser
                 continue;
             }
             if (node is not XElement child) continue;
+            if (IsRomanizationRole(child))
+            {
+                var romanization = PlainContent(child);
+                if (!string.IsNullOrWhiteSpace(romanization)) romanizations.Add(romanization);
+                continue;
+            }
             if (IsHiddenAuxiliary(child)) continue;
             if (HasRole(child, "x-translation"))
             {
@@ -227,7 +261,7 @@ public sealed class TtmlLyricsParser
                     timing = null;
                 }
             }
-            ReadInline(child, timing, lineBegin, lineEnd, fragments, translations, ref invalidTiming);
+            ReadInline(child, timing, lineBegin, lineEnd, fragments, translations, romanizations, ref invalidTiming);
         }
     }
 

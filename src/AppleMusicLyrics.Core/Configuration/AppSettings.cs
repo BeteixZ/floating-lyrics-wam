@@ -118,6 +118,9 @@ public sealed class AppSettings
 
     public bool ShowTranslation { get; set; } = true;
 
+    // Show the phonetic reading (pinyin/romaji) Apple ships as x-roman in the TTML, when present.
+    public bool ShowRomanization { get; set; }
+
     public bool SingleLineMode { get; set; }
 
     public bool TwoLineMode { get; set; } = true;
@@ -192,6 +195,7 @@ public sealed class AppSettings
             ShowNextLine = ShowNextLine,
             WordHighlightEnabled = WordHighlightEnabled,
             ShowTranslation = ShowTranslation,
+            ShowRomanization = ShowRomanization,
             SingleLineMode = SingleLineMode,
             TwoLineMode = TwoLineMode,
             ShowDebugPanel = ShowDebugPanel,

@@ -413,6 +413,7 @@ public partial class MainWindow : Window
         _displayedLyricLine = null;
         _displayedLyricDocument = null;
         SetTranslation(null);
+        SetRomanization(null);
         PreviousLyricText.Text = string.Empty;
         NextLyricText.Text = text.Text("Runtime.CheckCache");
         QueueDiagnosticsLayoutRefresh();
@@ -564,7 +565,8 @@ public partial class MainWindow : Window
             presentation.IsPlaying,
             presentation.Animate,
             presentation.DisplayedLine,
-            presentation.TranslationText);
+            presentation.TranslationText,
+            presentation.RomanizationText);
         _displayedLyricDocument = snapshot.Document;
         UpdateWordHighlight(snapshot);
         if (diagnosticsChanged) QueueDiagnosticsLayoutRefresh();
@@ -590,7 +592,14 @@ public partial class MainWindow : Window
             ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void BindCurrentLyric(string text, LyricsLine? line, string? translation, bool isPlaying)
+    private void SetRomanization(string? romanization)
+    {
+        RomanizationLyricText.Text = romanization ?? string.Empty;
+        RomanizationLyricText.Visibility = _settings.ShowRomanization && !string.IsNullOrWhiteSpace(romanization)
+            ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void BindCurrentLyric(string text, LyricsLine? line, string? translation, string? romanization, bool isPlaying)
     {
         _displayedLyricLine = line;
         _currentLyricText = text;
@@ -603,6 +612,7 @@ public partial class MainWindow : Window
         var upcoming = MediaColor.FromArgb((byte)Math.Round(sung.A * 0.35), sung.R, sung.G, sung.B);
         _karaokeTextController?.SetColors(sung, upcoming);
         SetTranslation(translation);
+        SetRomanization(romanization);
     }
 
     private void SetLyrics(
@@ -612,9 +622,10 @@ public partial class MainWindow : Window
         bool isPlaying,
         bool animate,
         LyricsLine? line,
-        string? translation)
+        string? translation,
+        string? romanization)
     {
-        var lyricKey = $"{previousText}|{currentText}|{nextText}|{isPlaying}|{line?.Begin:R}|{line?.End:R}|{translation}|{_settings.ShowTranslation}";
+        var lyricKey = $"{previousText}|{currentText}|{nextText}|{isPlaying}|{line?.Begin:R}|{line?.End:R}|{translation}|{_settings.ShowTranslation}|{romanization}|{_settings.ShowRomanization}";
         var isRepeat = string.Equals(_lastLyricAnimationKey, lyricKey, StringComparison.Ordinal);
 
         // Same content as last time (a poll tick with no change): the lyrics are already on
@@ -622,7 +633,7 @@ public partial class MainWindow : Window
         if (isRepeat)
         {
             // A replacement document can have different word timing despite identical text.
-            BindCurrentLyric(currentText, line, translation, isPlaying);
+            BindCurrentLyric(currentText, line, translation, romanization, isPlaying);
             return;
         }
 
@@ -632,7 +643,7 @@ public partial class MainWindow : Window
         if (!shouldAnimate)
         {
             ResetLyricVisualState();
-            ApplyLyricContent(previousText, currentText, nextText, isPlaying, line, translation);
+            ApplyLyricContent(previousText, currentText, nextText, isPlaying, line, translation, romanization);
             RefreshLyricLayout();
             Dispatcher.BeginInvoke(() => StartHeightAnimation(), System.Windows.Threading.DispatcherPriority.Loaded);
             return;
@@ -642,7 +653,7 @@ public partial class MainWindow : Window
         // old lyrics fade out while the new lyrics fade in from transparent and move upward.
         // This work now runs after the render callback, so it no longer blocks the boundary frame.
         SnapshotLyricGhost();
-        ApplyLyricContent(previousText, currentText, nextText, isPlaying, line, translation);
+        ApplyLyricContent(previousText, currentText, nextText, isPlaying, line, translation, romanization);
         RefreshLyricLayout();
 
         var easing = new CubicEase { EasingMode = EasingMode.EaseOut };
@@ -668,7 +679,7 @@ public partial class MainWindow : Window
 
     private (bool showPrevious, bool showNext) ApplyLyricContent(
         string? previousText, string currentText, string? nextText, bool isPlaying,
-        LyricsLine? line, string? translation)
+        LyricsLine? line, string? translation, string? romanization)
     {
         var showPrevious = _settings.ShowPreviousLine && !string.IsNullOrWhiteSpace(previousText);
         var showNext = _settings.ShowNextLine && !string.IsNullOrWhiteSpace(nextText);
@@ -677,7 +688,7 @@ public partial class MainWindow : Window
         _currentNextText = nextText;
 
         PreviousLyricText.Text = showPrevious ? previousText! : string.Empty;
-        BindCurrentLyric(currentText, line, translation, isPlaying);
+        BindCurrentLyric(currentText, line, translation, romanization, isPlaying);
         NextLyricText.Text = showNext ? nextText! : string.Empty;
 
         CurrentLyricText.Foreground = CreateBrush(isPlaying ? _settings.CurrentLineColor : _settings.PausedLineColor, Colors.White);
@@ -848,6 +859,12 @@ public partial class MainWindow : Window
         contentHeight += MeasureText(_currentLyricText, CurrentLyricText, CurrentLyricText.FontSize,
             Math.Min(contentWidth, CurrentLyricText.MaxWidth), _settings.SingleLineMode ? 1 : int.MaxValue).Height
             + CurrentLyricText.Margin.Top + CurrentLyricText.Margin.Bottom;
+        if (RomanizationLyricText.Visibility == Visibility.Visible)
+        {
+            contentHeight += MeasureText(RomanizationLyricText.Text, RomanizationLyricText,
+                RomanizationLyricText.FontSize, Math.Min(contentWidth, RomanizationLyricText.MaxWidth), 2).Height
+                + RomanizationLyricText.Margin.Top + RomanizationLyricText.Margin.Bottom;
+        }
         if (TranslationLyricText.Visibility == Visibility.Visible)
         {
             contentHeight += MeasureText(TranslationLyricText.Text, TranslationLyricText,
@@ -1153,6 +1170,9 @@ public partial class MainWindow : Window
         TranslationLyricText.FontSize = TranslationTypography.GetFontSize(_settings.TranslationFontSize);
         TranslationLyricText.LineHeight = TranslationLyricText.FontSize * 1.35;
         TranslationLyricText.MaxHeight = TranslationLyricText.LineHeight * 2;
+        RomanizationLyricText.FontSize = TranslationLyricText.FontSize;
+        RomanizationLyricText.LineHeight = TranslationLyricText.LineHeight;
+        RomanizationLyricText.MaxHeight = TranslationLyricText.MaxHeight;
     }
 
     private void ApplyRestoredPlacement()
@@ -1315,7 +1335,11 @@ public partial class MainWindow : Window
         TranslationLyricText.TextWrapping = TextWrapping.Wrap;
         TranslationLyricText.Foreground = CreateBrush(_settings.ContextLineColor, Colors.White);
         TranslationLyricText.Opacity = 0.8;
-        BindCurrentLyric(_currentLyricText, _displayedLyricLine, _displayedLyricLine?.Translation, _lastFramePlaying);
+        RomanizationLyricText.FontFamily = TranslationLyricText.FontFamily;
+        RomanizationLyricText.TextWrapping = TextWrapping.Wrap;
+        RomanizationLyricText.Foreground = CreateBrush(_settings.ContextLineColor, Colors.White);
+        RomanizationLyricText.Opacity = 0.8;
+        BindCurrentLyric(_currentLyricText, _displayedLyricLine, _displayedLyricLine?.Translation, _displayedLyricLine?.Romanization, _lastFramePlaying);
         SubtitleText.FontFamily = fontFamily;
 
         CurrentLyricGlowEffect.Color = ParseColorOrFallback(_settings.GlowColor, Colors.White);
@@ -1831,6 +1855,10 @@ public partial class MainWindow : Window
         // Shape each text once; the width search below only re-wraps the cached glyphs.
         var pixelsPerDip = VisualTreeHelper.GetDpi(this).PixelsPerDip;
         var current = CreateLyricTextMeasurement(_currentLyricText, CurrentLyricText, currentFontSize, pixelsPerDip);
+        var romanization = RomanizationLyricText.Visibility == Visibility.Visible
+            ? CreateLyricTextMeasurement(RomanizationLyricText.Text, RomanizationLyricText,
+                TranslationTypography.GetFontSize(_settings.TranslationFontSize), pixelsPerDip)
+            : null;
         var translation = TranslationLyricText.Visibility == Visibility.Visible
             ? CreateLyricTextMeasurement(TranslationLyricText.Text, TranslationLyricText,
                 TranslationTypography.GetFontSize(_settings.TranslationFontSize), pixelsPerDip)
@@ -1843,9 +1871,10 @@ public partial class MainWindow : Window
             : null;
 
         var desiredContentWidth = Math.Max(current.NaturalWidth,
-            Math.Max(translation?.NaturalWidth ?? 0, Math.Max(previous?.NaturalWidth ?? 0, next?.NaturalWidth ?? 0))) + 24;
+            Math.Max(romanization?.NaturalWidth ?? 0,
+                Math.Max(translation?.NaturalWidth ?? 0, Math.Max(previous?.NaturalWidth ?? 0, next?.NaturalWidth ?? 0)))) + 24;
         var contentWidth = Math.Clamp(desiredContentWidth, minContentWidth, maxContentWidth);
-        var contentHeight = MeasureContentHeight(contentWidth, current, translation, previous, next);
+        var contentHeight = MeasureContentHeight(contentWidth, current, romanization, translation, previous, next);
 
         if (contentHeight > maxContentHeight)
         {
@@ -1856,7 +1885,7 @@ public partial class MainWindow : Window
             for (var iteration = 0; iteration < 12; iteration++)
             {
                 var mid = (low + high) / 2.0;
-                var midHeight = MeasureContentHeight(mid, current, translation, previous, next);
+                var midHeight = MeasureContentHeight(mid, current, romanization, translation, previous, next);
                 if (midHeight <= maxContentHeight)
                 {
                     bestWidth = mid;
@@ -1869,7 +1898,7 @@ public partial class MainWindow : Window
             }
 
             contentWidth = bestWidth;
-            contentHeight = MeasureContentHeight(contentWidth, current, translation, previous, next);
+            contentHeight = MeasureContentHeight(contentWidth, current, romanization, translation, previous, next);
         }
 
         return new System.Windows.Size(
@@ -1878,10 +1907,15 @@ public partial class MainWindow : Window
     }
 
     private double MeasureContentHeight(double contentWidth, LyricTextMeasurement current,
-        LyricTextMeasurement? translation, LyricTextMeasurement? previous, LyricTextMeasurement? next)
+        LyricTextMeasurement? romanization, LyricTextMeasurement? translation,
+        LyricTextMeasurement? previous, LyricTextMeasurement? next)
     {
         var totalHeight = current.MeasureHeight(contentWidth,
             _settings.SingleLineMode ? 1 : (_settings.PureMode ? 4 : 2));
+        if (romanization is not null)
+        {
+            totalHeight += romanization.MeasureHeight(contentWidth, 2) + 4;
+        }
         if (translation is not null)
         {
             totalHeight += translation.MeasureHeight(contentWidth, 2) + 4;
@@ -1991,6 +2025,7 @@ public partial class MainWindow : Window
         PreviousLyricText.MaxWidth = contextMaxWidth;
         NextLyricText.MaxWidth = contextMaxWidth;
         TranslationLyricText.MaxWidth = currentMaxWidth;
+        RomanizationLyricText.MaxWidth = currentMaxWidth;
         StatusText.MaxWidth = OverlayDiagnosticsLayout.GetStatusMaxWidth(windowWidth - totalHorizontalChrome);
     }
 
@@ -2108,6 +2143,7 @@ public partial class MainWindow : Window
         target.ShowNextLine = copy.ShowNextLine;
         target.WordHighlightEnabled = copy.WordHighlightEnabled;
         target.ShowTranslation = copy.ShowTranslation;
+        target.ShowRomanization = copy.ShowRomanization;
         target.SingleLineMode = copy.SingleLineMode;
         target.TwoLineMode = copy.TwoLineMode;
         target.ShowDebugPanel = copy.ShowDebugPanel;

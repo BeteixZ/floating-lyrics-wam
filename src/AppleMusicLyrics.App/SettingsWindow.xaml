@@ -527,6 +527,7 @@
                   <TextBlock Style="{StaticResource SectionTitleStyle}" Text="{loc:Loc Settings.Section.LyricFeatures}" />
                   <CheckBox Style="{StaticResource ToggleStyle}" Content="{loc:Loc Settings.Toggle.WordHighlight}" ToolTip="{loc:Loc Settings.ToolTip.WordTiming}" IsChecked="{Binding Settings.WordHighlightEnabled, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" />
                   <CheckBox Style="{StaticResource ToggleStyle}" Content="{loc:Loc Settings.Toggle.Translation}" ToolTip="{loc:Loc Settings.ToolTip.Translation}" IsChecked="{Binding Settings.ShowTranslation, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" />
+                  <CheckBox Style="{StaticResource ToggleStyle}" Content="{loc:Loc Settings.Toggle.Romanization}" ToolTip="{loc:Loc Settings.ToolTip.Romanization}" IsChecked="{Binding Settings.ShowRomanization, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" />
                 </StackPanel>
               </Border>
               <Border Style="{StaticResource CardStyle}">

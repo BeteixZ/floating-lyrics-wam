@@ -212,8 +212,40 @@ public sealed class TtmlLyricsParserTests
             """)));
         Assert.Equal("Hello world", line.Text);
         Assert.Equal("你好 世界", line.Translation);
+        Assert.Equal("hallo", line.Romanization);
         Assert.True(LyricWordTiming.IsUsable(line));
         Assert.Equal(2, line.Words!.Count);
+    }
+
+    [Fact]
+    public void ParseTtml_ReadsStandaloneRomanizationParagraphByKey()
+    {
+        var lines = new TtmlLyricsParser().ParseTtml(Wrap("""
+            <p begin="1" end="2" itunes:key="L1">你好世界</p><p begin="1" end="2" itunes:key="L1" ttm:role="x-roman">ni hao shi jie</p><p begin="2" end="3" itunes:key="L2">第二句</p>
+            """));
+        Assert.Equal(2, lines.Count);
+        Assert.Equal("ni hao shi jie", lines[0].Romanization);
+        Assert.Equal("你好世界", lines[0].Text);
+        Assert.Null(lines[1].Romanization);
+    }
+
+    [Fact]
+    public void ParseTtml_JoinsMultipleInlineRomanizationSpans()
+    {
+        var line = Assert.Single(new TtmlLyricsParser().ParseTtml(Wrap("""
+            <p begin="1" end="2"><span begin="1" end="1.5">東京</span><span begin="1.5" end="2">タワー</span><span ttm:role="x-roman">toukyou</span><span ttm:role="x-roman">tawaa</span></p>
+            """)));
+        Assert.Equal("東京タワー", line.Text);
+        Assert.Equal("toukyou tawaa", line.Romanization);
+    }
+
+    [Fact]
+    public void ParseTtml_WithoutRomanization_ReturnsNull()
+    {
+        var line = Assert.Single(new TtmlLyricsParser().ParseTtml(Wrap("""
+            <p begin="1" end="2">Plain line</p>
+            """)));
+        Assert.Null(line.Romanization);
     }
 
     [Fact]

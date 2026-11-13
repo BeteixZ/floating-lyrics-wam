@@ -6,4 +6,5 @@ public sealed record LyricsLine(
     string Text,
     string? SongPart = null,
     IReadOnlyList<LyricWord>? Words = null,
-    string? Translation = null);
+    string? Translation = null,
+    string? Romanization = null);

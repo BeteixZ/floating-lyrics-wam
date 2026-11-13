@@ -176,6 +176,16 @@
                                 Opacity="0.38" />
             </TextBlock.Effect>
           </TextBlock>
+          <TextBlock x:Name="RomanizationLyricText"
+                     Margin="0,0,0,4"
+                     HorizontalAlignment="Center"
+                     TextAlignment="Center"
+                     Foreground="#C8FFFFFF"
+                     FontSize="21"
+                     TextWrapping="Wrap"
+                     TextTrimming="CharacterEllipsis"
+                     LineStackingStrategy="BlockLineHeight"
+                     Visibility="Collapsed" />
           <TextBlock x:Name="TranslationLyricText"
                      Margin="0,0,0,4"
                      HorizontalAlignment="Center"
