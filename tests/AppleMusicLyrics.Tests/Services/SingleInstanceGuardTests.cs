@@ -36,8 +36,15 @@ public sealed class SingleInstanceGuardTests
         holder.Start();
         holder.Join();
 
-        using var recovered = SingleInstanceGuard.TryAcquire(name);
-        Assert.NotNull(recovered);
-        recovered!.ReleaseMutex();
+        // Join returns when the managed thread finishes, which can be before Windows has torn the
+        // OS thread down and marked its mutex abandoned. Until then the mutex is still owned, so
+        // allow that teardown to complete instead of racing it with a single zero-wait attempt.
+        Mutex? recovered = null;
+        Assert.True(SpinWait.SpinUntil(() => (recovered = SingleInstanceGuard.TryAcquire(name)) is not null,
+            TimeSpan.FromSeconds(5)), "The abandoned mutex was never recovered.");
+        using (recovered)
+        {
+            recovered!.ReleaseMutex();
+        }
     }
 }
