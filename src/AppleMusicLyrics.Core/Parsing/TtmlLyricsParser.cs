@@ -187,14 +187,14 @@ public sealed class TtmlLyricsParser
         // keyed by the paragraph's itunes:key. Keep the first nonempty locale in file order;
         // the present model holds one translation, not an arbitrary list of target languages.
         foreach (var metadata in xml.Descendants().Where(element => element.Name.LocalName == "iTunesMetadata"))
-        foreach (var container in metadata.Descendants().Where(element => element.Name.LocalName == "translations"))
-        foreach (var translation in container.Elements().Where(element => element.Name.LocalName == "translation"))
-        foreach (var text in translation.Descendants().Where(element => element.Name.LocalName == "text"))
-        {
-            var key = text.Attribute("for")?.Value;
-            var value = PlainContent(text);
-            if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value)) result.TryAdd(key, value);
-        }
+            foreach (var container in metadata.Descendants().Where(element => element.Name.LocalName == "translations"))
+                foreach (var translation in container.Elements().Where(element => element.Name.LocalName == "translation"))
+                    foreach (var text in translation.Descendants().Where(element => element.Name.LocalName == "text"))
+                    {
+                        var key = text.Attribute("for")?.Value;
+                        var value = PlainContent(text);
+                        if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value)) result.TryAdd(key, value);
+                    }
         return result;
     }
 
@@ -288,22 +288,22 @@ public sealed class TtmlLyricsParser
             currentWord.Text.Append(value);
         }
         foreach (var fragment in fragments)
-        foreach (var character in fragment.Text)
-        {
-            if (char.IsWhiteSpace(character))
+            foreach (var character in fragment.Text)
             {
-                // The surviving normalized separator keeps its source ownership. In particular,
-                // a raw text node between spans must not inherit either neighbour's word clock.
-                if (!whitespace) whitespaceTiming = fragment.Timing;
-                whitespace = true;
-                continue;
+                if (char.IsWhiteSpace(character))
+                {
+                    // The surviving normalized separator keeps its source ownership. In particular,
+                    // a raw text node between spans must not inherit either neighbour's word clock.
+                    if (!whitespace) whitespaceTiming = fragment.Timing;
+                    whitespace = true;
+                    continue;
+                }
+                if (whitespace && display.Length > 0)
+                    Append(' ', whitespaceTiming);
+                Append(character, fragment.Timing);
+                whitespace = false;
+                whitespaceTiming = null;
             }
-            if (whitespace && display.Length > 0)
-                Append(' ', whitespaceTiming);
-            Append(character, fragment.Timing);
-            whitespace = false;
-            whitespaceTiming = null;
-        }
         var text = display.ToString();
         var timedWords = words.Where(word => word.Text.Length > 0)
             .Select(word => new LyricWord(word.Timing.Begin, word.Timing.End, word.Text.ToString())).ToArray();

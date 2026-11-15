@@ -131,15 +131,25 @@ public sealed class NetEaseArtistAliasTests
                         artists = new[] { new { id = 16405, name = "浜崎あゆみ" } }, album = new { name = "Duty" } },
                 };
                 if (IncludeExactCandidate)
-                    songs.Add(new { id = 2, name = "Duty", duration = 314010,
-                        artists = new[] { new { id = 1, name = "Ayumi Hamasaki" } }, album = new { name = "Duty" } });
+                    songs.Add(new
+                    {
+                        id = 2,
+                        name = "Duty",
+                        duration = 314010,
+                        artists = new[] { new { id = 1, name = "Ayumi Hamasaki" } },
+                        album = new { name = "Duty" }
+                    });
                 json = JsonSerializer.Serialize(new { code = 200, result = new { songs } });
             }
             else
             {
                 LyricsRequests++;
-                json = LyricsResponse ?? JsonSerializer.Serialize(new { code = 200,
-                    lrc = new { lyric = "[00:01.00]Original" }, tlyric = new { lyric = "[00:01.00]译文" } });
+                json = LyricsResponse ?? JsonSerializer.Serialize(new
+                {
+                    code = 200,
+                    lrc = new { lyric = "[00:01.00]Original" },
+                    tlyric = new { lyric = "[00:01.00]译文" }
+                });
             }
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json) };
         }

@@ -133,7 +133,9 @@ public sealed class NativeLyricsSeedMemoTests
             Runtime = new LyricsRuntimeService(Cache, new PlayerProvider(), new LyricsSynchronizer(),
                 new PlaybackClock(time), timeProvider: time)
             {
-                ExternalLyricsProviders = [External], PreferWordTimings = true, PreferTranslations = true,
+                ExternalLyricsProviders = [External],
+                PreferWordTimings = true,
+                PreferTranslations = true,
             };
         }
 

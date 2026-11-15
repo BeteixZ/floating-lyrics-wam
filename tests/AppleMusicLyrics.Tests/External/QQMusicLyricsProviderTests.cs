@@ -312,8 +312,14 @@ public sealed class QQMusicLyricsProviderTests
     [InlineData("Album", 23.0)]
     public async Task FetchAsync_DoesNotInventAlbumVersionEvidenceFromPlayerOrLyricTimeline(string? album, double? duration)
     {
-        var candidate = JsonSerializer.Serialize(new { id = 42, name = "Example",
-            singer = new[] { new { name = "Singer" } }, album = new { name = album }, interval = duration });
+        var candidate = JsonSerializer.Serialize(new
+        {
+            id = 42,
+            name = "Example",
+            singer = new[] { new { name = "Singer" } },
+            album = new { name = album },
+            interval = duration
+        });
         var handler = new RoutedHandler((request, _) => Task.FromResult(
             request.Uri.AbsolutePath.Contains("lyric_download", StringComparison.Ordinal)
                 ? XmlResponse("[ti:Example (Album Version)]\n[ar:Singer]\n[1000,19000]Wrong alias evidence(1000,19000)")

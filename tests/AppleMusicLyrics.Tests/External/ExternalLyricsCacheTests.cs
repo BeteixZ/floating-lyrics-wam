@@ -189,13 +189,19 @@ public sealed class ExternalLyricsCacheTests : IDisposable
         Directory.CreateDirectory(_root);
         var legacyKey = System.Text.Json.JsonSerializer.Serialize(new
         {
-            Source = "LRCLIB", Title = "syntheticsong", Artist = "syntheticartist", Album = "syntheticalbum", Duration = "180",
+            Source = "LRCLIB",
+            Title = "syntheticsong",
+            Artist = "syntheticartist",
+            Album = "syntheticalbum",
+            Duration = "180",
         });
         var legacyPath = Path.Combine(_root, "v1-" + Convert.ToHexString(
             System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(legacyKey))) + ".json");
         File.WriteAllText(legacyPath, System.Text.Json.JsonSerializer.Serialize(new
         {
-            Version = 1, Key = legacyKey, Document = RichDocument() with { LyricsId = "legacy-unverified" },
+            Version = 1,
+            Key = legacyKey,
+            Document = RichDocument() with { LyricsId = "legacy-unverified" },
         }));
 
         Assert.False(cache.TryGet("LRCLIB", Player, out _));

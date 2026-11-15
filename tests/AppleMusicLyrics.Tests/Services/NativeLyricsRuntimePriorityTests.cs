@@ -216,7 +216,9 @@ public sealed class NativeLyricsRuntimePriorityTests
         time ??= new ManualTime();
         return new LyricsRuntimeService(cache, new Player(), new LyricsSynchronizer(), new PlaybackClock(time), timeProvider: time)
         {
-            ExternalLyricsProviders = providers, PreferWordTimings = true, PreferTranslations = true,
+            ExternalLyricsProviders = providers,
+            PreferWordTimings = true,
+            PreferTranslations = true,
         };
     }
 
