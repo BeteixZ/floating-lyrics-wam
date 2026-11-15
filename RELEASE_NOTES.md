@@ -1,9 +1,16 @@
 # Release Notes
 
-## Unreleased - Timeline alignment
+## v0.7.0 - Accurate timing, Apple-first lyrics, and per-song offsets
 
 - Fixes lyrics running late and drifting. Apple Music now publishes whole-second positions on a timer slightly slower than one second, which made the previous estimate lag by 0.2–1.0s in a repeating cycle of about 45 seconds. Playback position now uses each report's publish time and is accurate to a few milliseconds once that cycle has been observed. **Lyrics lead time values tuned on earlier versions will now show lyrics about 0.6s earlier and should be re-calibrated.**
-- Apple Music's own lyrics remain the timeline. QQ Music and NetEase word timing and translations now attach to many more of Apple's lines: lines are matched by text and start time rather than also requiring their end times to agree, a consistently shifted source timeline is corrected first, and imported syllables start at Apple's line onset.
+- Keeps Apple Music's own lyrics as the timeline whenever they are cached, including Apple's word timing and translations from the current syllable-lyrics format. QQ Music and NetEase only fill features Apple lacks, never replacing its text or timing, and now attach to many more of Apple's lines: lines are matched by text and start time, a consistently shifted source timeline is corrected first, and imported syllables start at Apple's line onset.
+- Removes credit, placeholder, and copyright rows (such as "Lyrics by: X", "作词：X", "//", and translation copyright notices) from translations.
+- Adds optional romanization from Apple Music, shown between the original line and the translation.
+- Remembers the lyric offset for each song across restarts.
+- Recovers from a failed media-session request, an unreadable settings file, or an instance that crashed while holding the single-instance lock.
+- Improves matching with LRCLIB artist checks, regional catalog id verification, and more robust QQ Music and NetEase lookups; speeds up font fitting and Pure Mode window sizing.
+
+Requirements remain Windows 10 version 19041 or later and the x64 .NET 10 Desktop Runtime. Exit the previous tray instance before launching the new executable.
 
 ---
 
