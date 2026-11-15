@@ -1,5 +1,12 @@
 # Release Notes
 
+## Unreleased - Timeline alignment
+
+- Fixes lyrics running late and drifting. Apple Music now publishes whole-second positions on a timer slightly slower than one second, which made the previous estimate lag by 0.2–1.0s in a repeating cycle of about 45 seconds. Playback position now uses each report's publish time and is accurate to a few milliseconds once that cycle has been observed. **Lyrics lead time values tuned on earlier versions will now show lyrics about 0.6s earlier and should be re-calibrated.**
+- Apple Music's own lyrics remain the timeline. QQ Music and NetEase word timing and translations now attach to many more of Apple's lines: lines are matched by text and start time rather than also requiring their end times to agree, a consistently shifted source timeline is corrected first, and imported syllables start at Apple's line onset.
+
+---
+
 ## v0.6.0 - Word highlighting, translations, and multilingual settings
 
 - Adds QQ Music and NetEase Cloud Music lyric sources based on the maintained LyricsKit fork, with QRC/YRC word timing and source-provided translations.

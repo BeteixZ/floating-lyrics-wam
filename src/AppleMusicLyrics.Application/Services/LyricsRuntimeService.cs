@@ -270,7 +270,7 @@ public sealed class LyricsRuntimeService : IAsyncDisposable
             ApplyPerSongOffset();
         }
 
-        _playbackClock.Update(player.Position, player.Playing);
+        _playbackClock.Update(player.Position, player.Playing, player.PositionAgeSeconds);
         _sessionKey = currentSessionKey;
         _lastRawPositionSeconds = player.Position;
         return sessionChanged;

@@ -126,11 +126,74 @@ public sealed class NativeLyricsFeatureMergerTests
         LyricWord[] words = kind switch
         {
             "omitted" => [new(0, 4, "hello")],
-            "outside" => [new(0, 2, "hello"), new(2, 5, "world")],
+            "outside" => [new(0, 2, "hello"), new(4.2, 5, "world")],
             _ => [new(2, 4, "hello"), new(0, 2, "world")],
         };
         var source = Document("QQ", [new LyricsLine(0, 4, "hello world", Words: words)]);
         Assert.Same(native, NativeLyricsFeatureMerger.MergeMissingFeatures(native, source, true, false));
+    }
+
+    [Fact]
+    public void Merge_CutsASyllableStillSoundingWhenTheNativeLineEnds()
+    {
+        var native = Document("AP_123", [new LyricsLine(0, 4, "hello world")]);
+        var source = Document("QQ", [new LyricsLine(0, 5, "hello world",
+            Words: [new(0, 2, "hello "), new(2, 5, "world")])]);
+        var merged = NativeLyricsFeatureMerger.MergeMissingFeatures(native, source, true, false);
+        Assert.Collection(merged.Lines[0].Words!,
+            word => Assert.Equal(new LyricWord(0, 2, "hello"), word),
+            word => Assert.Equal(new LyricWord(2, 4, "world"), word));
+    }
+
+    [Fact]
+    public void Merge_AnchorsImportedSyllablesToTheNativeOnset()
+    {
+        var native = Document("AP_123", [new LyricsLine(10, 14, "hello world")]);
+        var source = Document("QQ", [new LyricsLine(10.3, 14, "hello world",
+            Words: [new(10.3, 12, "hello "), new(12, 13.8, "world")])]);
+        var merged = NativeLyricsFeatureMerger.MergeMissingFeatures(native, source, true, false);
+        Assert.Collection(merged.Lines[0].Words!,
+            word => Assert.Equal((10d, 11.7d, "hello"), (word.Begin, Math.Round(word.End, 6), word.Text)),
+            word => Assert.Equal((11.7d, 13.5d, "world"), (Math.Round(word.Begin, 6), Math.Round(word.End, 6), word.Text)));
+    }
+
+    [Fact]
+    public void Merge_PairsByOnsetWhenTheSourceHoldsTheLineLonger()
+    {
+        // LRC sources end each line where the next one begins.
+        var native = Document("AP_123", [new LyricsLine(0, 2.5, "hello world"), new LyricsLine(6, 8, "goodbye")]);
+        var source = Document("NE", [new LyricsLine(.2, 6, "hello world", Translation: "你好世界"),
+            new LyricsLine(6.1, 12, "goodbye", Translation: "再见")]);
+        var merged = NativeLyricsFeatureMerger.MergeMissingFeatures(native, source, false, true);
+        Assert.Equal(["你好世界", "再见"], merged.Lines.Select(line => line.Translation));
+    }
+
+    [Theory]
+    [InlineData(1.2, true)]
+    [InlineData(-2.5, true)]
+    [InlineData(3.5, false)]
+    public void Merge_ReregistersAConsistentlyShiftedSource(double shift, bool accepted)
+    {
+        string[] texts = ["one line", "two line", "three line", "four line"];
+        var native = Document("AP_123", texts.Select((text, index) => new LyricsLine(10 * index + 5, 10 * index + 9, text)).ToArray());
+        var source = Document("QQ", texts.Select((text, index) => new LyricsLine(10 * index + 5 + shift, 10 * index + 9 + shift, text,
+            Words: [new(10 * index + 5 + shift, 10 * index + 9 + shift, text)], Translation: "译" + index)).ToArray());
+        var merged = NativeLyricsFeatureMerger.MergeMissingFeatures(native, source, true, true);
+        Assert.All(merged.Lines, line => Assert.Equal(accepted, line.Translation is not null));
+        if (accepted)
+            Assert.All(merged.Lines, line => Assert.Equal(line.Begin, line.Words![0].Begin, 6));
+    }
+
+    [Fact]
+    public void Merge_DoesNotReregisterWithoutAConsensusShift()
+    {
+        string[] texts = ["one line", "two line", "three line", "four line"];
+        double[] shifts = [0, 1.5, -1.5, 2.5];
+        var native = Document("AP_123", texts.Select((text, index) => new LyricsLine(10 * index + 5, 10 * index + 9, text)).ToArray());
+        var source = Document("QQ", texts.Select((text, index) => new LyricsLine(10 * index + 5 + shifts[index],
+            10 * index + 9 + shifts[index], text, Translation: "译" + index)).ToArray());
+        var merged = NativeLyricsFeatureMerger.MergeMissingFeatures(native, source, false, true);
+        Assert.Equal(["译0", null, null, null], merged.Lines.Select(line => line.Translation));
     }
 
     [Fact]

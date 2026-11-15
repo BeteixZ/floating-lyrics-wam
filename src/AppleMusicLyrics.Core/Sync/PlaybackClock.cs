@@ -3,27 +3,42 @@ namespace AppleMusicLyrics.Core.Sync;
 /// <summary>
 /// Turns Apple Music's coarse position reports into a smooth playback estimate.
 ///
-/// The reported position steps by exactly 1.000s, but the instant each step is published jitters by
-/// roughly ±150ms while the long-run rate stays exactly real time (measured on Apple Music for
-/// Windows: eleven consecutive steps spanning 11000ms, individual gaps ranging 814–1106ms). So the
-/// phase — how far past the reported whole second playback really is — is not something to guess at,
-/// it is something to measure: every step contributes one sample of
-/// <c>reported position − playback time elapsed</c>, and the median of the recent samples is the
-/// phase. Single samples scatter with a standard deviation of 0.083s, so a median over ~8 of them
-/// pins it to about ±0.03s.
+/// Apple Music for Windows (measured November 2026) publishes <c>floor(true position)</c> from a
+/// free-running timer that fires about every 1.022s, not at the instant a whole second elapses:
+/// 87 consecutive reports fit a single real-time timeline inside a 19ms band, and the report
+/// skips a value (+2) roughly every 45s as the timer's phase drifts past a full second. The
+/// distance between a report and the true position therefore sweeps the whole 0..1s range in a
+/// sawtooth. Any average of <c>reported − elapsed</c> (the previous median estimator) lags by about
+/// half a second on average and swings by most of a second on that 45s cycle, which no constant
+/// lyric offset can correct.
+///
+/// Each observed report instead bounds the playback timeline exactly. A report of <c>n</c> that was
+/// published at elapsed time <c>e</c> means <c>n ≤ true(e) &lt; n + 1</c>, so the constant
+/// <c>true − elapsed</c> lies in <c>[n − e, n + 1 − e)</c>. The publish instant is taken from SMTC's
+/// <c>LastUpdatedTime</c> when available, otherwise it is only known to lie between the previous
+/// and the current poll, which widens the bound by the poll interval. Intersecting the recent
+/// bounds narrows to a few milliseconds once the timer's drifting phase has swept the quantum, and
+/// the estimate is the centre of that intersection. A bound that contradicts older ones evicts
+/// them, so a small seek or a stray report cannot hold the estimate on a stale timeline.
 ///
 /// What no amount of sampling can reveal is how far SMTC's reports lag the audio actually coming out
 /// of the speakers. That constant is the user-facing lyrics offset, and it is applied elsewhere.
 /// </summary>
 public sealed class PlaybackClock
 {
-    private const int MaxSamples = 12;
+    // About two minutes of reports: long enough for a publish phase drifting by as little as 1%
+    // per report to sweep a whole quantum. The measured 2.2% drift needs about 45 reports.
+    private const int MaxBounds = 128;
 
-    // Before any step has been observed the reported position is the floor of the true one, so the
-    // true phase is somewhere in [0, 1) with an expected value of a half step. Measured phase right
-    // after a fresh reading came out at 0.43, so this prior starts close and is replaced by real
-    // samples within a second or two.
+    // Before a timed report has been seen the true position is somewhere in [reported, reported + 1),
+    // so the expected phase is half a step. It is replaced as soon as real bounds exist.
     private const double InitialPhasePrior = 0.5;
+
+    // A playing report older than this is not a fresh publish; fall back to poll-bounded timing.
+    private const double MaxPublishAgeSeconds = 2.0;
+
+    // Allowance for timestamp rounding and audio/system clock drift when intersecting bounds.
+    private const double BoundSlackSeconds = 0.004;
 
     // A step landing further than this from the running estimate cannot be ordinary jitter: it is a
     // seek, a track change, or a stall. Start over rather than averaging it in.
@@ -38,13 +53,14 @@ public sealed class PlaybackClock
     private const double MaxExtrapolationSeconds = 3.0;
 
     private readonly TimeProvider _timeProvider;
-    private readonly double[] _samples = new double[MaxSamples];
+    private readonly (double Low, double High)[] _bounds = new (double, double)[MaxBounds];
     private long _startTimestamp;
-    private int _sampleCount;
-    private int _sampleCursor;
+    private int _boundCount;
+    private int _boundStart;
     private double _offset;
     private double _targetOffset;
     private double _playbackElapsed;
+    private double _previousPollElapsed;
     private double _lastObservedSeconds;
     private double _lastRawPosition;
     private double _lastRawChangeElapsed;
@@ -61,11 +77,12 @@ public sealed class PlaybackClock
     public void Reset()
     {
         _startTimestamp = _timeProvider.GetTimestamp();
-        _sampleCount = 0;
-        _sampleCursor = 0;
+        _boundCount = 0;
+        _boundStart = 0;
         _offset = 0;
         _targetOffset = 0;
         _playbackElapsed = 0;
+        _previousPollElapsed = 0;
         _lastObservedSeconds = 0;
         _lastRawPosition = 0;
         _lastRawChangeElapsed = 0;
@@ -74,7 +91,13 @@ public sealed class PlaybackClock
         _initialized = false;
     }
 
-    public void Update(double rawPosition, bool playing)
+    /// <param name="rawPosition">The position the player last reported.</param>
+    /// <param name="playing">Whether the player reports that it is playing.</param>
+    /// <param name="rawPositionAgeSeconds">
+    /// How long ago the player published <paramref name="rawPosition"/> (SMTC's
+    /// <c>LastUpdatedTime</c>), when known. Without it the publish instant is bounded by the polls.
+    /// </param>
+    public void Update(double rawPosition, bool playing, double? rawPositionAgeSeconds = null)
     {
         var now = CurrentSeconds;
         var wallDelta = Math.Max(0, now - _lastObservedSeconds);
@@ -86,11 +109,13 @@ public sealed class PlaybackClock
         var wasStalled = _rawStalled || (_playing && wallDelta >= remaining);
         _playbackElapsed += advancingDelta;
         _lastObservedSeconds = now;
+        var age = rawPositionAgeSeconds is double value && value is >= 0 and <= MaxPublishAgeSeconds ? value : (double?)null;
 
         if (!_initialized)
         {
-            Reseed(rawPosition, playing);
+            Reseed(rawPosition, playing, age);
             _playing = playing;
+            _previousPollElapsed = _playbackElapsed;
             _initialized = true;
             return;
         }
@@ -102,12 +127,22 @@ public sealed class PlaybackClock
             if (!_playing || !playing || wasStalled || Math.Abs(rawPosition - predicted) > DiscontinuitySeconds)
             {
                 // A paused seek or the first new edge after a stall is authoritative, even if
-                // the jump is small. Old phase samples no longer describe this playback epoch.
-                Reseed(rawPosition, playing);
+                // the jump is small. Old bounds no longer describe this playback epoch.
+                Reseed(rawPosition, playing, age);
             }
             else
             {
-                AddSample(rawPosition - _playbackElapsed);
+                // The report changed after the previous poll and no later than this one. A
+                // publish timestamp narrows that window to an instant, but never leaves it.
+                var publishedEarliest = _previousPollElapsed;
+                var publishedLatest = _playbackElapsed;
+                if (age is double known)
+                {
+                    publishedEarliest = publishedLatest = Math.Clamp(_playbackElapsed - known,
+                        _previousPollElapsed, _playbackElapsed);
+                }
+
+                AddBound(rawPosition - publishedLatest, rawPosition + 1 - publishedEarliest);
                 _lastRawPosition = rawPosition;
                 _lastRawChangeElapsed = _playbackElapsed;
                 _rawStalled = false;
@@ -130,6 +165,7 @@ public sealed class PlaybackClock
             SlewOffset(advancingDelta);
         }
         _playing = playing;
+        _previousPollElapsed = _playbackElapsed;
     }
 
     public double GetEstimatedPosition()
@@ -162,42 +198,66 @@ public sealed class PlaybackClock
 
     private double CurrentSeconds => _timeProvider.GetElapsedTime(_startTimestamp).TotalSeconds;
 
-    private void Reseed(double rawPosition, bool playing)
+    private void Reseed(double rawPosition, bool playing, double? ageSeconds)
     {
-        _sampleCount = 0;
-        _sampleCursor = 0;
+        _boundCount = 0;
+        _boundStart = 0;
         _lastRawPosition = rawPosition;
         _lastRawChangeElapsed = _playbackElapsed;
         _rawStalled = false;
-        _targetOffset = rawPosition + (playing ? InitialPhasePrior : 0) - _playbackElapsed;
+        if (playing && ageSeconds is double age)
+        {
+            // A timestamped report bounds the timeline from its very first observation.
+            var published = _playbackElapsed - age;
+            AddBound(rawPosition - published, rawPosition + 1 - published);
+        }
+        else
+        {
+            _targetOffset = rawPosition + (playing ? InitialPhasePrior : 0) - _playbackElapsed;
+        }
 
         // A seek or track change must land immediately; easing in would drag the old song's phase
         // across the boundary.
         _offset = _targetOffset;
     }
 
-    private void AddSample(double sample)
+    private void AddBound(double low, double high)
     {
-        _samples[_sampleCursor] = sample;
-        _sampleCursor = (_sampleCursor + 1) % MaxSamples;
-        _sampleCount = Math.Min(_sampleCount + 1, MaxSamples);
-        _targetOffset = Median();
-    }
+        low -= BoundSlackSeconds;
+        high += BoundSlackSeconds;
 
-    private double Median()
-    {
-        Span<double> ordered = stackalloc double[_sampleCount];
-        for (var index = 0; index < _sampleCount; index++)
+        // Keep the newest bound. Older ones that contradict it describe a timeline playback has
+        // since left (a small seek, a stray early report), so they are evicted oldest first.
+        while (_boundCount > 0)
         {
-            ordered[index] = _samples[index];
+            var (intersectionLow, intersectionHigh) = Intersect(low, high);
+            if (intersectionLow <= intersectionHigh) break;
+            _boundStart = (_boundStart + 1) % MaxBounds;
+            _boundCount--;
         }
 
-        ordered.Sort();
+        if (_boundCount == MaxBounds)
+        {
+            _boundStart = (_boundStart + 1) % MaxBounds;
+            _boundCount--;
+        }
 
-        var middle = _sampleCount / 2;
-        return _sampleCount % 2 == 1
-            ? ordered[middle]
-            : (ordered[middle - 1] + ordered[middle]) / 2.0;
+        _bounds[(_boundStart + _boundCount) % MaxBounds] = (low, high);
+        _boundCount++;
+        var (finalLow, finalHigh) = Intersect(double.NegativeInfinity, double.PositiveInfinity);
+        _targetOffset = (finalLow + finalHigh) / 2.0;
+    }
+
+    private (double Low, double High) Intersect(double low, double high)
+    {
+        for (var index = 0; index < _boundCount; index++)
+        {
+            var bound = _bounds[(_boundStart + index) % MaxBounds];
+            low = Math.Max(low, bound.Low);
+            high = Math.Min(high, bound.High);
+        }
+
+        return (low, high);
     }
 
     private void SlewOffset(double wallDelta)

@@ -5,50 +5,122 @@ namespace AppleMusicLyrics.Tests.Sync;
 
 public sealed class PlaybackClockTests
 {
-    // Exactly what Apple Music for Windows reported over 12 seconds: the position steps by a whole
-    // second every time, but the moment it steps wanders between 814ms and 1106ms apart. The true
-    // position implied by a least-squares fit of these edges is wall clock + 32.4286.
-    private static readonly (double WallSeconds, double Position)[] MeasuredEdges =
+    // Apple Music for Windows, recorded November 2026 at 5ms resolution: the instant each whole-
+    // second report was published (SMTC LastUpdatedTime, seconds from the first) and its value.
+    // The publisher is a free-running ~1.022s timer reporting floor(true position), so the value
+    // skips (217, 265) whenever its drifting phase wraps. All 88 reports fit one real-time timeline
+    // whose true position at publish time zero lies in [210.832, 210.851].
+    private static readonly (double PublishedAt, double Position)[] RecordedReports =
     [
-        (0.656, 33), (1.480, 34), (2.586, 35), (3.690, 36),
-        (4.516, 37), (5.617, 38), (6.447, 39), (7.546, 40),
-        (8.646, 41), (9.460, 42), (10.557, 43), (11.656, 44),
+        (0.000, 210), (1.020, 211), (2.046, 212), (3.067, 213), (4.095, 214), (5.114, 215),
+        (6.142, 216), (7.170, 218), (8.187, 219), (9.203, 220), (10.221, 221), (11.250, 222),
+        (12.267, 223), (13.285, 224), (14.307, 225), (15.334, 226), (16.354, 227), (17.377, 228),
+        (18.399, 229), (19.424, 230), (20.444, 231), (21.463, 232), (22.485, 233), (23.508, 234),
+        (24.531, 235), (25.548, 236), (26.572, 237), (27.595, 238), (28.614, 239), (29.639, 240),
+        (30.658, 241), (31.671, 242), (32.691, 243), (33.714, 244), (34.734, 245), (35.753, 246),
+        (36.778, 247), (37.792, 248), (38.820, 249), (39.838, 250), (40.852, 251), (41.870, 252),
+        (42.894, 253), (43.912, 254), (44.935, 255), (45.957, 256), (46.986, 257), (48.012, 258),
+        (49.040, 259), (50.058, 260), (51.078, 261), (52.105, 262), (53.121, 263), (54.149, 264),
+        (55.168, 266), (56.186, 267), (57.204, 268), (58.225, 269), (59.245, 270), (60.278, 271),
+        (61.299, 272), (62.325, 273), (63.357, 274), (64.376, 275), (65.394, 276), (66.411, 277),
+        (67.427, 278), (68.449, 279), (69.465, 280), (70.492, 281), (71.521, 282), (72.550, 283),
+        (73.567, 284), (74.594, 285), (75.617, 286), (76.632, 287), (77.645, 288), (78.674, 289),
+        (79.698, 290), (80.719, 291), (81.748, 292), (82.767, 293), (83.781, 294), (84.809, 295),
+        (85.839, 296), (86.861, 297), (87.880, 298),
     ];
 
-    private const double TruePositionAtZero = 32.4286;
-    private const double PollInterval = 0.04;
+    private const double TruePositionAtZero = 210.8415;
+    private const double PollInterval = 0.2;
 
-    [Fact]
-    public void Update_RecoversTheSubSecondPhaseFromWholeSecondReports()
+    [Theory]
+    [InlineData(true, 0.01)]
+    [InlineData(false, 0.05)] // Without publish times, edges are only bounded by 200ms polls.
+    public void Update_PinsTheRecordedTimelineOnceThePublishPhaseHasSwept(bool withPublishTimes, double tolerance)
     {
         var time = new ManualTimeProvider();
         var clock = new PlaybackClock(time);
 
-        var finalError = double.MaxValue;
-        foreach (var wall in Poll(0, 12.0))
+        var worstSettledError = 0.0;
+        foreach (var wall in Poll(0.1, RecordedReports[^1].PublishedAt + 0.9))
         {
-            clock.Update(ReportedPositionAt(wall), playing: true);
-            finalError = Math.Abs(clock.GetEstimatedPosition() - (wall + TruePositionAtZero));
+            var report = RecordedReports.Last(item => item.PublishedAt <= wall + 1e-9);
+            clock.Update(report.Position, playing: true, withPublishTimes ? wall - report.PublishedAt : null);
+            if (wall > 50)
+            {
+                worstSettledError = Math.Max(worstSettledError,
+                    Math.Abs(clock.GetEstimatedPosition() - (wall + TruePositionAtZero)));
+            }
             time.Advance(TimeSpan.FromSeconds(PollInterval));
         }
 
-        // Against a per-edge scatter of 0.083s, the median over a full window lands far inside the
-        // one-second quantum the raw reports are stuck on.
-        Assert.True(finalError < 0.05, $"final error was {finalError:F4}s");
+        Assert.True(worstSettledError < tolerance, $"worst settled error was {worstSettledError:F4}s");
+    }
 
-        double ReportedPositionAt(double wall)
+    [Theory]
+    [InlineData(1.0225, true, 0.03)] // The measured cadence: its phase sweeps the quantum every ~45s.
+    [InlineData(0.9900, true, 0.03)]
+    [InlineData(1.0225, false, 0.2)]
+    [InlineData(0.9900, false, 0.2)]
+    public void Update_DoesNotFollowTheDriftingPublishPhase(double publishInterval, bool withPublishTimes, double tolerance)
+    {
+        // Regression: averaging (reported - elapsed) followed this sawtooth and ran 0.17-0.97s late.
+        const double truePositionAtZero = 100.37;
+        var time = new ManualTimeProvider();
+        var clock = new PlaybackClock(time);
+        var nextPublish = 0.3;
+        var published = Math.Floor(truePositionAtZero - 0.7);
+        var publishedAt = -0.7;
+        // The bounds can only close once the publish phase has drifted across a whole quantum.
+        var settledAfter = 15 + 1 / Math.Abs(1 - publishInterval);
+
+        var worstSettledError = 0.0;
+        foreach (var wall in Poll(0, 240))
         {
-            var reported = MeasuredEdges[0].Position - 1;
-            foreach (var edge in MeasuredEdges)
+            while (nextPublish <= wall + 1e-9)
             {
-                if (wall + 1e-9 >= edge.WallSeconds)
-                {
-                    reported = edge.Position;
-                }
+                published = Math.Floor(nextPublish + truePositionAtZero);
+                publishedAt = nextPublish;
+                nextPublish += publishInterval;
             }
 
-            return reported;
+            clock.Update(published, playing: true, withPublishTimes ? wall - publishedAt : null);
+            if (wall > settledAfter)
+            {
+                worstSettledError = Math.Max(worstSettledError,
+                    Math.Abs(clock.GetEstimatedPosition() - (wall + truePositionAtZero)));
+            }
+            time.Advance(TimeSpan.FromSeconds(PollInterval));
         }
+
+        Assert.True(worstSettledError < tolerance, $"worst settled error was {worstSettledError:F4}s");
+    }
+
+    [Fact]
+    public void Update_EvictsBoundsThatContradictANewerReport()
+    {
+        // A sub-threshold seek moves the timeline by less than the discontinuity limit. Older
+        // bounds then contradict the new reports and must not hold the estimate on the old timeline.
+        var time = new ManualTimeProvider();
+        var clock = new PlaybackClock(time);
+        var offset = 50.4;
+        var published = Math.Floor(offset - 0.7);
+        var nextPublish = 0.3;
+        var last = 0.0;
+        foreach (var wall in Poll(0, 120))
+        {
+            if (Math.Abs(wall - 60) < 1e-9) offset += 0.8;
+            while (nextPublish <= wall + 1e-9)
+            {
+                published = Math.Floor(nextPublish + offset);
+                nextPublish += 1.0225;
+            }
+
+            clock.Update(published, playing: true);
+            last = wall;
+            time.Advance(TimeSpan.FromSeconds(PollInterval));
+        }
+
+        Assert.InRange(clock.GetEstimatedPosition() - (last + PollInterval + offset), -0.15, 0.15);
     }
 
     [Fact]
@@ -58,14 +130,10 @@ public sealed class PlaybackClockTests
         var clock = new PlaybackClock(time);
 
         var previous = double.MinValue;
-        foreach (var wall in Poll(0, 12.0))
+        foreach (var wall in Poll(0.1, RecordedReports[^1].PublishedAt))
         {
-            var reported = MeasuredEdges.Where(edge => wall + 1e-9 >= edge.WallSeconds)
-                .Select(edge => edge.Position)
-                .DefaultIfEmpty(MeasuredEdges[0].Position - 1)
-                .Last();
-
-            clock.Update(reported, playing: true);
+            var report = RecordedReports.Last(item => item.PublishedAt <= wall + 1e-9);
+            clock.Update(report.Position, playing: true, wall - report.PublishedAt);
             var estimated = clock.GetEstimatedPosition();
 
             Assert.True(estimated >= previous - 1e-9, $"went backwards at {wall:F2}s: {previous:F4} -> {estimated:F4}");
@@ -83,6 +151,29 @@ public sealed class PlaybackClockTests
         var clock = new PlaybackClock(time);
 
         clock.Update(12.0, playing: true);
+
+        Assert.InRange(clock.GetEstimatedPosition(), 12.45, 12.55);
+    }
+
+    [Fact]
+    public void Update_UsesThePublishTimeOfTheFirstReport()
+    {
+        // Published 0.8s ago: the true position is now in [12.8, 13.8), centred on 13.3.
+        var time = new ManualTimeProvider();
+        var clock = new PlaybackClock(time);
+
+        clock.Update(12.0, playing: true, rawPositionAgeSeconds: 0.8);
+
+        Assert.InRange(clock.GetEstimatedPosition(), 13.25, 13.35);
+    }
+
+    [Fact]
+    public void Update_IgnoresAnImplausiblyOldPublishTime()
+    {
+        var time = new ManualTimeProvider();
+        var clock = new PlaybackClock(time);
+
+        clock.Update(12.0, playing: true, rawPositionAgeSeconds: 30);
 
         Assert.InRange(clock.GetEstimatedPosition(), 12.45, 12.55);
     }
@@ -199,10 +290,11 @@ public sealed class PlaybackClockTests
         Assert.Equal(3, clock.RemainingExtrapolationSeconds, 6);
         time.Advance(TimeSpan.FromSeconds(1));
         clock.Update(12, playing: true);
-        Assert.InRange(clock.GetEstimatedPosition(), 12, 12.6);
+        // One-second polls only bound that edge to the second after the reseed.
+        Assert.InRange(clock.GetEstimatedPosition(), 12, 13);
         time.Advance(TimeSpan.FromSeconds(1));
         clock.Update(13, playing: true);
-        Assert.InRange(clock.GetEstimatedPosition(), 13, 13.6);
+        Assert.InRange(clock.GetEstimatedPosition(), 13, 14);
     }
 
     [Fact]
@@ -225,7 +317,8 @@ public sealed class PlaybackClockTests
         Assert.Equal(3, clock.RemainingExtrapolationSeconds, 6);
         time.Advance(TimeSpan.FromSeconds(1));
         clock.Update(12, playing: true);
-        Assert.Equal(12, clock.GetEstimatedPosition(), 6);
+        // Thirty paused seconds were not counted; only the edge's sub-second phase is refined.
+        Assert.InRange(clock.GetEstimatedPosition(), 12, 12.5);
     }
 
     [Fact]

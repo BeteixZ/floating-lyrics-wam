@@ -91,6 +91,9 @@ public sealed class GlobalMediaSessionProvider : IPlayerSessionProvider
             var end = timeline.EndTime;
             var position = timeline.Position;
             var duration = end > start ? (end - start).TotalSeconds : 0;
+            // LastUpdatedTime is when the session published Position. Sessions that never set it
+            // report a default timestamp; the clock ignores missing, future or stale ages.
+            var positionAge = (DateTimeOffset.UtcNow - timeline.LastUpdatedTime).TotalSeconds;
 
             var (cleanArtist, cleanAlbum) = MetadataMatching.ParseArtistAndAlbum(
                 mediaProperties?.Artist,
@@ -103,7 +106,8 @@ public sealed class GlobalMediaSessionProvider : IPlayerSessionProvider
                 Position: Math.Max(0, position.TotalSeconds),
                 Duration: Math.Max(0, duration),
                 Playing: playbackInfo?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing,
-                SourceAppId: session.SourceAppUserModelId);
+                SourceAppId: session.SourceAppUserModelId,
+                PositionAgeSeconds: double.IsFinite(positionAge) && positionAge >= 0 ? positionAge : null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
