@@ -1,176 +1,156 @@
+<div align="center">
+
+<img src="icon.svg" width="112" alt="Apple Music Lyrics icon">
+
 # Apple Music Lyrics
 
-> Early development: features and configuration may change.
+**Synchronized, word-by-word floating lyrics for Apple Music on Windows.**
 
-A lightweight Windows desktop app that displays synchronized Apple Music lyrics in an always-on-top overlay.
+[![Latest release](https://img.shields.io/github/v/release/BeteixZ/floating-lyrics-wam?label=release&color=ff2f5f)](https://github.com/BeteixZ/floating-lyrics-wam/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/BeteixZ/floating-lyrics-wam/total?color=ff4f8b)](https://github.com/BeteixZ/floating-lyrics-wam/releases)
+[![Build](https://img.shields.io/github/actions/workflow/status/BeteixZ/floating-lyrics-wam/build.yml?branch=main&label=build)](https://github.com/BeteixZ/floating-lyrics-wam/actions/workflows/build.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4)
+![.NET](https://img.shields.io/badge/.NET-10-512BD4)
 
-![Demo](.github/assets/demo.gif)
+**English** · [简体中文](README.zh-CN.md) · [繁體中文](README.zh-TW.md)
 
-![Version](https://img.shields.io/badge/version-0.8.0-blue)
-![.NET](https://img.shields.io/badge/.NET-10.0-purple)
-![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
+[**Download**](https://github.com/BeteixZ/floating-lyrics-wam/releases/latest) · [Features](#features) · [Quick start](#quick-start) · [FAQ](#faq) · [Release notes](RELEASE_NOTES.md)
+
+<img src=".github/assets/demo.gif" alt="Floating lyrics overlay showing a synchronized line with its translation" width="720">
+
+</div>
+
+Apple Music for Windows has no desktop lyrics. Apple Music Lyrics adds an always-on-top overlay that follows playback: it reads the lyrics Apple Music has already cached, highlights them word by word, shows translations and romanization, and fills the gaps from NetEase Cloud Music, QQ Music, and LRCLIB when Apple's lyrics are missing or incomplete.
+
+> [!NOTE]
+> The project is in active development (0.x). Features and settings may still change between releases.
 
 ## Features
 
-- Synchronized floating lyrics with single-line, two-line, and context layouts
-- Strict Apple Music media-session selection by default
-- Confidence-based lyric matching with Apple catalog verification
-- Optional NetEase Cloud Music, QQ Music, and LRCLIB lookup, preferring sources that supply word timing and translations
-- Line-synchronized display from LRC, QQ QRC, and NetEase YRC lyrics, re-timed onto Apple's line starts when Apple has the song
-- Word-by-word highlighting with Apple Music-style emphasis: held words swell and glow while they are sung
-- Pure Mode with content-sized bounds, smooth card resizing that looks ahead before shrinking, configurable drag opacity, and click-through support
-- Per-monitor-v2 DPI awareness, mixed-DPI positioning, and independent normal/Pure Mode placement
-- Rendering-driven lyric transitions that follow WPF/DWM composition cadence
-- Configurable colors, opacity, fonts, glow, timing offset, and visibility behavior
-- Tabbed settings with independent original/translation typography and live previews
-- Windows language detection, Simplified/Traditional Chinese and English, and drop-in JSON language packs
-- Optional shared disk cache for LRCLIB, QQ, and NetEase, preserving translations and word timing with a configurable size limit
-- System tray controls and persistent per-user settings
+**Lyrics**
 
-## Requirements
+- Reads Apple Music's own lyric cache, including word timing, translations, romanization, duet parts, and background vocals
+- Optional online lyrics from NetEase Cloud Music, QQ Music, and LRCLIB, preferring whichever source covers the song with word timing and translations
+- Online lyrics are re-timed onto Apple's line starts when Apple has the song, fixing providers whose lines start early or late
+- Strict matching with Apple catalog verification: no lyrics is preferred over the wrong lyrics
+- Right-click to search again or pick a different lyric version for the current song
 
-- Windows 10 version 19041 or later, or Windows 11
-- Apple Music for Windows
-- x64 [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0)
+**Display**
 
-The release is framework-dependent; the Desktop Runtime must be installed before starting the app.
+- Word-by-word highlighting; held words swell and glow while they are sung, like Apple Music
+- Smooth line transitions that switch slightly ahead of the vocal so the new line is readable on time
+- Duets shown as two full-size lines, each with its own highlighting and translation
+- Romanization below the original line, with offline romaji for Japanese lyrics that have none
+- Single-line, two-line, and context layouts
 
-## Installation
+**Window**
 
-1. Download `AppleMusicLyrics-vX.X.X-win-x64.zip` from [Releases](../../releases).
-2. Extract the archive.
-3. Run `AppleMusicLyrics.App.exe`.
+- Pure Mode: a borderless card sized to the current lyrics, resizing smoothly and looking ahead before it shrinks
+- Click-through, hover fading, and automatic hiding when paused
+- Per-monitor DPI awareness and independent positions for normal and Pure Mode
 
-Settings and the catalog lookup cache are stored in `%LOCALAPPDATA%\AppleMusicLyrics`. On first launch after upgrading, legacy `settings.ini` and `catalog-cache.json` files beside the executable are copied there when possible.
+**Customization and privacy**
 
-## Usage
+- Fonts (separately for Latin, Chinese, and translations), colors, glow, opacity, and timing offsets, with per-song offsets
+- English, Simplified Chinese, and Traditional Chinese interface; more languages via [JSON language packs](docs/localization.md)
+- Works fully offline when online features are disabled; no accounts, logins, or API keys
 
-Use the tray icon to show/hide the overlay, open Settings, switch display modes, or toggle click-through behavior. In both Normal mode and Pure Mode, enabling Click through lets mouse input pass through to the window underneath, including while hovering. Disable Click through to interact with and drag the visible card. Normal mode and Pure Mode retain independent positions.
+## Quick start
 
-Settings are organized into five tabs, with Apply, Cancel, and Save available on every tab:
+**Requirements:** Windows 10 version 19041 or later (or Windows 11), Apple Music for Windows from the Microsoft Store, and the x64 [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0).
 
-| Tab | Settings |
+1. Download `AppleMusicLyrics-vX.Y.Z-win-x64.zip` from the [latest release](https://github.com/BeteixZ/floating-lyrics-wam/releases/latest).
+2. Extract it anywhere and run `AppleMusicLyrics.App.exe`.
+3. Play a song in Apple Music. The lyrics appear in the overlay, and the app lives in the system tray.
+
+When upgrading, exit the previous version from the tray first. Settings are kept in `%LOCALAPPDATA%\AppleMusicLyrics`.
+
+## Using the overlay
+
+| Action | How |
 | --- | --- |
-| 外观 | Original Latin/Chinese fonts, independent translation font and size, previews, colors, and glow |
-| 歌词 | Word highlighting, translations, timing offset, and native timing correction |
-| 窗口 | Layout, Pure Mode, click-through, and window/background opacity |
-| 交互 | Automatic hiding, paused fading, and hover behavior |
-| 高级 | Online sources, caching, compatibility, matching, and diagnostics |
+| Show/hide, Pure Mode, single-/two-line mode, click-through, Settings | Tray icon menu |
+| Move the overlay | Drag it (turn off **Click through** first) |
+| Search again or choose another lyric version | Right-click the lyrics |
+| Lyrics too early or late | **Settings → Lyrics → Lyrics advance**, optionally **Remember lyric offset per song** |
+| Turn word highlighting, translations, or romanization on/off | **Settings → Lyrics** |
+| Disable all network access | **Settings → Advanced** |
 
-Chinese glyphs and Chinese punctuation use the selected Chinese font; Latin text retains its own font. Font changes can be checked in the mixed-text preview and applied to the overlay without restarting. Existing settings files remain usable. Apply saves the current choices immediately; Cancel discards only edits made since the last Apply.
+Every setting is described in [Settings and usage](docs/settings.md).
 
-The language selector in the top-right corner defaults to following the Windows display language. It also offers explicit Simplified Chinese, Traditional Chinese, and English. Switching languages previews the interface immediately; Apply or Save retains the choice, and Cancel restores the last applied language. Additional languages can be installed as JSON files in the app's `Languages` folder; see [language packs](docs/localization.md).
+## Where lyrics come from
 
-Important settings include:
+When a song plays, the app picks the best lyrics it can find, in this order of preference:
 
-- **Lyrics lead time**: calibrates lyrics against audible playback. The playback clock already places Apple Music's whole-second reports on the real timeline using their publish time, so this only needs to cover output latency and personal preference.
-- **Apply native timing correction**: honors Apple Music's TTML `lyricOffset` metadata.
-- **Compatibility mode**: allows non-Apple media sessions; disabled by default to prevent another player or browser from taking over.
-- **Low-confidence candidates**: trades matching accuracy for coverage; disabled by default.
-- **Word-by-word highlighting**: uses Apple Music's native TTML word timestamps when Apple supplies them for the whole song; otherwise NetEase YRC or QQ QRC timing is used (see [How lyric selection works](#how-lyric-selection-works)). A word held for a while swells and glows as it is sung; words early in a line need a longer hold than the word that ends a phrase. Lyrics without usable word timestamps keep the ordinary line display; word clocks are never synthesized.
-- **Show translations**: prioritizes Apple's supplied translation, associated with the original line by its native key. When Apple's lyrics lack translations, a NetEase or QQ result with translations can be used instead. The app does not generate translations. Availability depends on what each source supplies; not every track has translations or word timing.
-- **Online lyrics**: the online settings control Apple catalog verification and external lyric lookup. Lookup tries NetEase Cloud Music, QQ Music, and LRCLIB synchronized lyrics before using LRCLIB plain lyrics. Missing enabled features can trigger further background checks even when Apple already supplies synchronized lines. Online service changes require an app restart; highlighting and translation toggles apply immediately.
-- **Keep lyric cache**: the Advanced tab can retain completed lyrics from all three external providers across restarts, including supplied translations, line timing, and word timing. The shared capacity defaults to 64 MB and can be set from 1 to 1024 MB. Older, least recently used entries are removed when the quota is reached or reduced. Current disk usage is shown beside a one-click Clear cache action, which also works when retention or online lyrics are disabled. Clearing refreshes the usage immediately and preserves settings and the current lyric display. The retention switch and capacity apply immediately; retention remains disabled by default, preserving existing settings.
-- **Pure mode drag opacity**: controls visibility while repositioning the card.
-- **Diagnostic summary**: adds one compact line below the lyrics with the selected source and word/translation coverage. It has no scroll area or log panel. Use **View diagnostics** in the tray or Advanced settings to open the full report in a separate resizable window. That window shows missing-translation reasons and each source's query/retry/failure/selection results, remains independent of overlay opacity and click-through, and opens only when requested.
+| Priority | Source | Used when |
+| :---: | --- | --- |
+| 1 | Apple Music (cached) | Apple has the enabled features (word timing, translations) for most of the song |
+| 2 | NetEase Cloud Music | It covers clearly more of the song with those features, and is the same lyrics |
+| 3 | QQ Music | Same as NetEase, if NetEase has no better result |
+| 4 | Apple Music (cached) | Otherwise; missing features may be filled in from other sources on Apple's timeline |
+| 5 | LRCLIB | Nothing above is available |
 
-`CompositionTarget.Rendering` normally tracks the WPF/DWM composition cadence of the active display. The debug FPS value measures actual callbacks; it is not a promise that every system or driver will exactly match the monitor's advertised refresh rate.
+With word highlighting and translations both off, Apple's own lyrics are always used when present. Lyrics from NetEase or QQ only replace Apple's when they are verifiably the same lyrics, and are then aligned to Apple's line timing. The full rules, and exactly what each service receives, are in [Lyric sources, matching, and privacy](docs/lyric-sources.md).
 
-## Network and privacy
+## FAQ
 
-Apple catalog verification and external lyric lookup are enabled by default and can be disabled in Settings for fully offline operation.
+<details>
+<summary><b>No lyrics appear for a song.</b></summary>
 
-- **Apple iTunes Search API**: when local candidates are ambiguous, the app sends title and artist to verify the Apple catalog song ID.
-- **LRCLIB**: the app sends title, artist, album, and duration for exact lookup, with title/artist search fallback. Synchronized lyrics are used when available; plain-only lyrics are displayed with an approximate evenly projected timeline and identified as `lrclib-plain` in diagnostics.
-- **NetEase Cloud Music**: the app sends title and artist to search NetEase, then requests lyrics by the matched song ID. It is queried first for missing lyrics or for enabled word timing/translations missing from Apple's result. When artist names differ across languages, it verifies the candidate's artist ID and aliases through NetEase artist metadata before accepting the recording. YRC and older klyric word timing is preserved, with LRC fallback and supplied translated lyrics.
-- **QQ Music**: the app sends title and artist to search QQ Music, then requests lyrics by the matched song ID when NetEase has no usable lyrics or lacks an enabled feature. QRC line and word timing is preserved, along with supplied translated lyrics.
+The app first looks for lyrics Apple Music has cached. If none match and online lyrics are enabled, it searches NetEase, QQ Music, and LRCLIB. A song can still have no lyrics when none of these sources has it, or when the match is too uncertain to show. Try **Search lyrics again** from the right-click menu, or **Choose lyrics…** to pick a candidate yourself. **Allow low-confidence matches** in Advanced settings trades accuracy for coverage.
+</details>
 
-The QQ and NetEase integrations use the request formats from the maintained LyricsKit fork linked below. They require no developer API key or account login. Their endpoints are undocumented platform interfaces and can change or reject requests. Server-issued anonymous cookies may be used in memory; the app does not read browser or player account cookies.
+<details>
+<summary><b>The lyrics are slightly early or late.</b></summary>
 
-Requests run in cancellable background operations with bounded timeouts. When disk retention is enabled, successful results from LRCLIB, QQ, and NetEase share `%LOCALAPPDATA%\AppleMusicLyrics\external-lyrics-cache`; the size limit applies to these app-owned lyric entries, separately from Apple's own cache and the catalog lookup cache. Legacy `lrclib-cache.json` files are left untouched and are no longer written by the app. The app does not upload lyric cache files. Advanced storefront and timeout values remain available in `%LOCALAPPDATA%\AppleMusicLyrics\settings.ini`.
+Adjust **Lyrics advance** in the Lyrics tab. It covers your audio output latency and personal preference. Turn on **Remember lyric offset per song** to keep a correction for individual songs.
+</details>
 
-## How lyric selection works
+<details>
+<summary><b>There is no translation or word-by-word highlighting.</b></summary>
 
-1. Read Apple Music playback metadata through Windows System Media Transport Controls.
-2. Scan Apple Music's local cache, including legacy `ttmlLyrics` and current localized `syllable-lyrics` responses. Parse native line/word timestamps and keyed translations and readings. Prefer richer native versions of the same Apple song ID without treating duplicate cache versions as different tracks.
-3. Accept a close, unambiguous local match or verify candidates against Apple's catalog. If duration matching finds nothing, also look up cached lyrics by the verified Apple song ID: a TTML timeline can end at the last lyric, before the recording finishes. If keyword search omits the release, verify cached IDs through Apple's lookup endpoint, requiring exact title/artist agreement and a matching audio duration.
-4. Display a verified local match immediately. If no verified local lyrics exist and online lyrics are enabled, try NetEase Cloud Music, QQ Music, and LRCLIB in that order, showing a usable synchronized result as soon as it is available. Apply title, artist, and available duration checks to external candidates. Explicit featured-artist credits such as `(feat. Twista)` can be omitted by a source's title; matching normalizes those credits while rejecting conflicting guest credits and different live/remix/intro variants.
-5. If highlighting or translations are enabled but Apple's result does not cover most of the song with them, check online sources in the background. Sources are compared by how much of the song they cover with the enabled features; close results follow this priority: Apple Music with every enabled feature, NetEase Cloud Music, QQ Music, Apple Music's own lyrics (with gaps filled from other sources on Apple's timeline), and LRCLIB. A NetEase or QQ result replaces Apple's only when it is the same lyrics on the same timeline, even if it splits or words lines differently; it is then re-timed so each line starts where Apple's does, keeping the source's own syllable rhythm. With highlighting and translations both off, Apple's own lyrics stay primary. Without an Apple result, a richer external source may replace another external result without losing enabled features. Word timestamps and translations are used only when supplied by the source.
-6. Use LRCLIB plain lyrics if no synchronized external result is available, with an approximate timeline.
-7. Keep media/cache/network polling low-frequency while projecting playback and switching lines locally on visual frames. Recheck only the selected Apple catalog ID for later native feature upgrades, so opening Apple's lyrics panel after the initial match can reveal native words/translations without allowing the next song's prefetch to take over.
+Both depend on what the sources supply; the app never generates translations or invents word timing. Make sure **Word highlighting** and **Show lyric translations** are on, and that online lyrics are enabled so the app can look for a source that has them.
+</details>
 
-When romanization is enabled, supplied readings appear under the original lyrics. Japanese lyrics without a supplied reading use the bundled dictionary to generate romaji offline. Unusual readings chosen by the singer can differ from the dictionary reading.
+<details>
+<summary><b>Windows SmartScreen warns about the app.</b></summary>
 
-A missing lyric is preferred over displaying a low-confidence wrong lyric unless the user explicitly enables low-confidence candidates.
+Release builds are not code-signed, so Windows may show "Windows protected your PC" for a newly downloaded version. Choose **More info → Run anyway** if you downloaded it from this repository's Releases page. The source and the build workflow are public.
+</details>
 
-## Development
+<details>
+<summary><b>The app reacts to another player or a browser.</b></summary>
 
-### Prerequisites
+By default it only follows Apple Music's media session. **Allow media sessions outside Apple Music** (Advanced settings) lets other players in, and is off by default for this reason.
+</details>
 
-- .NET SDK version pinned by [`global.json`](global.json)
-- Windows 10/11
+<details>
+<summary><b>Does it work offline? What does it send online?</b></summary>
 
-### Build and test
-
-```powershell
-dotnet restore AppleMusicLyrics.sln
-dotnet build AppleMusicLyrics.sln -c Release --no-restore
-dotnet test AppleMusicLyrics.sln -c Release --no-build --results-directory artifacts/test-results
-```
-
-Build outputs and intermediate files stay under `artifacts/bin/` and `artifacts/obj/`,
-separated by project and configuration.
-
-### Run
-
-```powershell
-dotnet run --project src/AppleMusicLyrics.App/AppleMusicLyrics.App.csproj
-```
-
-### Publish
-
-Run:
-
-```powershell
-./build.ps1
-```
-
-When the app is closed, the script replaces `artifacts/publish/win-x64/` after a
-successful publish, removing stale package files. If the app is running when the
-build starts or finishes, it publishes to `artifacts/publish/win-x64-yyyyMMdd-HHmmss-fff/`
-instead, leaving the running app and its files intact. The final `Latest build:`
-message gives the executable path. Each build while the app is running gets a new
-directory; existing timestamped builds are kept.
-
-All builds use a temporary publish directory first. Apart from this running-app
-exception, do not create local folders or ZIPs named after a task, date, or version.
-GitHub Release attachments remain versioned.
-
-## Project structure
-
-```text
-src/
-  AppleMusicLyrics.App/                    WPF desktop application
-  AppleMusicLyrics.Application/            Runtime orchestration and use cases
-  AppleMusicLyrics.Core/                   Core models and pure logic
-  AppleMusicLyrics.Debugger/               Overnight diagnostic monitor
-  AppleMusicLyrics.Infrastructure.Windows/ Windows integrations
-tests/
-  AppleMusicLyrics.Tests/                  Unit tests
-```
+With online features disabled, it only reads Apple Music's local cache and sends nothing. With them enabled, it sends the song title and artist (and, for some services, album and duration) to Apple's iTunes Search API and the enabled lyric services. Details: [Network and privacy](docs/lyric-sources.md#network-and-privacy).
+</details>
 
 ## Known limitations
 
-- Windows-only.
-- Apple Music must be running for playback tracking.
-- Offline playback requires Apple's cached lyrics or previously retained external lyrics. Keep external lyrics enabled to read the app's retained provider cache.
-- QQ Music and NetEase Cloud Music endpoints have no official third-party availability guarantee and can be affected by platform changes, region restrictions, or rate limits.
-- Word timing and translations depend on the source response. Missing or mismatched word timing falls back to line display; missing or unmatched translations are omitted.
-- Layered transparent WPF windows can show driver-specific edge flicker while Pure Mode resizes; this requires hardware testing across systems.
+- Windows only, and Apple Music must be running for playback tracking.
+- NetEase Cloud Music and QQ Music use undocumented interfaces that may change, be region-restricted, or be rate-limited.
+- Word timing and translations depend on each source; when missing or mismatched, the app falls back to plain line display.
+- Layered transparent windows can show driver-specific edge flicker while Pure Mode resizes.
+
+## Building from source
+
+```powershell
+dotnet build AppleMusicLyrics.sln -c Release
+dotnet test AppleMusicLyrics.sln -c Release --no-build
+./build.ps1   # publishes the app to artifacts/publish/
+```
+
+Prerequisites, the publish layout, and the project structure are described in [Development](docs/development.md).
 
 ## Contributing
 
-Issues and pull requests are welcome. Keep matching changes accuracy-first and avoid introducing per-frame media, disk, or network I/O.
+Issues and pull requests are welcome. When reporting a lyrics problem, include the song, artist, and the diagnostic report (tray → **Show diagnostic summary**, or **View diagnostics** for the full report). Keep matching changes accuracy-first and avoid per-frame media, disk, or network I/O.
 
 ## License
 
