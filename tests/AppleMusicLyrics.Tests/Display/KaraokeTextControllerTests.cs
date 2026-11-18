@@ -244,6 +244,71 @@ public sealed class KaraokeTextControllerTests
         Assert.Equal(1, brush.GradientStops[1].Offset);
     });
 
+    [Fact]
+    public void Update_SwellsAndGlowsOnlyAHeldSingleWordWhileItIsSung() => OnSta(() =>
+    {
+        var text = new TextBlock { FontSize = 30 };
+        var controller = new KaraokeTextController(text, emphasizeSustainedWords: true);
+        var line = new LyricsLine(1, 5, "Oh baby", Words:
+            [new LyricWord(1, 1.3, "Oh "), new LyricWord(1.3, 4, "baby")]);
+        controller.SetLine(line.Text, line, enabled: true);
+
+        // The short word stays a run; the held one gets its own element with the same sweep brush.
+        var container = Assert.Single(text.Inlines.OfType<InlineUIContainer>());
+        var word = Assert.IsType<TextBlock>(container.Child);
+        Assert.Equal("baby", word.Text);
+        Assert.IsType<LinearGradientBrush>(word.Foreground);
+        Assert.Equal("Oh ", Assert.Single(text.Inlines.OfType<Run>()).Text);
+        Assert.Equal(line.Text, controller.DisplayText);
+
+        controller.Update(1.0);
+        Assert.Null(word.Effect);
+        controller.Update(2.5);
+        var scale = Assert.IsType<TransformGroup>(word.RenderTransform).Children.OfType<ScaleTransform>().Single();
+        Assert.True(scale.ScaleX > 1.05);
+        Assert.NotNull(word.Effect);
+        Assert.Equal(1.2 / 2.7, ((LinearGradientBrush)word.Foreground).GradientStops[1].Offset, 3);
+        controller.Update(6);
+        Assert.Equal(1, scale.ScaleX);
+        Assert.Null(word.Effect);
+    });
+
+    [Theory]
+    [InlineData(0, 6, 1.2, false)] // a drawn-out opening pickup stays plain
+    [InlineData(0, 6, 2.2, true)]  // ...unless it is held very long
+    [InlineData(3, 6, 1.2, false)] // mid-line words still need a long hold
+    [InlineData(5, 6, 1.0, true)]  // the held word that ends a phrase swells
+    [InlineData(5, 6, 0.6, false)]
+    public void GetEmphasisStrength_NeedsALongerHoldEarlierInTheLine(int index, int count, double seconds, bool emphasized)
+    {
+        var strength = KaraokeTextController.GetEmphasisStrength(new LyricWord(10, 10 + seconds, "word"), index, count);
+
+        Assert.Equal(emphasized, strength > 0);
+    }
+
+    [Fact]
+    public void GetEmphasisStrength_GrowsWithTheLengthOfTheHold()
+    {
+        var shorter = KaraokeTextController.GetEmphasisStrength(new LyricWord(0, 1.0, "word"), 5, 6);
+        var longer = KaraokeTextController.GetEmphasisStrength(new LyricWord(0, 2.0, "word"), 5, 6);
+
+        Assert.InRange(shorter, 0.4, 0.6);
+        Assert.True(longer > shorter);
+    }
+
+    [Fact]
+    public void SetLine_DoesNotEmphasizeALineTimedAsOnePhrase() => OnSta(() =>
+    {
+        var text = new TextBlock();
+        var controller = new KaraokeTextController(text, emphasizeSustainedWords: true);
+        var line = new LyricsLine(1, 5, "Keep singing", Words: [new LyricWord(1, 5, "Keep singing")]);
+
+        controller.SetLine(line.Text, line, enabled: true);
+
+        Assert.Empty(text.Inlines.OfType<InlineUIContainer>());
+        Assert.Single(text.Inlines.OfType<Run>());
+    });
+
     private static RenderTargetBitmap Render(TextBlock text, double width)
     {
         text.Measure(new Size(width, double.PositiveInfinity));

@@ -1,15 +1,19 @@
 using System.Globalization;
+using AppleMusicLyrics.Core.Models;
 
 namespace AppleMusicLyrics.Core.Matching;
 
 /// <summary>
-/// Apple stamps every cached lyrics file with a lyricsId of "AP_&lt;catalog song id&gt;", so the file
-/// already carries the exact identity of the track it belongs to. That makes an id comparison an
-/// exact test where duration comparison is only ever a guess.
+/// Matches cached Apple lyrics to verified catalog song ids. Current responses identify the
+/// recording separately from the lyric asset, which can be shared across editions.
 /// </summary>
 public static class CatalogLyricsId
 {
     private const string Prefix = "AP_";
+
+    public static string? ForDocument(LyricsDocument document) => document.CatalogTrackId is > 0
+        ? FromCatalogId(document.CatalogTrackId.Value)
+        : document.LyricsId;
 
     public static string FromCatalogId(long catalogId)
     {

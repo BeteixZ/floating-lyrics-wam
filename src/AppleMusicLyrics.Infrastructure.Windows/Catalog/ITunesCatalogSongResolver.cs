@@ -43,9 +43,16 @@ public sealed class ITunesCatalogSongResolver : ICatalogSongResolver, IDisposabl
         _httpClient.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "AppleMusicLyrics");
     }
 
-    public async Task<IReadOnlyList<string>> ResolveLyricsIdCandidatesAsync(
-        PlayerState player,
-        CancellationToken cancellationToken = default)
+    public Task<IReadOnlyList<string>> ResolveLyricsIdCandidatesAsync(
+        PlayerState player, CancellationToken cancellationToken = default) =>
+        ResolveLyricsIdCandidatesAsync(player, refresh: false, cancellationToken);
+
+    public Task<IReadOnlyList<string>> RefreshLyricsIdCandidatesAsync(
+        PlayerState player, CancellationToken cancellationToken = default) =>
+        ResolveLyricsIdCandidatesAsync(player, refresh: true, cancellationToken);
+
+    private async Task<IReadOnlyList<string>> ResolveLyricsIdCandidatesAsync(
+        PlayerState player, bool refresh, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(player.Title) || _storefronts.Count == 0)
         {
@@ -58,10 +65,11 @@ public sealed class ITunesCatalogSongResolver : ICatalogSongResolver, IDisposabl
         try
         {
             EnsureCacheLoaded();
-            if (_cache.TryGetValue(key, out var cached))
+            if (!refresh && _cache.TryGetValue(key, out var cached))
             {
                 return cached;
             }
+            if (refresh) _verifiedMisses.Remove("verified|" + key);
 
             var resolved = await QueryStorefrontsAsync(player, cancellationToken).ConfigureAwait(false);
             if (resolved.Count == 0)

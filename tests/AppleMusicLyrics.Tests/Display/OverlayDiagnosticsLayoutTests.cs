@@ -1,19 +1,70 @@
 using System.Runtime.ExceptionServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using System.Xml.Linq;
+using AppleMusicLyrics.App;
 using AppleMusicLyrics.App.Presentation;
+using AppleMusicLyrics.Application.Services;
+using AppleMusicLyrics.Core.Abstractions;
 using AppleMusicLyrics.Core.Configuration;
+using AppleMusicLyrics.Core.Models;
+using AppleMusicLyrics.Core.Sync;
 using Xunit;
 
 namespace AppleMusicLyrics.Tests.Display;
 
 public sealed class OverlayDiagnosticsLayoutTests
 {
+    [Fact]
+    public async Task LyricsSelectionWindow_PreviewsCurrentLyricsAndDisablesSelectionWhenTheTrackChanges()
+    {
+        var document = new LyricsDocument("AP_123", "success", "cache.json", DateTimeOffset.UtcNow,
+            [new LyricsLine(1, 5, "Synthetic preview", Translation: "测试译文")], 180);
+        await using var runtime = new LyricsRuntimeService(new SelectionTestLyrics(document),
+            new SelectionTestPlayer(), new LyricsSynchronizer());
+        var snapshot = await runtime.SnapshotAsync();
+
+        OnSta(() =>
+        {
+            var window = new LyricsSelectionWindow(runtime, snapshot);
+            try
+            {
+                var choices = Assert.IsType<ListBox>(window.FindName("ChoicesList"));
+                var preview = Assert.IsType<TextBox>(window.FindName("PreviewTextBox"));
+                var use = Assert.IsType<Button>(window.FindName("UseButton"));
+                Assert.Single(choices.Items);
+                Assert.Contains("Synthetic preview", preview.Text);
+                Assert.Contains("测试译文", preview.Text);
+                Assert.True(use.IsEnabled);
+
+                window.ObserveTrack(snapshot with { TrackGeneration = snapshot.TrackGeneration + 1 });
+                Assert.False(use.IsEnabled);
+                Assert.False(choices.IsEnabled);
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+    }
+
+    private sealed class SelectionTestLyrics(LyricsDocument document) : ILyricsDocumentProvider
+    {
+        public Task<LyricsDocument?> GetLatestLyricsAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<LyricsDocument?>(document);
+    }
+
+    private sealed class SelectionTestPlayer : IPlayerSessionProvider
+    {
+        public Task<PlayerState?> GetCurrentPlayerStateAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<PlayerState?>(new PlayerState("Track", "Artist", null, 2, 180, false));
+    }
+
     [Theory]
     [InlineData(false, true, 0.85)]
     [InlineData(false, false, 0.05)]
@@ -70,6 +121,44 @@ public sealed class OverlayDiagnosticsLayoutTests
         var bitmap = new RenderTargetBitmap((int)width, 240, 96, 96, PixelFormats.Pbgra32);
         bitmap.Render(view.Root);
         Assert.True(CountBrightPixels(bitmap, footer) > 20, "The compact status line should render readable text.");
+    });
+
+    [Fact]
+    public void ActualMainXaml_ShowsBothDuetPartsAtFullSizeWithTheirOwnTranslationsAndProgress() => OnSta(() =>
+    {
+        var view = new LayoutView();
+        var duetContainer = view.Find<StackPanel>("DuetLyricContainer");
+        var duet = view.Find<TextBlock>("DuetLyricText");
+        var translation = view.Find<TextBlock>("TranslationLyricText");
+        var duetTranslation = view.Find<TextBlock>("DuetTranslationLyricText");
+        var firstView = new LyricLineView(view.Current, view.Find<StackPanel>("BackgroundVocalPanel"),
+            view.Find<TextBlock>("RomanizationLyricText"), translation);
+        var secondView = new LyricLineView(duet, view.Find<StackPanel>("DuetBackgroundVocalPanel"),
+            view.Find<TextBlock>("DuetRomanizationLyricText"), duetTranslation);
+        var first = new LyricsLine(10, 15, "Keep singing with me", Words: [new(10, 14, "Keep singing with me")], Translation: "继续和我唱");
+        var second = new LyricsLine(12, 16, "I hear you calling", Words: [new(12, 16, "I hear you calling")], Translation: "我听见你呼唤");
+        firstView.Bind(first.Text, first, null, first.Translation, true, Colors.White);
+        secondView.Bind(second.Text, second, null, second.Translation, true, Colors.White);
+        firstView.SetFontSizes(28, 17);
+        secondView.SetFontSizes(28, 17);
+        duetContainer.Visibility = Visibility.Visible;
+        firstView.UpdateHighlight(13);
+        secondView.UpdateHighlight(13);
+        view.Layout(360, 360);
+
+        Assert.Equal(view.Current.FontSize, duet.FontSize);
+        Assert.Equal(view.Current.FontWeight, duet.FontWeight);
+        Assert.Equal(first.Translation, translation.Text);
+        Assert.Equal(second.Translation, duetTranslation.Text);
+        Assert.True(Bounds(view.Current, view.Root).Bottom <= Bounds(translation, view.Root).Top);
+        Assert.True(Bounds(translation, view.Root).Bottom <= Bounds(duet, view.Root).Top);
+        Assert.True(Bounds(duet, view.Root).Bottom <= Bounds(duetTranslation, view.Root).Top);
+        Assert.True(Bounds(duetTranslation, view.Root).Bottom <= Bounds(view.Footer, view.Root).Top);
+
+        var firstSweep = Assert.IsType<LinearGradientBrush>(Assert.IsType<Run>(Assert.Single(view.Current.Inlines)).Foreground);
+        var secondSweep = Assert.IsType<LinearGradientBrush>(Assert.IsType<Run>(Assert.Single(duet.Inlines)).Foreground);
+        Assert.Equal(0.75, firstSweep.GradientStops[1].Offset);
+        Assert.Equal(0.25, secondSweep.GradientStops[1].Offset);
     });
 
     [Fact]
@@ -206,7 +295,7 @@ public sealed class OverlayDiagnosticsLayoutTests
             Root.UpdateLayout();
         }
 
-        private T Find<T>(string name) where T : class => Assert.IsType<T>(Root.FindName(name));
+        public T Find<T>(string name) where T : class => Assert.IsType<T>(Root.FindName(name));
 
         private static string FindMainXaml()
         {

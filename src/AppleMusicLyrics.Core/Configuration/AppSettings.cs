@@ -118,7 +118,7 @@ public sealed class AppSettings
 
     public bool ShowTranslation { get; set; } = true;
 
-    // Show the phonetic reading (pinyin/romaji) Apple ships as x-roman in the TTML, when present.
+    // Show supplied romanization or generate a reading for Japanese lyrics.
     public bool ShowRomanization { get; set; }
 
     public bool SingleLineMode { get; set; }

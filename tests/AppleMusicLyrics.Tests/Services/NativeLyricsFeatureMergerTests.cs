@@ -197,6 +197,32 @@ public sealed class NativeLyricsFeatureMergerTests
     }
 
     [Fact]
+    public void Merge_AlignsADifferentlySplitTranslationBetweenMatchingAnchors()
+    {
+        var first = new LyricsLine(20, 22, "Please leave", Words: [new(20, 22, "Please leave")]);
+        var second = new LyricsLine(23, 27, "the door open", Words: [new(23, 27, "the door open")]);
+        var native = Document("AP_123",
+            [new LyricsLine(10, 12, "Anchor before"), first, second, new LyricsLine(32, 34, "Anchor after")]);
+        var source = Document("NE",
+        [
+            new LyricsLine(10.1, 12.1, "Anchor before"),
+            new LyricsLine(20.1, 24.1, "Please leave the", Translation: "请把"),
+            new LyricsLine(24.1, 29.1, "door open", Translation: "门开着"),
+            new LyricsLine(32.1, 34.1, "Anchor after"),
+        ]);
+
+        var merged = NativeLyricsFeatureMerger.MergeMissingFeatures(native, source, true, true);
+
+        Assert.Equal(first with { Translation = "请把 门开着" }, merged.Lines[1]);
+        Assert.Equal(second with { Translation = "请把 门开着" }, merged.Lines[2]);
+        var duet = native with
+        {
+            Lines = [native.Lines[0], first with { VocalistId = "v1" }, second with { VocalistId = "v2" }, native.Lines[3]],
+        };
+        Assert.Same(duet, NativeLyricsFeatureMerger.MergeMissingFeatures(duet, source, true, true));
+    }
+
+    [Fact]
     public void Merge_AcceptsZeroDurationFragmentAlongsideTimedBodyAndUntimedPunctuation()
     {
         var native = Document("AP_123", [new LyricsLine(0, 4, "hello, world!")]);
@@ -222,6 +248,73 @@ public sealed class NativeLyricsFeatureMergerTests
         var source = Document("QQ", [new LyricsLine(0, 4, "hello world", Words: [new(0, 4, "hello world")], Translation: "你好世界")]);
         Assert.Same(native, NativeLyricsFeatureMerger.MergeMissingFeatures(native, source, false, false));
         Assert.Same(native, NativeLyricsFeatureMerger.MergeMissingFeatures(native, source with { Status = "plain" }, true, true));
+    }
+
+    [Fact]
+    public void AlignToNativeTimeline_MovesEachLineStartOntoAppleAndKeepsSyllableRhythm()
+    {
+        // QQ is early on one line and late on another: no single offset could fix both.
+        var native = Document("AP", [
+            new LyricsLine(10, 13, "first line here"),
+            new LyricsLine(14, 17, "second line here"),
+            new LyricsLine(18, 21, "third line here"),
+        ]);
+        var source = Document("QQ", [
+            Line(9.4, 12.4, "first line here"),
+            Line(14.5, 17.5, "second line here"),
+            Line(18.2, 21.2, "third line here"),
+        ]);
+
+        var aligned = NativeLyricsFeatureMerger.AlignToNativeTimeline(native, source);
+
+        Assert.Equal(new[] { 10.0, 14.0, 18.0 }, aligned.Lines.Select(line => Math.Round(line.Begin, 6)));
+        Assert.Equal("QQ", aligned.LyricsId);
+        foreach (var line in aligned.Lines)
+        {
+            Assert.Equal(Math.Round(line.Begin, 6), Math.Round(line.Words![0].Begin, 6));
+            Assert.True(line.Words.Zip(line.Words.Skip(1)).All(pair => pair.First.End <= pair.Second.Begin + 1e-9));
+        }
+    }
+
+    [Fact]
+    public void AlignToNativeTimeline_InterpolatesLinesTheSourceSplitsAndKeepsOrder()
+    {
+        var native = Document("AP", [
+            new LyricsLine(10, 16, "hold you in the night and wake to find you gone"),
+            new LyricsLine(16, 20, "running out of sight"),
+        ], offset: -.132);
+        var source = Document("QQ", [
+            Line(10.6, 13, "hold you in the night"),
+            Line(13, 16, "and wake to find you gone"),
+            Line(15.8, 19, "running out of sight"),
+        ]);
+
+        var aligned = NativeLyricsFeatureMerger.AlignToNativeTimeline(native, source);
+
+        // Apple's lyricOffset is honoured: source time = Apple time - (source offset - Apple offset).
+        Assert.Equal(9.868, aligned.Lines[0].Begin, 6);
+        Assert.Equal(15.868, aligned.Lines[2].Begin, 6);
+        Assert.InRange(aligned.Lines[1].Begin, aligned.Lines[0].Begin, aligned.Lines[2].Begin);
+        Assert.True(aligned.Lines[0].End <= aligned.Lines[1].Begin + 1e-9);
+    }
+
+    [Fact]
+    public void AlignToNativeTimeline_LeavesAgreeingOrUnanchoredSourcesUntouched()
+    {
+        var native = Document("AP", [new LyricsLine(10, 13, "first line"), new LyricsLine(14, 17, "second line")]);
+        var same = Document("QQ", [Line(10, 13, "first line"), Line(14, 17, "second line")]);
+        var other = Document("QQ2", [Line(10.4, 13, "different words"), Line(14.4, 17, "entirely else")]);
+
+        Assert.Same(same, NativeLyricsFeatureMerger.AlignToNativeTimeline(native, same));
+        Assert.Same(other, NativeLyricsFeatureMerger.AlignToNativeTimeline(native, other));
+    }
+
+    private static LyricsLine Line(double begin, double end, string text)
+    {
+        var parts = text.Split(' ');
+        var step = (end - begin) / parts.Length;
+        return new LyricsLine(begin, end, text, Words: parts.Select((part, index) => new LyricWord(
+            begin + step * index, begin + step * (index + 1), index < parts.Length - 1 ? part + " " : part)).ToArray());
     }
 
     private static LyricsDocument Document(string id, IReadOnlyList<LyricsLine> lines, double offset = 0) =>

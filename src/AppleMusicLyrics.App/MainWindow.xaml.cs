@@ -49,8 +49,11 @@ public partial class MainWindow : Window
     private readonly WindowPlacementCoordinator _windowPlacementCoordinator;
     private readonly TrayIconController _trayIconController;
     private DiagnosticsWindow? _diagnosticsWindow;
-    private KaraokeTextController? _karaokeTextController;
-    private LyricsLine? _displayedLyricLine;
+    private LyricsSelectionWindow? _lyricsSelectionWindow;
+    private bool _canManageLyrics;
+    private readonly LyricLineView _currentLyric;
+    private readonly LyricLineView _duetLyric;
+    private readonly LyricLineView[] _lyricViews;
     private LyricsDocument? _displayedLyricDocument;
     private bool _sourceInitialized;
     private bool _isClosed;
@@ -59,7 +62,7 @@ public partial class MainWindow : Window
     private bool _hasRuntimeSnapshot;
     private bool _hasFrameLyricState;
     private LyricsDocument? _lastFrameDocument;
-    private int? _lastFrameLyricIndex;
+    private ActiveLyricState? _lastFrameLyricState;
     private bool _lastFramePlaying;
     private RuntimeSnapshot? _pendingFrameSnapshot;
     private bool _frameSnapshotApplyScheduled;
@@ -79,8 +82,6 @@ public partial class MainWindow : Window
     private MouseTracker? _mouseTracker;
     private string? _currentPreviousText;
     private string? _currentNextText;
-    // Rich Inlines do not populate TextBlock.Text; sizing must retain the displayed source text.
-    private string _currentLyricText = "Current lyric line";
     private double _targetHeight;
     private double _heightAnimFrom;
     private System.Diagnostics.Stopwatch _heightAnimStopwatch = new();
@@ -88,6 +89,23 @@ public partial class MainWindow : Window
     private double _heightAnimCenterY;
     private PixelRect _pureBoundsAnimFrom;
     private PixelRect _pureBoundsAnimTarget;
+    // Pure Mode draws its card inside a larger transparent "envelope" window. Line changes only
+    // move the drawn card; the HWND is resized only when a card no longer fits. Resizing a
+    // layered window shows a stale frame at the new position, which read as the card jumping.
+    // _pureBoundsAnimTarget is the settled card rect; the card is always centered on the anchor.
+    private bool _pureEnvelopeActive;
+    private PixelRect _pureEnvelopeRect;
+    private double _pureCardCenterX;
+    private double _pureCardCenterY;
+    private readonly RectangleGeometry _pureCardClip = new();
+    // Before shrinking, look at the next few lines: if one of them needs the current size again
+    // (a duet part ending just before another begins), keep it instead of pumping in and out.
+    private readonly LyricsSynchronizer _lookaheadSynchronizer = new();
+    private const double LookaheadSeconds = 6.0;
+    private const double LookaheadStepSeconds = 0.2;
+    private const int LookaheadLineChanges = 2;
+    private const double PureEnvelopePaddingXDip = 220.0;
+    private const double PureEnvelopePaddingYDip = 80.0;
 
     public MainWindow()
     {
@@ -96,7 +114,6 @@ public partial class MainWindow : Window
         _settings = composition.Settings;
         _externalLyricsCache = composition.ExternalLyricsCache;
         LocalizationManager.Instance.SetLanguage(_settings.UiLanguage);
-        _currentLyricText = LocalizationManager.Instance.Text("Lyrics.PlaceholderWaiting");
         _playerProvider = composition.PlayerProvider;
         _catalogResolver = composition.CatalogResolver;
         _externalLyricsProviders = composition.ExternalLyricsProviders;
@@ -106,7 +123,11 @@ public partial class MainWindow : Window
 
         InitializeComponent();
         HeaderPanel.SizeChanged += OnDiagnosticContentSizeChanged;
-        _karaokeTextController = new KaraokeTextController(CurrentLyricText);
+        _currentLyric = new LyricLineView(CurrentLyricText, BackgroundVocalPanel, RomanizationLyricText, TranslationLyricText);
+        _duetLyric = new LyricLineView(DuetLyricText, DuetBackgroundVocalPanel, DuetRomanizationLyricText, DuetTranslationLyricText);
+        _lyricViews = [_currentLyric, _duetLyric];
+        _currentLyric.Bind(LocalizationManager.Instance.Text("Lyrics.PlaceholderWaiting"), null, null, null, false, Colors.White);
+        DuetLyricText.Effect = CurrentLyricGlowEffect;
         Icon = LoadAppIcon();
         _trayIconController = new TrayIconController(
             Dispatcher,
@@ -117,6 +138,8 @@ public partial class MainWindow : Window
             () => SetTwoLineMode(!_settings.TwoLineMode),
             () => SetDebugPanelVisibility(!_settings.ShowDebugPanel),
             OpenDiagnosticsWindow,
+            RefreshCurrentLyrics,
+            OpenLyricsSelection,
             OpenSettingsWindow,
             Close);
         ApplyWindowBounds();
@@ -258,7 +281,7 @@ public partial class MainWindow : Window
                 {
                     // PerMonitorV2 WPF owns DPI layout and applies the suggested physical RECT.
                     // Recalculate the content-sized Pure Mode bounds after adopting the new DPI.
-                    CancelPureModeBoundsAnimation();
+                    ExitPureEnvelope(resizeWindowToCard: false);
                     QueuePureModeLayoutRefresh();
                     QueueWindowStateCommit(reconcileDisplayTopology: false);
                 }
@@ -266,7 +289,7 @@ public partial class MainWindow : Window
                 break;
 
             case WM_DISPLAYCHANGE:
-                CancelPureModeBoundsAnimation();
+                ExitPureEnvelope(resizeWindowToCard: true);
                 QueueWindowStateCommit(reconcileDisplayTopology: true);
                 break;
 
@@ -389,6 +412,8 @@ public partial class MainWindow : Window
         _runtimeRefreshFailed = false;
         _lastRuntimeError = null;
         _hasRuntimeSnapshot = true;
+        _canManageLyrics = snapshot.CanManageLyrics;
+        _lyricsSelectionWindow?.ObserveTrack(snapshot);
         ApplySnapshot(snapshot);
         UpdateOverlayVisibility(snapshot);
         UpdateDiagnosticsWindow(snapshot);
@@ -399,6 +424,7 @@ public partial class MainWindow : Window
     {
         _runtimeRefreshFailed = true;
         _lastRuntimeError = ex;
+        _canManageLyrics = false;
         UpdateRenderingSubscription();
         _pendingFrameSnapshot = null;
         _lastLyricAnimationKey = null;
@@ -408,16 +434,17 @@ public partial class MainWindow : Window
         TimingText.Text = $"{text.Text("Runtime.RefreshFailed")} | {FormatRenderRate()} | {FormatPollRate()}";
         StatusText.Text = text.Text("Runtime.Error");
         PathText.Text = text.Text("Runtime.RefreshFailed");
-        _currentLyricText = text.Text("Runtime.RefreshFailedShort");
-        _karaokeTextController?.SetLine(_currentLyricText, null, false);
-        _displayedLyricLine = null;
+        _currentLyric.Bind(text.Text("Runtime.RefreshFailedShort"), null, null, null, false, Colors.White);
+        _duetLyric.Bind(string.Empty, null, null, null, false, Colors.White);
+        DuetLyricContainer.Visibility = Visibility.Collapsed;
         _displayedLyricDocument = null;
-        SetTranslation(null);
-        SetRomanization(null);
         PreviousLyricText.Text = string.Empty;
+        NextLyricText.Visibility = CanShowNextLyric ? Visibility.Visible : Visibility.Collapsed;
         NextLyricText.Text = text.Text("Runtime.CheckCache");
+        UpdateLyricRowHeights(false, CanShowNextLyric);
         QueueDiagnosticsLayoutRefresh();
         UpdateDiagnosticsWindow();
+        UpdateTrayState();
     }
 
     private void OnUiLanguageChanged(object? sender, EventArgs e)
@@ -459,9 +486,10 @@ public partial class MainWindow : Window
         var isPlaying = snapshot.Player?.Playing ?? false;
         if (_hasFrameLyricState
             && ReferenceEquals(_lastFrameDocument, snapshot.Document)
-            && _lastFrameLyricIndex == snapshot.ActiveLyric.CurrentIndex
+            && ReferenceEquals(_lastFrameLyricState, snapshot.ActiveLyric)
             && _lastFramePlaying == isPlaying)
         {
+            _pendingFrameSnapshot = null;
             return;
         }
 
@@ -495,7 +523,7 @@ public partial class MainWindow : Window
         var isPlaying = snapshot.Player?.Playing ?? false;
         if (_hasFrameLyricState
             && ReferenceEquals(_lastFrameDocument, snapshot.Document)
-            && _lastFrameLyricIndex == snapshot.ActiveLyric.CurrentIndex
+            && ReferenceEquals(_lastFrameLyricState, snapshot.ActiveLyric)
             && _lastFramePlaying == isPlaying)
         {
             return;
@@ -508,7 +536,7 @@ public partial class MainWindow : Window
     private void RememberFrameLyricState(RuntimeSnapshot snapshot)
     {
         _lastFrameDocument = snapshot.Document;
-        _lastFrameLyricIndex = snapshot.ActiveLyric.CurrentIndex;
+        _lastFrameLyricState = snapshot.ActiveLyric;
         _lastFramePlaying = snapshot.Player?.Playing ?? false;
         _hasFrameLyricState = true;
     }
@@ -553,20 +581,12 @@ public partial class MainWindow : Window
     private void UpdateLyricSection(RuntimeSnapshot snapshot)
     {
         var presentation = OverlaySnapshotPresenter.CreateLyrics(snapshot, showTranslation: _settings.ShowTranslation,
-            includeDetailedDiagnostics: false);
+            includeDetailedDiagnostics: false, showRomanization: _settings.ShowRomanization);
         var summary = presentation.DebugSummaryText ?? string.Empty;
         var diagnosticsChanged = StatusText.Text != presentation.StatusText || PathText.Text != summary;
         StatusText.Text = presentation.StatusText;
         PathText.Text = summary;
-        SetLyrics(
-            presentation.PreviousText,
-            presentation.CurrentText,
-            presentation.NextText,
-            presentation.IsPlaying,
-            presentation.Animate,
-            presentation.DisplayedLine,
-            presentation.TranslationText,
-            presentation.RomanizationText);
+        SetLyrics(presentation);
         _displayedLyricDocument = snapshot.Document;
         UpdateWordHighlight(snapshot);
         if (diagnosticsChanged) QueueDiagnosticsLayoutRefresh();
@@ -574,76 +594,60 @@ public partial class MainWindow : Window
 
     private void UpdateWordHighlight(RuntimeSnapshot snapshot)
     {
-        if (_karaokeTextController is null || !_karaokeTextController.HasTimedWords
-            || !ReferenceEquals(_displayedLyricDocument, snapshot.Document)) return;
+        if ((!_currentLyric.HasTimedWords && !_duetLyric.HasTimedWords)
+            || !ReferenceEquals(_displayedLyricDocument, snapshot.Document) || snapshot.Document is null) return;
         var line = snapshot.ActiveLyric.CurrentLine ?? snapshot.ActiveLyric.NextLine
-            ?? snapshot.Document?.Lines.FirstOrDefault();
-        if (!ReferenceEquals(_displayedLyricLine, line)) return;
-        _karaokeTextController.Update(LyricsTiming.GetPosition(snapshot.Document, snapshot.Player,
-            _runtimeService.LyricsOffsetSeconds, _settings.ApplyNativeLyricOffset));
+            ?? snapshot.Document.Lines.FirstOrDefault();
+        // The frame computed here reaches the screen a couple of compositor frames later; lead the
+        // highlight by that much so it lines up with what is heard.
+        var position = LyricsTiming.GetPosition(snapshot.Document, snapshot.Player,
+            _runtimeService.LyricsOffsetSeconds + WordHighlightLeadSeconds, _settings.ApplyNativeLyricOffset);
+        if (ReferenceEquals(_currentLyric.Line, line)) _currentLyric.UpdateHighlight(position);
+        if (snapshot.ActiveLyric.DuetLine is { } duet && ReferenceEquals(_duetLyric.Line, duet))
+            _duetLyric.UpdateHighlight(position);
     }
 
-    private void SetTranslation(string? translation)
+    private void BindLyricViews(LyricsPresentation presentation)
     {
-        // Cached documents can predate merge-time filtering of "//" and credit rows.
-        translation = AppleMusicLyrics.Core.Parsing.LyricsTranslationFilter.Clean(translation);
-        TranslationLyricText.Text = translation ?? string.Empty;
-        TranslationLyricText.Visibility = _settings.ShowTranslation && !string.IsNullOrWhiteSpace(translation)
-            ? Visibility.Visible : Visibility.Collapsed;
+        var sung = ParseColorOrFallback(presentation.IsPlaying ? _settings.CurrentLineColor : _settings.PausedLineColor, Colors.White);
+        var duet = presentation.DuetLine;
+        _currentLyric.Bind(presentation.CurrentText, presentation.DisplayedLine, presentation.RomanizationText,
+            _settings.ShowTranslation ? presentation.TranslationText : null, _settings.WordHighlightEnabled, sung);
+        _duetLyric.Bind(duet?.Text ?? string.Empty, duet, presentation.DuetRomanizationText,
+            _settings.ShowTranslation ? duet?.Translation : null, _settings.WordHighlightEnabled, sung);
+        DuetLyricContainer.Visibility = duet is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    private void SetRomanization(string? romanization)
+    private void SetLyrics(LyricsPresentation presentation)
     {
-        RomanizationLyricText.Text = romanization ?? string.Empty;
-        RomanizationLyricText.Visibility = _settings.ShowRomanization && !string.IsNullOrWhiteSpace(romanization)
-            ? Visibility.Visible : Visibility.Collapsed;
-    }
-
-    private void BindCurrentLyric(string text, LyricsLine? line, string? translation, string? romanization, bool isPlaying)
-    {
-        _displayedLyricLine = line;
-        _currentLyricText = text;
-        _karaokeTextController?.SetLine(text, line, _settings.WordHighlightEnabled);
-        var sung = ParseColorOrFallback(isPlaying ? _settings.CurrentLineColor : _settings.PausedLineColor, Colors.White);
-        if (CurrentLyricText.Foreground is not SolidColorBrush foreground || foreground.Color != sung)
-        {
-            CurrentLyricText.Foreground = new SolidColorBrush(sung);
-        }
-        var upcoming = MediaColor.FromArgb((byte)Math.Round(sung.A * 0.35), sung.R, sung.G, sung.B);
-        _karaokeTextController?.SetColors(sung, upcoming);
-        SetTranslation(translation);
-        SetRomanization(romanization);
-    }
-
-    private void SetLyrics(
-        string? previousText,
-        string currentText,
-        string? nextText,
-        bool isPlaying,
-        bool animate,
-        LyricsLine? line,
-        string? translation,
-        string? romanization)
-    {
-        var lyricKey = $"{previousText}|{currentText}|{nextText}|{isPlaying}|{line?.Begin:R}|{line?.End:R}|{translation}|{_settings.ShowTranslation}|{romanization}|{_settings.ShowRomanization}";
-        var isRepeat = string.Equals(_lastLyricAnimationKey, lyricKey, StringComparison.Ordinal);
+        var line = presentation.DisplayedLine;
+        var duet = presentation.DuetLine;
+        var lyricKey = $"{presentation.PreviousText}|{presentation.CurrentText}|{presentation.NextText}|{presentation.IsPlaying}|{line?.Begin:R}|{line?.End:R}|{presentation.TranslationText}|{_settings.ShowTranslation}|{presentation.RomanizationText}|{_settings.ShowRomanization}|{duet?.Text}|{duet?.Begin:R}|{duet?.End:R}|{duet?.Translation}|{presentation.DuetRomanizationText}";
+        var isRepeat = string.Equals(_lastLyricAnimationKey, lyricKey, StringComparison.Ordinal)
+            && HaveSameBackgroundLyrics(_currentLyric.Line, line)
+            && HaveSameBackgroundLyrics(_duetLyric.Line, duet);
 
         // Same content as last time (a poll tick with no change): the lyrics are already on
         // screen — do nothing, so a crossfade in progress isn't cut short.
         if (isRepeat)
         {
             // A replacement document can have different word timing despite identical text.
-            BindCurrentLyric(currentText, line, translation, romanization, isPlaying);
+            BindLyricViews(presentation);
             return;
         }
 
-        var shouldAnimate = animate;
+        // When a duet part starts, ends, or takes over the first slot, keep the continuing
+        // vocal visible while the window adjusts its height.
+        var duetTransition = (_duetLyric.Line is not null || duet is not null)
+            && line is not null
+            && (ReferenceEquals(_currentLyric.Line, line) || ReferenceEquals(_duetLyric.Line, line));
+        var shouldAnimate = presentation.Animate && !duetTransition;
         _lastLyricAnimationKey = lyricKey;
 
         if (!shouldAnimate)
         {
             ResetLyricVisualState();
-            ApplyLyricContent(previousText, currentText, nextText, isPlaying, line, translation, romanization);
+            ApplyLyricContent(presentation);
             RefreshLyricLayout();
             Dispatcher.BeginInvoke(() => StartHeightAnimation(), System.Windows.Threading.DispatcherPriority.Loaded);
             return;
@@ -653,51 +657,68 @@ public partial class MainWindow : Window
         // old lyrics fade out while the new lyrics fade in from transparent and move upward.
         // This work now runs after the render callback, so it no longer blocks the boundary frame.
         SnapshotLyricGhost();
-        ApplyLyricContent(previousText, currentText, nextText, isPlaying, line, translation, romanization);
+        ApplyLyricContent(presentation);
         RefreshLyricLayout();
 
+        // Staggered crossfade: the outgoing line drops most of its opacity before the incoming one
+        // starts to appear, so the two never sit on top of each other at full strength.
         var easing = new CubicEase { EasingMode = EasingMode.EaseOut };
-        var duration = TimeSpan.FromMilliseconds(LyricFadeDurationMs);
+        var fadeIn = TimeSpan.FromMilliseconds(LyricFadeInDurationMs);
+        var fadeInDelay = TimeSpan.FromMilliseconds(LyricFadeInDelayMs);
 
         LyricPanel.BeginAnimation(OpacityProperty, null);
         LyricPanel.Opacity = 0.0;
         LyricPanel.BeginAnimation(OpacityProperty,
-            new DoubleAnimation(0.0, 1.0, duration) { EasingFunction = easing });
+            new DoubleAnimation(0.0, 1.0, fadeIn) { EasingFunction = easing, BeginTime = fadeInDelay });
+        CurrentLyricTransform.BeginAnimation(TranslateTransform.YProperty, null);
+        CurrentLyricTransform.Y = 10;
         CurrentLyricTransform.BeginAnimation(TranslateTransform.YProperty,
-            new DoubleAnimation(10, 0, duration) { EasingFunction = easing });
+            new DoubleAnimation(10, 0, fadeIn) { EasingFunction = easing, BeginTime = fadeInDelay });
 
-        // Outgoing snapshot fades out over the same window.
-        var ghostOut = new DoubleAnimation(0.0, duration)
+        // Outgoing snapshot fades out quickly (ease-out: most of the drop happens up front) and
+        // drifts slightly upward, so the line visibly leaves instead of lingering under the new one.
+        var fadeOut = TimeSpan.FromMilliseconds(LyricFadeOutDurationMs);
+        var ghostOut = new DoubleAnimation(0.0, fadeOut)
         {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+            EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
         };
+        LyricGhostTransform.BeginAnimation(TranslateTransform.YProperty,
+            new DoubleAnimation(0, -8, fadeOut) { EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseIn } });
         ghostOut.Completed += (_, _) => HideLyricGhost();
         LyricGhostImage.BeginAnimation(OpacityProperty, ghostOut);
 
         Dispatcher.BeginInvoke(() => StartHeightAnimation(), System.Windows.Threading.DispatcherPriority.Loaded);
     }
 
-    private (bool showPrevious, bool showNext) ApplyLyricContent(
-        string? previousText, string currentText, string? nextText, bool isPlaying,
-        LyricsLine? line, string? translation, string? romanization)
+    private static bool HaveSameBackgroundLyrics(LyricsLine? previous, LyricsLine? next)
     {
-        var showPrevious = _settings.ShowPreviousLine && !string.IsNullOrWhiteSpace(previousText);
-        var showNext = _settings.ShowNextLine && !string.IsNullOrWhiteSpace(nextText);
+        var before = previous?.BackgroundVocals;
+        var after = next?.BackgroundVocals;
+        return ReferenceEquals(before, after)
+            || (before ?? []).Select(vocal => vocal.Text).SequenceEqual((after ?? []).Select(vocal => vocal.Text));
+    }
 
-        _currentPreviousText = previousText;
-        _currentNextText = nextText;
+    private void ApplyLyricContent(LyricsPresentation presentation)
+    {
+        var showPrevious = _settings.ShowPreviousLine && !string.IsNullOrWhiteSpace(presentation.PreviousText);
+        var showNext = _settings.ShowNextLine && !string.IsNullOrWhiteSpace(presentation.NextText);
 
-        PreviousLyricText.Text = showPrevious ? previousText! : string.Empty;
-        BindCurrentLyric(currentText, line, translation, romanization, isPlaying);
-        NextLyricText.Text = showNext ? nextText! : string.Empty;
+        _currentPreviousText = presentation.PreviousText;
+        _currentNextText = presentation.NextText;
 
-        CurrentLyricText.Foreground = CreateBrush(isPlaying ? _settings.CurrentLineColor : _settings.PausedLineColor, Colors.White);
+        PreviousLyricText.Text = showPrevious ? presentation.PreviousText : string.Empty;
+        BindLyricViews(presentation);
+        NextLyricText.Text = showNext ? presentation.NextText : string.Empty;
+        NextLyricText.Visibility = CanShowNextLyric ? Visibility.Visible : Visibility.Collapsed;
+
         PreviousLyricText.Foreground = CreateBrush(_settings.ContextLineColor, MediaColor.FromRgb(143, 148, 153));
         NextLyricText.Foreground = CreateBrush(_settings.ContextLineColor, MediaColor.FromRgb(143, 148, 153));
 
-        UpdateLyricRowHeights(showPrevious, showNext);
-        return (showPrevious, showNext);
+        UpdateLyricRowHeights(showPrevious, showNext && CanShowNextLyric);
     }
+
+    private bool CanShowNextLyric => _settings.ShowNextLine && !_settings.SingleLineMode
+        && (!_settings.TwoLineMode || _duetLyric.Line is null);
 
     private void UpdateLyricRowHeights(bool showPrevious, bool showNext)
     {
@@ -738,6 +759,14 @@ public partial class MainWindow : Window
             return;
         }
 
+        // Normal mode cannot cheaply measure future lines, but a returning duet is the case that
+        // matters: keep the height when a second vocalist comes back within the next few lines.
+        var shownHeight = _isAnimatingHeight ? _targetHeight : Height;
+        if (targetHeight < shownHeight - 1 && _duetLyric.Line is null && UpcomingStates().Any(state => state.DuetLine is not null))
+        {
+            targetHeight = shownHeight;
+        }
+
         if (Math.Abs(targetHeight - Height) < 1)
         {
             return;
@@ -772,7 +801,11 @@ public partial class MainWindow : Window
     }
 
     private const double WindowAnimDurationMs = 240.0;
-    private const double LyricFadeDurationMs = 360.0;
+    // Render-to-screen latency of a layered WPF window: the render thread plus DWM composition.
+    private const double WordHighlightLeadSeconds = 0.06;
+    private const double LyricFadeOutDurationMs = 200.0;
+    private const double LyricFadeInDelayMs = 110.0;
+    private const double LyricFadeInDurationMs = 300.0;
     private const double PureModeMaxCardWidth = 1400.0;
     private const double PureModeMaxCardHeight = 560.0;
 
@@ -794,24 +827,20 @@ public partial class MainWindow : Window
                 return;
             }
 
-            // The card is centered inside the HWND, so its on-screen text position follows the
-            // window rect. Update the rect on every composition frame: skipping frames makes the
-            // window advance in coarse steps and the centered lyrics visibly jitter.
-            var hwnd = new WindowInteropHelper(this).Handle;
-            var frameRect = WindowBoundsGeometry.Interpolate(
-                _pureBoundsAnimFrom,
-                _pureBoundsAnimTarget,
-                eased);
-            ApplyNativeWindowRect(hwnd, frameRect);
-
             if (progress >= 1.0)
             {
                 _isAnimatingHeight = false;
                 _heightAnimStopwatch.Stop();
+                _pureBoundsAnimFrom = _pureBoundsAnimTarget;
+                LayoutPureCardBackdrop(1.0);
                 CaptureCurrentPlacement();
                 UpdateRenderingSubscription();
+                return;
             }
 
+            // Only the card backdrop moves; the HWND keeps its envelope size, so every frame
+            // is a cheap re-render rather than a window resize.
+            LayoutPureCardBackdrop(eased);
             return;
         }
 
@@ -856,20 +885,18 @@ public partial class MainWindow : Window
                     Math.Min(contentWidth, PreviousLyricText.MaxWidth), 2).Height)
                 + PreviousLyricText.Margin.Top + PreviousLyricText.Margin.Bottom;
         }
-        contentHeight += MeasureText(_currentLyricText, CurrentLyricText, CurrentLyricText.FontSize,
-            Math.Min(contentWidth, CurrentLyricText.MaxWidth), _settings.SingleLineMode ? 1 : int.MaxValue).Height
-            + CurrentLyricText.Margin.Top + CurrentLyricText.Margin.Bottom;
-        if (RomanizationLyricText.Visibility == Visibility.Visible)
+        var translationSize = TranslationTypography.GetFontSize(_settings.TranslationFontSize);
+        foreach (var view in VisibleLyricViews())
         {
-            contentHeight += MeasureText(RomanizationLyricText.Text, RomanizationLyricText,
-                RomanizationLyricText.FontSize, Math.Min(contentWidth, RomanizationLyricText.MaxWidth), 2).Height
-                + RomanizationLyricText.Margin.Top + RomanizationLyricText.Margin.Bottom;
-        }
-        if (TranslationLyricText.Visibility == Visibility.Visible)
-        {
-            contentHeight += MeasureText(TranslationLyricText.Text, TranslationLyricText,
-                TranslationLyricText.FontSize, Math.Min(contentWidth, TranslationLyricText.MaxWidth), 2).Height
-                + TranslationLyricText.Margin.Top + TranslationLyricText.Margin.Bottom;
+            var lyric = view.MainText;
+            var lyricWidth = Math.Min(contentWidth, lyric.MaxWidth);
+            contentHeight += MeasureText(view.DisplayText, lyric, lyric.FontSize,
+                lyricWidth, _settings.SingleLineMode ? 1 : int.MaxValue).Height + lyric.Margin.Top + lyric.Margin.Bottom;
+            foreach (var row in view.GetAuxiliaryRows(lyric.FontSize, translationSize))
+            {
+                contentHeight += MeasureText(row.Text, row.Element, row.FontSize, lyricWidth, 2).Height
+                    + row.Element.Margin.Top + row.Element.Margin.Bottom;
+            }
         }
         if (showNext)
         {
@@ -923,12 +950,16 @@ public partial class MainWindow : Window
         LyricGhostImage.Height = LyricPanel.ActualHeight;
         LyricGhostImage.BeginAnimation(OpacityProperty, null);
         LyricGhostImage.Opacity = 1.0;
+        LyricGhostTransform.BeginAnimation(TranslateTransform.YProperty, null);
+        LyricGhostTransform.Y = 0;
         LyricGhostImage.Visibility = Visibility.Visible;
     }
 
     private void HideLyricGhost()
     {
         LyricGhostImage.BeginAnimation(OpacityProperty, null);
+        LyricGhostTransform.BeginAnimation(TranslateTransform.YProperty, null);
+        LyricGhostTransform.Y = 0;
         LyricGhostImage.Visibility = Visibility.Collapsed;
         LyricGhostImage.Source = null;
     }
@@ -996,6 +1027,8 @@ public partial class MainWindow : Window
         RefreshOverlayOpacity();
     }
 
+    // Stops a running card transition and shows the card at its destination. The window itself
+    // is not touched: in the envelope the card simply finishes where it was heading.
     private void CancelPureModeBoundsAnimation()
     {
         if (!_settings.PureMode || !_isAnimatingHeight)
@@ -1005,7 +1038,224 @@ public partial class MainWindow : Window
 
         _isAnimatingHeight = false;
         _heightAnimStopwatch.Stop();
+        _pureBoundsAnimFrom = _pureBoundsAnimTarget;
+        LayoutPureCardBackdrop(1.0);
         UpdateRenderingSubscription();
+    }
+
+    private double CurrentPureAnimationProgress()
+        => EaseInOutCubic(Math.Min(1.0, _heightAnimStopwatch.Elapsed.TotalMilliseconds / WindowAnimDurationMs));
+
+    // The card rect visible on screen. Inside the envelope the HWND is larger than the card, so
+    // the window rect alone does not describe where the card is.
+    private PixelRect GetCurrentPureCardRect()
+    {
+        if (_pureEnvelopeActive && _isAnimatingHeight)
+        {
+            return WindowBoundsGeometry.Interpolate(_pureBoundsAnimFrom, _pureBoundsAnimTarget,
+                CurrentPureAnimationProgress());
+        }
+
+        if (_pureEnvelopeActive)
+        {
+            return _pureBoundsAnimTarget;
+        }
+
+        return _windowPlacementCoordinator.GetWindowRect(new WindowInteropHelper(this).Handle);
+    }
+
+    // The settled card rect (the destination while animating), for placement and hover bounds.
+    private PixelRect GetPureCardPlacementRect(nint hwnd)
+    {
+        SyncPureEnvelopeWithWindow(hwnd);
+        return _pureEnvelopeActive ? _pureBoundsAnimTarget : _windowPlacementCoordinator.GetWindowRect(hwnd);
+    }
+
+    private Rect ToEnvelopeDip(PixelRect rect)
+    {
+        var dpi = VisualTreeHelper.GetDpi(this);
+        return new Rect(
+            (rect.Left - _pureEnvelopeRect.Left) / dpi.DpiScaleX,
+            (rect.Top - _pureEnvelopeRect.Top) / dpi.DpiScaleY,
+            rect.Width / dpi.DpiScaleX,
+            rect.Height / dpi.DpiScaleY);
+    }
+
+    // A drag moves the whole envelope; carry the card rects and anchor along with it. A size
+    // change made by someone else (a DPI switch) invalidates the envelope instead.
+    private void SyncPureEnvelopeWithWindow(nint hwnd)
+    {
+        if (!_pureEnvelopeActive)
+        {
+            return;
+        }
+
+        var window = _windowPlacementCoordinator.GetWindowRect(hwnd);
+        if (window == _pureEnvelopeRect || window.Width <= 0 || window.Height <= 0)
+        {
+            return;
+        }
+
+        if (window.Width != _pureEnvelopeRect.Width || window.Height != _pureEnvelopeRect.Height)
+        {
+            ExitPureEnvelope(resizeWindowToCard: false);
+            return;
+        }
+
+        var dx = window.Left - _pureEnvelopeRect.Left;
+        var dy = window.Top - _pureEnvelopeRect.Top;
+        _pureEnvelopeRect = window;
+        _pureBoundsAnimFrom = Offset(_pureBoundsAnimFrom, dx, dy);
+        _pureBoundsAnimTarget = Offset(_pureBoundsAnimTarget, dx, dy);
+        _pureCardCenterX += dx;
+        _pureCardCenterY += dy;
+        ApplyMouseTrackerBounds();
+    }
+
+    private static PixelRect Offset(PixelRect rect, int dx, int dy)
+        => new(rect.Left + dx, rect.Top + dy, rect.Right + dx, rect.Bottom + dy);
+
+    // Places the content at its final card rect inside the envelope. The text never reflows
+    // during a transition; only the backdrop and its clip move.
+    private void LayoutPureShell(PixelRect target)
+    {
+        var margin = _pureShellMargin;
+        var final = ToEnvelopeDip(target);
+        ShellBorder.HorizontalAlignment = System.Windows.HorizontalAlignment.Left;
+        ShellBorder.VerticalAlignment = VerticalAlignment.Top;
+        ShellBorder.Margin = new Thickness(final.X + margin.Left, final.Y + margin.Top, 0, 0);
+        ShellBorder.Width = Math.Max(0, final.Width - margin.Left - margin.Right);
+        ShellBorder.Height = Math.Max(0, final.Height - margin.Top - margin.Bottom);
+        ShellBackdrop.HorizontalAlignment = System.Windows.HorizontalAlignment.Left;
+        ShellBackdrop.VerticalAlignment = VerticalAlignment.Top;
+        ShellBorder.Clip = _pureCardClip;
+    }
+
+    private Thickness _pureShellMargin;
+
+    private void LayoutPureCardBackdrop(double eased)
+    {
+        if (!_pureEnvelopeActive)
+        {
+            return;
+        }
+
+        var from = ToEnvelopeDip(_pureBoundsAnimFrom);
+        var to = ToEnvelopeDip(_pureBoundsAnimTarget);
+        var t = Math.Clamp(eased, 0.0, 1.0);
+        var x = from.X + (to.X - from.X) * t;
+        var y = from.Y + (to.Y - from.Y) * t;
+        var width = from.Width + (to.Width - from.Width) * t;
+        var height = from.Height + (to.Height - from.Height) * t;
+        var margin = _pureShellMargin;
+        var card = new Rect(x + margin.Left, y + margin.Top,
+            Math.Max(0, width - margin.Left - margin.Right), Math.Max(0, height - margin.Top - margin.Bottom));
+
+        ShellBackdrop.Margin = new Thickness(card.X, card.Y, 0, 0);
+        ShellBackdrop.Width = card.Width;
+        ShellBackdrop.Height = card.Height;
+
+        // Clip the (final-size) content to the moving card so text never spills past its edges.
+        var radius = ShellBackdrop.CornerRadius.TopLeft;
+        _pureCardClip.Rect = new Rect(card.X - ShellBorder.Margin.Left, card.Y - ShellBorder.Margin.Top,
+            card.Width, card.Height);
+        _pureCardClip.RadiusX = radius;
+        _pureCardClip.RadiusY = radius;
+    }
+
+    // Grows (or first creates) the envelope so it contains <paramref name="needed"/>. Returns the
+    // window rect to apply after the caller has laid out the card for it, or null when the
+    // current window already fits. Growing is the only time Pure Mode resizes its HWND.
+    private PixelRect? EnsurePureEnvelope(MonitorDescriptor monitor, PixelRect needed)
+    {
+        if (_pureEnvelopeActive && WindowBoundsGeometry.Contains(_pureEnvelopeRect, needed))
+        {
+            return null;
+        }
+
+        if (!_pureEnvelopeActive)
+        {
+            _pureShellMargin = ShellBorder.Margin;
+        }
+
+        var padX = Math.Max((int)Math.Round(PureEnvelopePaddingXDip * monitor.ScaleX), needed.Width / 3);
+        var padY = Math.Max((int)Math.Round(PureEnvelopePaddingYDip * monitor.ScaleY), needed.Height / 2);
+        _pureEnvelopeRect = WindowBoundsGeometry.Envelope(needed, monitor, padX, padY);
+        _pureEnvelopeActive = true;
+        return _pureEnvelopeRect;
+    }
+
+    // Leaves the envelope: restores the stretched layout and, optionally, shrinks the HWND to
+    // the card so mode switches and placement code see a window that is exactly the card.
+    private void ExitPureEnvelope(bool resizeWindowToCard)
+    {
+        if (!_pureEnvelopeActive)
+        {
+            return;
+        }
+
+        var card = _pureBoundsAnimTarget;
+        _isAnimatingHeight = false;
+        _heightAnimStopwatch.Stop();
+        _pureEnvelopeActive = false;
+        ResetPureCanvasLayout();
+        ApplyMouseTrackerBounds();
+        UpdateRenderingSubscription();
+        if (resizeWindowToCard)
+        {
+            var hwnd = new WindowInteropHelper(this).Handle;
+            if (_windowPlacementCoordinator.GetWindowRect(hwnd) != card)
+            {
+                ApplyNativeWindowRect(hwnd, card);
+            }
+        }
+    }
+
+    private void ResetPureCanvasLayout()
+    {
+        ShellBorder.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch;
+        ShellBorder.VerticalAlignment = VerticalAlignment.Stretch;
+        ShellBorder.Width = double.NaN;
+        ShellBorder.Height = double.NaN;
+        ShellBorder.Margin = _pureShellMargin;
+        ShellBorder.Clip = null;
+        ShellBackdrop.HorizontalAlignment = System.Windows.HorizontalAlignment.Stretch;
+        ShellBackdrop.VerticalAlignment = VerticalAlignment.Stretch;
+        ShellBackdrop.Width = double.NaN;
+        ShellBackdrop.Height = double.NaN;
+        ShellBackdrop.Margin = _pureShellMargin;
+    }
+
+    // Hover fading must follow the visible card, not the transparent envelope around it.
+    private void ApplyMouseTrackerBounds()
+    {
+        if (_mouseTracker is null)
+        {
+            return;
+        }
+
+        if (_pureEnvelopeActive)
+        {
+            var card = _pureBoundsAnimTarget;
+            _mouseTracker.SetBounds(card.Left, card.Top, card.Right, card.Bottom);
+        }
+        else
+        {
+            _mouseTracker.ClearBounds();
+        }
+    }
+
+    // Legacy center coordinates (DIP) of the card, for the PureModeWindowX/Y settings.
+    private (int X, int Y) GetPureCardCenterDip()
+    {
+        if (!_pureEnvelopeActive)
+        {
+            return ((int)Math.Round(Left + GetCurrentLogicalSize(ActualWidth, Width, 180) / 2.0),
+                (int)Math.Round(Top + GetCurrentLogicalSize(ActualHeight, Height, 70) / 2.0));
+        }
+
+        var card = ToEnvelopeDip(_pureBoundsAnimTarget);
+        return ((int)Math.Round(Left + card.X + card.Width / 2.0), (int)Math.Round(Top + card.Y + card.Height / 2.0));
     }
 
     private void QueuePureModeLayoutRefresh()
@@ -1024,12 +1274,112 @@ public partial class MainWindow : Window
         }, DispatcherPriority.Loaded);
     }
 
-    private System.Windows.Size GetDesiredPureModeCardSize()
+    private System.Windows.Size GetDesiredPureModeCardSize() => GetDesiredPureModeCardSize(GetShownPureCardContent());
+
+    private System.Windows.Size GetDesiredPureModeCardSize(PureCardContent content)
     {
-        var measured = MeasurePureModeWindowSize();
+        var measured = MeasurePureModeWindowSize(content);
         return new System.Windows.Size(
             Math.Clamp(measured.Width, 180.0, PureModeMaxCardWidth),
             Math.Clamp(measured.Height, 70.0, PureModeMaxCardHeight));
+    }
+
+    // The texts that determine a Pure Mode card's size.
+    private sealed record PureCardContent(
+        string Current,
+        string? Duet,
+        IReadOnlyList<(string Text, TextBlock Element, double FontSize)> Secondary,
+        string? Previous,
+        string? Next);
+
+    private PureCardContent GetShownPureCardContent()
+    {
+        var currentFontSize = _settings.MaxCurrentFontSize;
+        var translationSize = TranslationTypography.GetFontSize(_settings.TranslationFontSize);
+        return new PureCardContent(
+            _currentLyric.DisplayText,
+            _duetLyric.Line is not null ? _duetLyric.DisplayText : null,
+            VisibleLyricViews().SelectMany(view => view.GetAuxiliaryRows(currentFontSize, translationSize))
+                .Select(row => (row.Text, row.Element, row.FontSize)).ToArray(),
+            PreviousLyricText.Visibility == Visibility.Visible ? PreviousLyricText.Text : null,
+            NextLyricText.Visibility == Visibility.Visible ? NextLyricText.Text : null);
+    }
+
+    // Mirrors BindLyricViews/ApplyLyricContent for a lyric state that is not on screen yet.
+    private PureCardContent GetPureCardContent(LyricsPresentation presentation)
+    {
+        var currentFontSize = _settings.MaxCurrentFontSize;
+        var translationSize = TranslationTypography.GetFontSize(_settings.TranslationFontSize);
+        var rows = new List<(string Text, TextBlock Element, double FontSize)>();
+        void AddRows(LyricsLine? line, string? romanization, string? translation)
+        {
+            foreach (var vocal in line?.BackgroundVocals ?? [])
+                if (!string.IsNullOrWhiteSpace(vocal.Text)) rows.Add((vocal.Text, CurrentLyricText, currentFontSize * 0.64));
+            if (!string.IsNullOrWhiteSpace(romanization)) rows.Add((romanization, RomanizationLyricText, translationSize));
+            var cleaned = _settings.ShowTranslation ? LyricsTranslationFilter.Clean(translation) : null;
+            if (!string.IsNullOrWhiteSpace(cleaned)) rows.Add((cleaned, TranslationLyricText, translationSize));
+        }
+
+        AddRows(presentation.DisplayedLine, presentation.RomanizationText, presentation.TranslationText);
+        var duet = presentation.DuetLine;
+        if (duet is not null) AddRows(duet, presentation.DuetRomanizationText, duet.Translation);
+        var showNext = _settings.ShowNextLine && !_settings.SingleLineMode && (!_settings.TwoLineMode || duet is null);
+        return new PureCardContent(
+            presentation.CurrentText,
+            duet?.Text,
+            rows,
+            PreviousLyricText.Visibility == Visibility.Visible && _settings.ShowPreviousLine ? presentation.PreviousText : null,
+            showNext ? presentation.NextText : null);
+    }
+
+    // Distinct lyric states the display will move through in the next few seconds.
+    private IEnumerable<(ActiveLyricState State, RuntimeSnapshot Snapshot)> UpcomingSnapshots()
+    {
+        var snapshot = _runtimeService.GetFrameSnapshot();
+        if (snapshot.Document is null || snapshot.Player is not { } player
+            || !ReferenceEquals(snapshot.Document, _displayedLyricDocument))
+        {
+            yield break;
+        }
+
+        var lastCurrent = snapshot.ActiveLyric.CurrentLine;
+        var lastDuet = snapshot.ActiveLyric.DuetLine;
+        var changes = 0;
+        for (var ahead = LookaheadStepSeconds; ahead <= LookaheadSeconds && changes < LookaheadLineChanges;
+             ahead += LookaheadStepSeconds)
+        {
+            var future = player with { Position = player.Position + ahead };
+            var state = _lookaheadSynchronizer.Resolve(snapshot.Document, future,
+                _runtimeService.LyricsOffsetSeconds + _runtimeService.LineLeadSeconds, _settings.ApplyNativeLyricOffset);
+            if (ReferenceEquals(state.CurrentLine, lastCurrent) && ReferenceEquals(state.DuetLine, lastDuet))
+            {
+                continue;
+            }
+
+            lastCurrent = state.CurrentLine;
+            lastDuet = state.DuetLine;
+            changes++;
+            yield return (state, snapshot with { Player = future, ActiveLyric = state });
+        }
+    }
+
+    private IEnumerable<ActiveLyricState> UpcomingStates() => UpcomingSnapshots().Select(item => item.State);
+
+    // The largest card the next few lines will need, or null when nothing is coming.
+    private (double Width, double Height)? EstimateUpcomingPureModeCardSize()
+    {
+        (double Width, double Height)? largest = null;
+        foreach (var (_, future) in UpcomingSnapshots())
+        {
+            var presentation = OverlaySnapshotPresenter.CreateLyrics(future, showTranslation: _settings.ShowTranslation,
+                includeDetailedDiagnostics: false, showRomanization: _settings.ShowRomanization);
+            var size = GetDesiredPureModeCardSize(GetPureCardContent(presentation));
+            largest = largest is { } known
+                ? (Math.Max(known.Width, size.Width), Math.Max(known.Height, size.Height))
+                : (size.Width, size.Height);
+        }
+
+        return largest;
     }
 
     private void AnimateOverlayOpacity(double targetOpacity)
@@ -1058,6 +1408,9 @@ public partial class MainWindow : Window
         var diagnosticsWindow = _diagnosticsWindow;
         _diagnosticsWindow = null;
         diagnosticsWindow?.Close();
+        var lyricsSelectionWindow = _lyricsSelectionWindow;
+        _lyricsSelectionWindow = null;
+        lyricsSelectionWindow?.Close();
         HeaderPanel.SizeChanged -= OnDiagnosticContentSizeChanged;
         LocalizationManager.Instance.LanguageChanged -= OnUiLanguageChanged;
         UpdateRenderingSubscription();
@@ -1105,8 +1458,7 @@ public partial class MainWindow : Window
 
         if (_settings.PureMode && WindowState == WindowState.Normal)
         {
-            _settings.PureModeWindowX = (int)Math.Round(Left + GetCurrentLogicalSize(ActualWidth, Width, 180) / 2.0);
-            _settings.PureModeWindowY = (int)Math.Round(Top + GetCurrentLogicalSize(ActualHeight, Height, 70) / 2.0);
+            (_settings.PureModeWindowX, _settings.PureModeWindowY) = GetPureCardCenterDip();
         }
     }
 
@@ -1133,10 +1485,9 @@ public partial class MainWindow : Window
             var pureContextScale = twoLine ? 0.72 : 0.56;
             var pureContextFontSize = Math.Clamp(pureCurrentFontSize * pureContextScale, 12, _settings.ContextFontSize);
 
-            CurrentLyricText.FontSize = pureCurrentFontSize;
             PreviousLyricText.FontSize = pureContextFontSize;
             NextLyricText.FontSize = pureContextFontSize;
-            UpdateTranslationFont();
+            ApplyLyricFontSizes(pureCurrentFontSize);
             return;
         }
 
@@ -1148,31 +1499,37 @@ public partial class MainWindow : Window
         var totalHorizontalChrome = shellMargin * 2 + shellPadding * 2;
         var contentWidth = Math.Max(140, effectiveWindowWidth - totalHorizontalChrome - 16);
 
-        var currentText = string.IsNullOrWhiteSpace(_currentLyricText) ? "Current lyric line" : _currentLyricText;
+        var currentText = string.IsNullOrWhiteSpace(_currentLyric.DisplayText) ? "Current lyric line" : _currentLyric.DisplayText;
+        var contentHeight = singleLine ? 72 : twoLine ? Math.Max(64, effectiveWindowHeight * 0.26) : Math.Max(88, effectiveWindowHeight * 0.48);
         var currentFontSize = FitFontSize(
             currentText,
             _settings.MaxCurrentFontSize,
             14,
             Math.Max(140, contentWidth),
-            singleLine ? 72 : twoLine ? Math.Max(64, effectiveWindowHeight * 0.26) : Math.Max(88, effectiveWindowHeight * 0.48),
+            contentHeight,
             singleLine);
+        if (_duetLyric.Line is not null)
+        {
+            currentFontSize = FitFontSize(_duetLyric.DisplayText, currentFontSize, 14, contentWidth, contentHeight, singleLine);
+        }
         var contextScale = twoLine ? 0.72 : 0.56;
         var contextFontSize = Math.Clamp(currentFontSize * contextScale, 12, _settings.ContextFontSize);
 
-        CurrentLyricText.FontSize = currentFontSize;
         PreviousLyricText.FontSize = contextFontSize;
         NextLyricText.FontSize = contextFontSize;
-        UpdateTranslationFont();
+        ApplyLyricFontSizes(currentFontSize);
     }
 
-    private void UpdateTranslationFont()
+    private void ApplyLyricFontSizes(double currentFontSize)
     {
-        TranslationLyricText.FontSize = TranslationTypography.GetFontSize(_settings.TranslationFontSize);
-        TranslationLyricText.LineHeight = TranslationLyricText.FontSize * 1.35;
-        TranslationLyricText.MaxHeight = TranslationLyricText.LineHeight * 2;
-        RomanizationLyricText.FontSize = TranslationLyricText.FontSize;
-        RomanizationLyricText.LineHeight = TranslationLyricText.LineHeight;
-        RomanizationLyricText.MaxHeight = TranslationLyricText.MaxHeight;
+        var translationSize = TranslationTypography.GetFontSize(_settings.TranslationFontSize);
+        foreach (var view in _lyricViews) view.SetFontSizes(currentFontSize, translationSize);
+    }
+
+    private IEnumerable<LyricLineView> VisibleLyricViews()
+    {
+        yield return _currentLyric;
+        if (_duetLyric.Line is not null) yield return _duetLyric;
     }
 
     private void ApplyRestoredPlacement()
@@ -1233,7 +1590,9 @@ public partial class MainWindow : Window
         }
 
         var handle = new WindowInteropHelper(this).Handle;
-        var captured = _windowPlacementCoordinator.Capture(handle);
+        var captured = _settings.PureMode
+            ? _windowPlacementCoordinator.Capture(handle, GetPureCardPlacementRect(handle))
+            : _windowPlacementCoordinator.Capture(handle);
         if (captured is null)
         {
             return;
@@ -1270,6 +1629,8 @@ public partial class MainWindow : Window
 
     private void ApplyAppearanceSettings()
     {
+        // Leave the envelope first: the shell margins below assume a stretched layout.
+        ExitPureEnvelope(resizeWindowToCard: true);
         MinWidth = _settings.PureMode ? 180 : _settings.MinWindowWidth;
         MinHeight = _settings.PureMode ? 70 : _settings.MinWindowHeight;
         ResizeMode = _settings.PureMode ? System.Windows.ResizeMode.NoResize : System.Windows.ResizeMode.CanResize;
@@ -1281,6 +1642,8 @@ public partial class MainWindow : Window
         ShellBorder.Padding = _settings.PureMode ? new Thickness(6) : new Thickness(12);
         ShellBorder.Margin = _settings.PureMode ? new Thickness(6) : new Thickness(14);
         ShellBorder.Clip = null;
+        ShellBackdrop.Margin = ShellBorder.Margin;
+        ShellBackdrop.CornerRadius = ShellBorder.CornerRadius;
         // Pure Mode content sizes to the real card HWND; normal mode stretches to its window.
         ContentRoot.HorizontalAlignment = _settings.PureMode ? System.Windows.HorizontalAlignment.Center : System.Windows.HorizontalAlignment.Stretch;
         ContentRoot.VerticalAlignment = _settings.PureMode ? System.Windows.VerticalAlignment.Center : System.Windows.VerticalAlignment.Stretch;
@@ -1289,9 +1652,7 @@ public partial class MainWindow : Window
         FooterPanel.Visibility = _settings.PureMode || !_settings.ShowDebugPanel ? Visibility.Collapsed : Visibility.Visible;
         var twoLineMode = _settings.TwoLineMode && !_settings.SingleLineMode;
         PreviousLyricText.Visibility = _settings.ShowPreviousLine && !_settings.SingleLineMode && !twoLineMode ? Visibility.Visible : Visibility.Collapsed;
-        NextLyricText.Visibility = _settings.ShowNextLine && !_settings.SingleLineMode ? Visibility.Visible : Visibility.Collapsed;
-        CurrentLyricText.TextWrapping = _settings.SingleLineMode ? TextWrapping.NoWrap : TextWrapping.Wrap;
-        CurrentLyricText.TextTrimming = _settings.SingleLineMode ? TextTrimming.CharacterEllipsis : TextTrimming.None;
+        NextLyricText.Visibility = CanShowNextLyric ? Visibility.Visible : Visibility.Collapsed;
         PreviousLyricText.MaxHeight = _settings.PureMode ? double.PositiveInfinity : 52;
         NextLyricText.MaxHeight = _settings.PureMode ? double.PositiveInfinity : 52;
 
@@ -1299,7 +1660,8 @@ public partial class MainWindow : Window
         {
             PreviousLyricRow.Height = new GridLength(0);
             CurrentLyricRow.Height = GridLength.Auto;
-            NextLyricRow.Height = GridLength.Auto;
+            NextLyricRow.Height = CanShowNextLyric && !string.IsNullOrWhiteSpace(_currentNextText)
+                ? GridLength.Auto : new GridLength(0);
             System.Windows.Controls.Grid.SetRow(CurrentLyricContainer, 1);
             System.Windows.Controls.Grid.SetRow(NextLyricText, 2);
             CurrentLyricText.Margin = _settings.PureMode ? new Thickness(0, 0, 0, 4) : new Thickness(0, 0, 0, 10);
@@ -1325,21 +1687,26 @@ public partial class MainWindow : Window
         }
 
         var alpha = (byte)Math.Clamp(_settings.BackgroundAlpha ?? (_settings.PureMode ? 72 : 200), 0, 255);
-        ShellBorder.Background = new SolidColorBrush(MediaColor.FromArgb(alpha, 20, 20, 22));
+        ShellBackdrop.Background = new SolidColorBrush(MediaColor.FromArgb(alpha, 20, 20, 22));
 
         var fontFamily = FontFamilyResolver.Resolve(_settings.FontFamily, _settings.ChineseFontFamily);
-        CurrentLyricText.FontFamily = fontFamily;
         PreviousLyricText.FontFamily = fontFamily;
         NextLyricText.FontFamily = fontFamily;
-        TranslationLyricText.FontFamily = TranslationTypography.ResolveFontFamily(_settings.TranslationFontFamily);
-        TranslationLyricText.TextWrapping = TextWrapping.Wrap;
-        TranslationLyricText.Foreground = CreateBrush(_settings.ContextLineColor, Colors.White);
-        TranslationLyricText.Opacity = 0.8;
-        RomanizationLyricText.FontFamily = TranslationLyricText.FontFamily;
-        RomanizationLyricText.TextWrapping = TextWrapping.Wrap;
-        RomanizationLyricText.Foreground = CreateBrush(_settings.ContextLineColor, Colors.White);
-        RomanizationLyricText.Opacity = 0.8;
-        BindCurrentLyric(_currentLyricText, _displayedLyricLine, _displayedLyricLine?.Translation, _displayedLyricLine?.Romanization, _lastFramePlaying);
+        var translationFont = TranslationTypography.ResolveFontFamily(_settings.TranslationFontFamily);
+        var translationColor = CreateBrush(_settings.ContextLineColor, Colors.White);
+        var sung = ParseColorOrFallback(_lastFramePlaying ? _settings.CurrentLineColor : _settings.PausedLineColor, Colors.White);
+        foreach (var view in _lyricViews)
+        {
+            view.MainText.FontFamily = fontFamily;
+            view.MainText.Margin = CurrentLyricText.Margin;
+            view.MainText.TextWrapping = _settings.SingleLineMode ? TextWrapping.NoWrap : TextWrapping.Wrap;
+            view.MainText.TextTrimming = _settings.SingleLineMode ? TextTrimming.CharacterEllipsis : TextTrimming.None;
+            view.SetAuxiliaryAppearance(translationFont, translationColor);
+            var line = view.Line;
+            var romanization = LyricRomanization.Resolve(_displayedLyricDocument, line, _settings.ShowRomanization);
+            view.Bind(view.DisplayText, line, romanization, _settings.ShowTranslation ? line?.Translation : null,
+                _settings.WordHighlightEnabled, sung);
+        }
         SubtitleText.FontFamily = fontFamily;
 
         CurrentLyricGlowEffect.Color = ParseColorOrFallback(_settings.GlowColor, Colors.White);
@@ -1383,6 +1750,7 @@ public partial class MainWindow : Window
             }
 
             _mouseTracker.Start(hwnd);
+            ApplyMouseTrackerBounds();
         }
         else
         {
@@ -1510,6 +1878,44 @@ public partial class MainWindow : Window
         _diagnosticsWindow.Activate();
     }
 
+    private void LyricsContextMenu_OnOpened(object sender, RoutedEventArgs e)
+    {
+        RefreshLyricsMenuItem.IsEnabled = _canManageLyrics;
+        ChooseLyricsMenuItem.IsEnabled = _canManageLyrics;
+    }
+
+    private void RefreshLyricsMenuItem_OnClick(object sender, RoutedEventArgs e) => RefreshCurrentLyrics();
+
+    private void ChooseLyricsMenuItem_OnClick(object sender, RoutedEventArgs e) => OpenLyricsSelection();
+
+    private void RefreshCurrentLyrics()
+    {
+        if (!_isClosed && _canManageLyrics)
+            _runtimeService.RequestLyricsRefresh(_runtimeService.GetFrameSnapshot().TrackGeneration);
+    }
+
+    private void OpenLyricsSelection()
+    {
+        if (_isClosed || !_canManageLyrics) return;
+        var snapshot = _runtimeService.GetFrameSnapshot();
+        if (!snapshot.CanManageLyrics) return;
+        if (_lyricsSelectionWindow is null || _lyricsSelectionWindow.TrackGeneration != snapshot.TrackGeneration)
+        {
+            _lyricsSelectionWindow?.Close();
+            var window = new LyricsSelectionWindow(_runtimeService, snapshot);
+            window.Closed += (_, _) =>
+            {
+                if (ReferenceEquals(_lyricsSelectionWindow, window)) _lyricsSelectionWindow = null;
+            };
+            _lyricsSelectionWindow = window;
+        }
+
+        if (_lyricsSelectionWindow.WindowState == WindowState.Minimized)
+            _lyricsSelectionWindow.WindowState = WindowState.Normal;
+        _lyricsSelectionWindow.Show();
+        _lyricsSelectionWindow.Activate();
+    }
+
     private void UpdateDiagnosticsWindow(RuntimeSnapshot? snapshot = null)
     {
         if (_diagnosticsWindow is not { } window) return;
@@ -1559,14 +1965,15 @@ public partial class MainWindow : Window
 
     private void SetPureMode(bool enabled, bool persist = true)
     {
+        // Shrink back to the card so the captured placement is the card, not the envelope.
+        ExitPureEnvelope(resizeWindowToCard: true);
         // Save both legacy coordinates and per-monitor placement before switching mode.
         CaptureCurrentPlacement();
         if (WindowState == WindowState.Normal)
         {
             if (_settings.PureMode)
             {
-                _settings.PureModeWindowX = (int)Math.Round(Left + GetCurrentLogicalSize(ActualWidth, Width, 180) / 2.0);
-                _settings.PureModeWindowY = (int)Math.Round(Top + GetCurrentLogicalSize(ActualHeight, Height, 70) / 2.0);
+                (_settings.PureModeWindowX, _settings.PureModeWindowY) = GetPureCardCenterDip();
             }
             else
             {
@@ -1719,8 +2126,7 @@ public partial class MainWindow : Window
             if (_settings.PureMode)
             {
                 // PureMode: save center point — ApplyWindowBounds starts at Width=0 so Left=center
-                _settings.PureModeWindowX = (int)Math.Round(Left + GetCurrentLogicalSize(ActualWidth, Width, 180) / 2.0);
-                _settings.PureModeWindowY = (int)Math.Round(Top + GetCurrentLogicalSize(ActualHeight, Height, 70) / 2.0);
+                (_settings.PureModeWindowX, _settings.PureModeWindowY) = GetPureCardCenterDip();
             }
             else
             {
@@ -1771,58 +2177,78 @@ public partial class MainWindow : Window
         try
         {
             var hwnd = new WindowInteropHelper(this).Handle;
-            var currentRect = _windowPlacementCoordinator.GetWindowRect(hwnd);
+            SyncPureEnvelopeWithWindow(hwnd);
+            var currentRect = GetCurrentPureCardRect();
             var monitors = _windowPlacementCoordinator.GetMonitors();
             if (currentRect.Width <= 0 || currentRect.Height <= 0 || monitors.Count == 0)
             {
                 return;
             }
 
-            // Anchor on the live window center. Round-tripping through the stored
-            // monitor-relative center re-quantizes the position on every lyric, which shifts the
-            // card by a pixel or two each line and reads as jitter.
             var monitor = _windowPlacementCoordinator.GetMonitorForWindow(hwnd, monitors)
                 ?? WindowPlacementService.FindMonitorForRect(monitors, currentRect);
+            if (!_pureEnvelopeActive)
+            {
+                // Entering the envelope: the window is the card, so its center is the anchor.
+                _pureCardCenterX = currentRect.Left + currentRect.Width / 2.0;
+                _pureCardCenterY = currentRect.Top + currentRect.Height / 2.0;
+            }
+
+            // Every card is centered on the same anchor. Re-centering on the previous (rounded or
+            // mid-animation) rect drifted by a pixel, which restarted or snapped transitions.
             var requestedSize = GetDesiredPureModeCardSize();
-            var targetRect = WindowBoundsGeometry.ResizeAroundCenter(
-                currentRect,
+            var shownRect = _pureEnvelopeActive ? _pureBoundsAnimTarget : currentRect;
+            var shownSize = (shownRect.Width / monitor.ScaleX, shownRect.Height / monitor.ScaleY);
+            var desired = (requestedSize.Width, requestedSize.Height);
+            var shrinking = desired.Width < shownSize.Item1 - 1 || desired.Height < shownSize.Item2 - 1;
+            // Only a shrink needs the forecast; growth is always applied at once.
+            var heldSize = LookaheadSizing.Resolve(desired, shownSize,
+                _pureEnvelopeActive && shrinking ? EstimateUpcomingPureModeCardSize() : null);
+            var targetRect = WindowBoundsGeometry.CenterAt(
+                _pureCardCenterX,
+                _pureCardCenterY,
                 monitor,
-                requestedSize.Width,
-                requestedSize.Height);
+                heldSize.Width,
+                heldSize.Height);
             var targetWidthDip = targetRect.Width / monitor.ScaleX;
             var targetHeightDip = targetRect.Height / monitor.ScaleY;
 
             UpdateTextMaxWidths(targetWidthDip);
             ApplyAdaptiveFontSizes(targetWidthDip, targetHeightDip);
-            ShellBorder.Clip = null;
 
-            if (currentRect.Left == targetRect.Left
-                && currentRect.Top == targetRect.Top
-                && currentRect.Right == targetRect.Right
-                && currentRect.Bottom == targetRect.Bottom)
+            if (_pureEnvelopeActive && targetRect == _pureBoundsAnimTarget)
             {
-                CancelPureModeBoundsAnimation();
+                // Already showing (or heading to) this card; let a running transition finish.
                 return;
             }
 
-            // Differences of 1 pixel or less do not warrant a visible animated transition;
-            // apply the target rect immediately to avoid a jarring snap.
-            if (Math.Abs(currentRect.Left - targetRect.Left) <= 1
-                && Math.Abs(currentRect.Top - targetRect.Top) <= 1
-                && Math.Abs(currentRect.Right - targetRect.Right) <= 1
-                && Math.Abs(currentRect.Bottom - targetRect.Bottom) <= 1)
-            {
-                CancelPureModeBoundsAnimation();
-                ApplyNativeWindowRect(hwnd, targetRect);
-                return;
-            }
-
-            // A new lyric can interrupt an active transition. The actual HWND rect is always
-            // the new start, so restarting cannot jump back to an earlier target.
-            _pureBoundsAnimFrom = currentRect;
+            var animate = Math.Abs(currentRect.Left - targetRect.Left) > 1
+                || Math.Abs(currentRect.Top - targetRect.Top) > 1
+                || Math.Abs(currentRect.Right - targetRect.Right) > 1
+                || Math.Abs(currentRect.Bottom - targetRect.Bottom) > 1;
+            var windowRect = EnsurePureEnvelope(monitor, WindowBoundsGeometry.Union(currentRect, targetRect));
+            _pureBoundsAnimFrom = animate ? currentRect : targetRect;
             _pureBoundsAnimTarget = targetRect;
-            _heightAnimStopwatch.Restart();
-            _isAnimatingHeight = true;
+            LayoutPureShell(targetRect);
+            LayoutPureCardBackdrop(0.0);
+            ApplyMouseTrackerBounds();
+            if (windowRect is { } grown && _windowPlacementCoordinator.GetWindowRect(hwnd) != grown)
+            {
+                // The layout above is already arranged for the new window rect.
+                ApplyNativeWindowRect(hwnd, grown);
+            }
+
+            if (animate)
+            {
+                _heightAnimStopwatch.Restart();
+                _isAnimatingHeight = true;
+            }
+            else
+            {
+                _isAnimatingHeight = false;
+                _heightAnimStopwatch.Stop();
+            }
+
             UpdateRenderingSubscription();
         }
         finally
@@ -1831,7 +2257,25 @@ public partial class MainWindow : Window
         }
     }
 
-    private System.Windows.Size MeasurePureModeWindowSize()
+    // Matches UpdateTextMaxWidths: lyric rows wrap 16 DIP inside the content, context rows 24.
+    private const double PureModeLyricWrapInset = 16.0;
+    private const double PureModeContextWrapInset = 24.0;
+
+    private double GetPureModeMaxCardWidth()
+    {
+        if (!_sourceInitialized)
+        {
+            return PureModeMaxCardWidth;
+        }
+
+        var monitor = _windowPlacementCoordinator.GetMonitorForWindow(new WindowInteropHelper(this).Handle,
+            _windowPlacementCoordinator.GetMonitors());
+        return monitor is null
+            ? PureModeMaxCardWidth
+            : Math.Min(PureModeMaxCardWidth, Math.Floor(monitor.WorkAreaPx.Width / monitor.ScaleX));
+    }
+
+    private System.Windows.Size MeasurePureModeWindowSize(PureCardContent content)
     {
         // Use PureMode-specific padding values
         var shellMargin = 6.0;
@@ -1844,7 +2288,8 @@ public partial class MainWindow : Window
         var extraWidthPadding = chromeWidth;
         var extraHeightPadding = chromeHeight + panelHeightPadding;
 
-        var maxContentWidth = PureModeMaxCardWidth - extraWidthPadding;
+        // The card can never be wider than the monitor's work area; measure for the width it gets.
+        var maxContentWidth = GetPureModeMaxCardWidth() - extraWidthPadding;
         var maxContentHeight = (PureModeMaxCardHeight - 40) - extraHeightPadding;
         var minContentWidth = 120;
 
@@ -1854,27 +2299,24 @@ public partial class MainWindow : Window
 
         // Shape each text once; the width search below only re-wraps the cached glyphs.
         var pixelsPerDip = VisualTreeHelper.GetDpi(this).PixelsPerDip;
-        var current = CreateLyricTextMeasurement(_currentLyricText, CurrentLyricText, currentFontSize, pixelsPerDip);
-        var romanization = RomanizationLyricText.Visibility == Visibility.Visible
-            ? CreateLyricTextMeasurement(RomanizationLyricText.Text, RomanizationLyricText,
-                TranslationTypography.GetFontSize(_settings.TranslationFontSize), pixelsPerDip)
+        var current = CreateLyricTextMeasurement(content.Current, CurrentLyricText, currentFontSize, pixelsPerDip);
+        var duet = content.Duet is not null
+            ? CreateLyricTextMeasurement(content.Duet, DuetLyricText, currentFontSize, pixelsPerDip)
             : null;
-        var translation = TranslationLyricText.Visibility == Visibility.Visible
-            ? CreateLyricTextMeasurement(TranslationLyricText.Text, TranslationLyricText,
-                TranslationTypography.GetFontSize(_settings.TranslationFontSize), pixelsPerDip)
+        var secondary = content.Secondary
+            .Select(row => CreateLyricTextMeasurement(row.Text, row.Element, row.FontSize, pixelsPerDip)).ToArray();
+        var previous = !string.IsNullOrWhiteSpace(content.Previous)
+            ? CreateLyricTextMeasurement(content.Previous, PreviousLyricText, contextFontSize, pixelsPerDip)
             : null;
-        var previous = PreviousLyricText.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(PreviousLyricText.Text)
-            ? CreateLyricTextMeasurement(PreviousLyricText.Text, PreviousLyricText, contextFontSize, pixelsPerDip)
-            : null;
-        var next = NextLyricText.Visibility == Visibility.Visible && !string.IsNullOrWhiteSpace(NextLyricText.Text)
-            ? CreateLyricTextMeasurement(NextLyricText.Text, NextLyricText, contextFontSize, pixelsPerDip)
+        var next = !string.IsNullOrWhiteSpace(content.Next)
+            ? CreateLyricTextMeasurement(content.Next, NextLyricText, contextFontSize, pixelsPerDip)
             : null;
 
-        var desiredContentWidth = Math.Max(current.NaturalWidth,
-            Math.Max(romanization?.NaturalWidth ?? 0,
-                Math.Max(translation?.NaturalWidth ?? 0, Math.Max(previous?.NaturalWidth ?? 0, next?.NaturalWidth ?? 0)))) + 24;
+        var desiredContentWidth = Math.Max(Math.Max(current.NaturalWidth, duet?.NaturalWidth ?? 0),
+            Math.Max(secondary.Select(text => text.NaturalWidth).DefaultIfEmpty().Max(),
+                Math.Max(previous?.NaturalWidth ?? 0, next?.NaturalWidth ?? 0))) + PureModeContextWrapInset + 2;
         var contentWidth = Math.Clamp(desiredContentWidth, minContentWidth, maxContentWidth);
-        var contentHeight = MeasureContentHeight(contentWidth, current, romanization, translation, previous, next);
+        var contentHeight = MeasureContentHeight(contentWidth, current, duet, secondary, previous, next);
 
         if (contentHeight > maxContentHeight)
         {
@@ -1885,7 +2327,7 @@ public partial class MainWindow : Window
             for (var iteration = 0; iteration < 12; iteration++)
             {
                 var mid = (low + high) / 2.0;
-                var midHeight = MeasureContentHeight(mid, current, romanization, translation, previous, next);
+                var midHeight = MeasureContentHeight(mid, current, duet, secondary, previous, next);
                 if (midHeight <= maxContentHeight)
                 {
                     bestWidth = mid;
@@ -1898,7 +2340,7 @@ public partial class MainWindow : Window
             }
 
             contentWidth = bestWidth;
-            contentHeight = MeasureContentHeight(contentWidth, current, romanization, translation, previous, next);
+            contentHeight = MeasureContentHeight(contentWidth, current, duet, secondary, previous, next);
         }
 
         return new System.Windows.Size(
@@ -1906,19 +2348,24 @@ public partial class MainWindow : Window
             Math.Ceiling(Math.Min(contentHeight, maxContentHeight) + extraHeightPadding));
     }
 
-    private double MeasureContentHeight(double contentWidth, LyricTextMeasurement current,
-        LyricTextMeasurement? romanization, LyricTextMeasurement? translation,
+    private double MeasureContentHeight(double contentWidth, LyricTextMeasurement current, LyricTextMeasurement? duet,
+        IReadOnlyList<LyricTextMeasurement> secondary,
         LyricTextMeasurement? previous, LyricTextMeasurement? next)
     {
-        var totalHeight = current.MeasureHeight(contentWidth,
-            _settings.SingleLineMode ? 1 : (_settings.PureMode ? 4 : 2));
-        if (romanization is not null)
+        var lyricMaxLines = _settings.SingleLineMode ? 1 : (_settings.PureMode ? 4 : 2);
+        // Wrap at the same widths UpdateTextMaxWidths gives the real TextBlocks. Measuring at the
+        // full content width let a line that only just fit there wrap on screen, pushing the
+        // translation outside the card.
+        var lyricWidth = Math.Max(1, contentWidth - PureModeLyricWrapInset);
+        var contextWidth = Math.Max(1, contentWidth - PureModeContextWrapInset);
+        var totalHeight = current.MeasureHeight(lyricWidth, lyricMaxLines);
+        if (duet is not null)
         {
-            totalHeight += romanization.MeasureHeight(contentWidth, 2) + 4;
+            totalHeight += duet.MeasureHeight(lyricWidth, lyricMaxLines) + DuetLyricText.Margin.Top + DuetLyricText.Margin.Bottom;
         }
-        if (translation is not null)
+        foreach (var text in secondary)
         {
-            totalHeight += translation.MeasureHeight(contentWidth, 2) + 4;
+            totalHeight += text.MeasureHeight(lyricWidth, 2) + 4;
         }
 
         // Use PureMode-specific margin values
@@ -1931,7 +2378,7 @@ public partial class MainWindow : Window
         if (showNext)
         {
             totalHeight += currentMarginBottom;
-            totalHeight += next!.MeasureHeight(contentWidth, 2);
+            totalHeight += next!.MeasureHeight(contextWidth, 2);
         }
         else if (_settings.TwoLineMode)
         {
@@ -1945,7 +2392,7 @@ public partial class MainWindow : Window
         {
             if (showPrevious)
             {
-                totalHeight += previous!.MeasureHeight(contentWidth, _settings.PureMode ? 4 : 2);
+                totalHeight += previous!.MeasureHeight(contextWidth, _settings.PureMode ? 4 : 2);
             }
 
             totalHeight += currentMarginTop + currentMarginBottom;
@@ -2021,11 +2468,9 @@ public partial class MainWindow : Window
 
         var currentMaxWidth = Math.Max(200, windowWidth - totalHorizontalChrome - 16);
         var contextMaxWidth = Math.Max(180, windowWidth - totalHorizontalChrome - 24);
-        CurrentLyricText.MaxWidth = currentMaxWidth;
+        foreach (var view in _lyricViews) view.SetMaxWidth(currentMaxWidth);
         PreviousLyricText.MaxWidth = contextMaxWidth;
         NextLyricText.MaxWidth = contextMaxWidth;
-        TranslationLyricText.MaxWidth = currentMaxWidth;
-        RomanizationLyricText.MaxWidth = currentMaxWidth;
         StatusText.MaxWidth = OverlayDiagnosticsLayout.GetStatusMaxWidth(windowWidth - totalHorizontalChrome);
     }
 
@@ -2038,7 +2483,8 @@ public partial class MainWindow : Window
             _settings.SingleLineMode,
             _settings.TwoLineMode,
             _settings.ShowDebugPanel,
-            _currentLyricText);
+            _currentLyric.DisplayText,
+            _canManageLyrics);
     }
 
     private static System.Windows.Media.Brush CreateBrush(string colorValue, MediaColor fallbackColor)

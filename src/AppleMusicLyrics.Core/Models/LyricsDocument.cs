@@ -8,4 +8,10 @@ public sealed record LyricsDocument(
     IReadOnlyList<LyricsLine> Lines,
     double? DurationSeconds = null,
     double LeadingSilenceSeconds = 0.0,
-    double NativeOffsetSeconds = 0.0);
+    double NativeOffsetSeconds = 0.0)
+{
+    public long? CatalogTrackId { get; init; }
+
+    public bool HasMultipleVocalists() => Lines.Select(line => line.VocalistId)
+        .Where(id => !string.IsNullOrEmpty(id)).Distinct(StringComparer.Ordinal).Skip(1).Any();
+}

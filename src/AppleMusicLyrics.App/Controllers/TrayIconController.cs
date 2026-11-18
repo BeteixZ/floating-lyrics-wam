@@ -17,6 +17,8 @@ public sealed class TrayIconController : IDisposable
     private readonly Forms.ToolStripMenuItem _twoLineMenuItem;
     private readonly Forms.ToolStripMenuItem _debugPanelMenuItem;
     private readonly Forms.ToolStripMenuItem _diagnosticsMenuItem;
+    private readonly Forms.ToolStripMenuItem _refreshLyricsMenuItem;
+    private readonly Forms.ToolStripMenuItem _chooseLyricsMenuItem;
     private readonly Forms.ToolStripMenuItem _settingsMenuItem;
     private readonly Forms.ToolStripMenuItem _exitMenuItem;
 
@@ -29,6 +31,8 @@ public sealed class TrayIconController : IDisposable
         Action toggleTwoLine,
         Action toggleDebugPanel,
         Action openDiagnostics,
+        Action refreshLyrics,
+        Action chooseLyrics,
         Action openSettings,
         Action exit)
     {
@@ -41,6 +45,9 @@ public sealed class TrayIconController : IDisposable
         _twoLineMenuItem = AddItem(menu, text.Text("Tray.TwoLine"), dispatcher, toggleTwoLine);
         _debugPanelMenuItem = AddItem(menu, text.Text("Tray.Debug"), dispatcher, toggleDebugPanel);
         _diagnosticsMenuItem = AddItem(menu, text.Text("Diagnostics.Open"), dispatcher, openDiagnostics);
+        menu.Items.Add(new Forms.ToolStripSeparator());
+        _refreshLyricsMenuItem = AddItem(menu, text.Text("Lyrics.Menu.Rescan"), dispatcher, refreshLyrics);
+        _chooseLyricsMenuItem = AddItem(menu, text.Text("Lyrics.Menu.Choose"), dispatcher, chooseLyrics);
         menu.Items.Add(new Forms.ToolStripSeparator());
         _settingsMenuItem = AddItem(menu, text.Text("Tray.Settings"), dispatcher, openSettings);
         _exitMenuItem = AddItem(menu, text.Text("Tray.Exit"), dispatcher, exit);
@@ -63,7 +70,8 @@ public sealed class TrayIconController : IDisposable
         bool singleLine,
         bool twoLine,
         bool showDebugPanel,
-        string? currentLyric)
+        string? currentLyric,
+        bool canManageLyrics)
     {
         var text = LocalizationManager.Instance;
         _showHideMenuItem.Text = text.Text(isOverlayVisible ? "Tray.Hide" : "Tray.Show");
@@ -73,6 +81,10 @@ public sealed class TrayIconController : IDisposable
         _twoLineMenuItem.Text = text.Text("Tray.TwoLine");
         _debugPanelMenuItem.Text = text.Text("Tray.Debug");
         _diagnosticsMenuItem.Text = text.Text("Diagnostics.Open");
+        _refreshLyricsMenuItem.Text = text.Text("Lyrics.Menu.Rescan");
+        _chooseLyricsMenuItem.Text = text.Text("Lyrics.Menu.Choose");
+        _refreshLyricsMenuItem.Enabled = canManageLyrics;
+        _chooseLyricsMenuItem.Enabled = canManageLyrics;
         _settingsMenuItem.Text = text.Text("Tray.Settings");
         _exitMenuItem.Text = text.Text("Tray.Exit");
         _clickThroughMenuItem.Checked = clickThrough;

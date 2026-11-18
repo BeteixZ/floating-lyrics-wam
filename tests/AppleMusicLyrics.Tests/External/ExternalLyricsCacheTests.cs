@@ -55,6 +55,21 @@ public sealed class ExternalLyricsCacheTests : IDisposable
     }
 
     [Fact]
+    public async Task FetchFreshAsync_BypassesButPreservesTheSavedEntryWhenTheSourceHasNoResult()
+    {
+        var previous = RichDocument();
+        var inner = new StubProvider("QQ Music", () => null);
+        var cache = CreateCache();
+        cache.Store(inner.Name, Player, previous);
+        using var provider = new CachedExternalLyricsProvider(inner, cache);
+
+        Assert.Null(await provider.FetchFreshAsync(Player));
+        Assert.Equal(1, inner.Calls);
+        Assert.Equal(previous.LyricsId, (await provider.FetchAsync(Player))?.LyricsId);
+        Assert.Equal(1, inner.Calls);
+    }
+
+    [Fact]
     public void TryGet_IsolatesSourcesAndAllTrackIdentityFields()
     {
         var cache = CreateCache();
@@ -72,6 +87,20 @@ public sealed class ExternalLyricsCacheTests : IDisposable
         Assert.False(cache.TryGet("QQ Music", Player with { Duration = 181 }, out _));
         Assert.True(cache.TryGet("QQ Music", Player with { Title = "SYNTHETIC SONG", Position = 10 }, out _));
         Assert.Equal(2, Directory.GetFiles(_root, "v1-*.json").Length);
+    }
+
+    [Fact]
+    public void TryGet_RejectsAnOlderCacheEntryForADifferentLengthRecording()
+    {
+        var cache = CreateCache();
+        cache.Store("QQ Music", Player, RichDocument());
+        var path = Assert.Single(Directory.GetFiles(_root));
+        var entry = JsonNode.Parse(File.ReadAllText(path))!;
+        entry["Document"]!["DurationSeconds"] = Player.Duration - 12;
+        File.WriteAllText(path, entry.ToJsonString());
+
+        Assert.False(cache.TryGet("QQ Music", Player, out _));
+        Assert.True(File.Exists(path));
     }
 
     [Fact]

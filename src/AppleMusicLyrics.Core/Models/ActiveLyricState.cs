@@ -4,4 +4,7 @@ public sealed record ActiveLyricState(
     int? CurrentIndex,
     LyricsLine? PreviousLine,
     LyricsLine? CurrentLine,
-    LyricsLine? NextLine);
+    LyricsLine? NextLine)
+{
+    public LyricsLine? DuetLine { get; init; }
+}

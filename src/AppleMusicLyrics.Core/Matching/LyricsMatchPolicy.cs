@@ -26,6 +26,11 @@ public static class LyricsMatchPolicy
     /// </summary>
     public const int ClearWinnerScoreMargin = 20;
 
+    public static bool IsRecordingDurationCompatible(double playbackDuration, double? sourceDuration) =>
+        !double.IsFinite(playbackDuration) || playbackDuration <= 0
+        || sourceDuration is not > 0 || !double.IsFinite(sourceDuration.Value)
+        || Math.Abs(playbackDuration - sourceDuration.Value) <= DurationToleranceSeconds;
+
     public static bool IsPlausible(LyricsMatch candidate)
     {
         return candidate.DurationDelta <= DurationToleranceSeconds;

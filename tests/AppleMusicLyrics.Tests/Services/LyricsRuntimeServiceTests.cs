@@ -12,6 +12,130 @@ namespace AppleMusicLyrics.Tests.Services;
 
 public sealed class LyricsRuntimeServiceTests
 {
+    [Fact]
+    public async Task ManualLyricsSelection_OverridesAutomaticAndCannotCarryOverToAnotherTrack()
+    {
+        var automatic = BuildDocument("AP_auto", 180, "automatic lyrics");
+        var manual = BuildDocument("QQ_manual", 180, "chosen lyrics", begin: 1);
+        var player = new MutableEnrichmentPlayer(new PlayerState("Song A", "Artist", null, 2, 180, false));
+        await using var runtime = new LyricsRuntimeService(new StubLyricsProvider(automatic), player, new LyricsSynchronizer());
+        var start = await runtime.SnapshotAsync();
+        var choice = new LyricsChoice(manual, LyricsResolutionSource.ExternalProvider);
+
+        Assert.True(runtime.RequestLyricsSelection(start.TrackGeneration, choice));
+        var chosen = await runtime.SnapshotAsync();
+        Assert.True(chosen.IsManualSelection);
+        Assert.Same(manual.Lines[0], chosen.ActiveLyric.CurrentLine);
+        Assert.Same(manual, (await runtime.SnapshotAsync()).Document);
+
+        Assert.True(runtime.RequestLyricsSelection(start.TrackGeneration, null));
+        Assert.Same(automatic, (await runtime.SnapshotAsync()).Document);
+
+        Assert.True(runtime.RequestLyricsSelection(start.TrackGeneration, choice));
+        player.State = player.State with { Title = "Song B" };
+        var next = await runtime.SnapshotAsync();
+        Assert.False(next.IsManualSelection);
+        Assert.NotSame(manual, next.Document);
+        Assert.False(runtime.RequestLyricsSelection(start.TrackGeneration, choice));
+    }
+
+    [Fact]
+    public async Task ManualRefresh_BypassesExternalCacheAndKeepsPreviousLyricsWhileFetching()
+    {
+        var first = BuildDocument("cached", 180, "previous lyrics");
+        var updated = BuildDocument("fresh", 180, "updated lyrics");
+        var completion = new TaskCompletionSource<LyricsDocument?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var provider = new FreshLyricsProvider(first, completion.Task);
+        var player = new StubPlayerProvider(new PlayerState("Song", "Artist", null, 2, 180, false));
+        await using var runtime = new LyricsRuntimeService(new CandidateLyricsProvider([]), player, new LyricsSynchronizer())
+        {
+            ExternalLyricsProviders = [provider],
+        };
+        var start = await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, first));
+        Assert.True(runtime.RequestLyricsRefresh(start.TrackGeneration));
+        var waiting = await runtime.SnapshotAsync();
+        Assert.Same(first, waiting.Document);
+        Assert.Equal(1, provider.FreshCalls);
+        completion.SetResult(updated);
+
+        var refreshed = await WaitForSnapshotAsync(runtime, snapshot => ReferenceEquals(snapshot.Document, updated));
+        Assert.Equal(start.TrackGeneration, refreshed.TrackGeneration);
+        Assert.False(refreshed.IsManualSelection);
+    }
+
+    [Fact]
+    public async Task SearchLyricsChoices_IncludesEnabledSourcesWithoutChangingTheOverlay()
+    {
+        var automatic = BuildDocument("AP_auto", 180, "automatic lyrics");
+        var translated = BuildDocument("NE_translation", 180, "alternate lyrics");
+        var provider = new FreshLyricsProvider(null, Task.FromResult<LyricsDocument?>(translated));
+        var failed = new DelegateEnrichmentProvider("Unavailable", (_, _) => Task.FromException<LyricsDocument?>(new HttpRequestException()));
+        await using var runtime = new LyricsRuntimeService(new StubLyricsProvider(automatic),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", null, 2, 180, false)), new LyricsSynchronizer())
+        {
+            ExternalLyricsProviders = [provider, failed],
+        };
+        var snapshot = await runtime.SnapshotAsync();
+
+        var result = await runtime.SearchLyricsChoicesAsync(snapshot, refresh: true);
+
+        Assert.Equal(new[] { automatic.LyricsId, translated.LyricsId }, result.Choices.Select(choice => choice.Document.LyricsId));
+        Assert.Equal(1, result.FailedSources);
+        Assert.Equal(1, provider.FreshCalls);
+        Assert.Same(automatic, runtime.GetFrameSnapshot().Document);
+    }
+
+    private sealed class FreshLyricsProvider(LyricsDocument? cached, Task<LyricsDocument?> fresh) : IExternalLyricsProvider
+    {
+        public string Name => "Test provider";
+        public int FreshCalls { get; private set; }
+
+        public Task<LyricsDocument?> FetchAsync(PlayerState player, CancellationToken cancellationToken = default) =>
+            Task.FromResult(cached);
+
+        public Task<LyricsDocument?> FetchFreshAsync(PlayerState player, CancellationToken cancellationToken = default)
+        {
+            FreshCalls++;
+            return fresh.WaitAsync(cancellationToken);
+        }
+    }
+
+    [Theory]
+    [InlineData("qqmusic:cached", true)]
+    [InlineData("netease:cached", true)]
+    [InlineData("apple-cache.json", false)]
+    public async Task SnapshotAsync_FiltersExistingProviderMetadataBeforePreludeAndFrameSelection(string sourceFile, bool external)
+    {
+        var sung = new LyricsLine(10, 15, "Hello", Translation: "你好");
+        var document = new LyricsDocument("cached", "ok", sourceFile, DateTimeOffset.UtcNow,
+            [new(0, .1, "Song - Artist", Translation: "以下歌词翻译由文曲大模型提供"),
+                new(.1, 3, "Lyrics by：Someone", Translation: "//"),
+                new(3, 6, "Composed by：Someone", Translation: "//"),
+                new(6, 8, "翻译由文曲大模型生成"), sung,
+                new(15, 18, "Goodbye", Translation: "以下歌词翻译由文曲大模型提供")], 180);
+        await using var runtime = new LyricsRuntimeService(external ? new CandidateLyricsProvider([]) : new StubLyricsProvider(document),
+            new StubPlayerProvider(new PlayerState("Song", "Artist", null, 1, 180, false)),
+            new LyricsSynchronizer())
+        {
+            ExternalLyricsProviders = external ? [new StubExternalProvider(document)] : [],
+        };
+
+        var snapshot = await WaitForSnapshotAsync(runtime, snapshot => snapshot.Document is not null);
+        var presentation = OverlaySnapshotPresenter.CreateLyrics(snapshot);
+
+        Assert.Equal(2, snapshot.Document!.Lines.Count);
+        Assert.Null(snapshot.ActiveLyric.CurrentLine);
+        Assert.Same(sung, snapshot.ActiveLyric.NextLine);
+        Assert.Equal("Hello", presentation.CurrentText);
+        Assert.Equal("你好", presentation.TranslationText);
+        Assert.Empty(presentation.PreviousText);
+        Assert.Empty(presentation.NextText);
+        Assert.Null(snapshot.Document.Lines[1].Translation);
+        Assert.Same(snapshot.Document, runtime.GetFrameSnapshot().Document);
+        Assert.Same(sung, runtime.GetFrameSnapshot().ActiveLyric.NextLine);
+        Assert.Same(snapshot.Document, (await runtime.SnapshotAsync()).Document);
+    }
+
     [Theory]
     [InlineData("service", ExternalLyricsFailureReason.ServiceError)]
     [InlineData("http", ExternalLyricsFailureReason.HttpError)]

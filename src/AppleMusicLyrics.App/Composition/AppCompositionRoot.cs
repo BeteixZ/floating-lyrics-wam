@@ -41,9 +41,11 @@ public static class AppCompositionRoot
         IExternalLyricsProvider[] externalProviders = settings.ExternalLyricsEnabled
             // The unified cache owns the full disk quota. Leave any legacy lrclib-cache.json
             // untouched; do not also enable LRCLIB's private persistent cache.
-            ? [new LrcLibLyricsProvider(timeoutSeconds: settings.ExternalLyricsTimeoutSeconds),
+            // Query order is selection priority: NetEase Cloud Music, QQ Music, then LRCLIB.
+            // LRCLIB never outranks Apple Music's own lyrics; it only fills gaps.
+            ? [new NetEaseLyricsProvider(settings.ExternalLyricsTimeoutSeconds),
                 new QQMusicLyricsProvider(settings.ExternalLyricsTimeoutSeconds),
-                new NetEaseLyricsProvider(settings.ExternalLyricsTimeoutSeconds)]
+                new LrcLibLyricsProvider(timeoutSeconds: settings.ExternalLyricsTimeoutSeconds)]
             : [];
         externalProviders = externalProviders.Select(provider =>
             (IExternalLyricsProvider)new CachedExternalLyricsProvider(provider, externalCache)).ToArray();
@@ -61,6 +63,9 @@ public static class AppCompositionRoot
             AllowLowConfidenceLyrics = settings.AllowLowConfidenceLyrics,
             PreferWordTimings = settings.WordHighlightEnabled,
             PreferTranslations = settings.ShowTranslation,
+            // The overlay crossfades lines (about 0.1 s before the new line starts to appear);
+            // switch early enough that the new line is readable when it is sung.
+            LineLeadSeconds = 0.22,
             ExternalLyricsProviders = externalProviders,
         };
 

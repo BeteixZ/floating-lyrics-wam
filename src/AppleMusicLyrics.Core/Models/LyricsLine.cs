@@ -7,4 +7,8 @@ public sealed record LyricsLine(
     string? SongPart = null,
     IReadOnlyList<LyricWord>? Words = null,
     string? Translation = null,
-    string? Romanization = null);
+    string? Romanization = null)
+{
+    public string? VocalistId { get; init; }
+    public IReadOnlyList<LyricsLine>? BackgroundVocals { get; init; }
+}

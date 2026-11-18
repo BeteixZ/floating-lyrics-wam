@@ -32,6 +32,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Lucene.Net.Analysis.Kuromoji" Version="4.8.0-beta00018" />
     <ProjectReference Include="..\AppleMusicLyrics.Application\AppleMusicLyrics.Application.csproj" />
     <ProjectReference Include="..\AppleMusicLyrics.Core\AppleMusicLyrics.Core.csproj" />
     <ProjectReference Include="..\AppleMusicLyrics.Infrastructure.Windows\AppleMusicLyrics.Infrastructure.Windows.csproj" />

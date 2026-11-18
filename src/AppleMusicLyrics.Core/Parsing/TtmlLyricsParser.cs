@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Xml.Linq;
+using AppleMusicLyrics.Core.Matching;
 using AppleMusicLyrics.Core.Models;
 using AppleMusicLyrics.Core.Sync;
 
@@ -8,6 +10,8 @@ namespace AppleMusicLyrics.Core.Parsing;
 
 public sealed class TtmlLyricsParser
 {
+    private static readonly XName AgentAttribute = XName.Get("agent", "http://www.w3.org/ns/ttml#metadata");
+
     public LyricsDocument ParseLyricsJson(string jsonText, string sourceFile)
     {
         using var document = JsonDocument.Parse(jsonText);
@@ -18,10 +22,12 @@ public sealed class TtmlLyricsParser
             ?? throw new InvalidOperationException("Lyrics JSON is missing a supported TTML payload.");
         var playParams = attributes.ValueKind == JsonValueKind.Object && attributes.TryGetProperty("playParams", out var parameters)
             ? parameters : default;
+        var playCatalogId = ReadCatalogId(playParams, "catalogId");
+        var resourceCatalogId = ReadCatalogId(resource, "id");
         string? lyricsId = NonEmptyString(root, "lyricsId") ?? NonEmptyString(resource, "lyricsId")
             ?? NonEmptyString(playParams, "id")
-            ?? CatalogLyricsId(NonEmptyString(playParams, "catalogId"))
-            ?? (resource.ValueKind != JsonValueKind.Undefined ? CatalogLyricsId(NonEmptyString(resource, "id")) : null);
+            ?? (playCatalogId is long trackId ? CatalogLyricsId.FromCatalogId(trackId) : NonEmptyString(playParams, "catalogId"))
+            ?? (resourceCatalogId is long resourceId ? CatalogLyricsId.FromCatalogId(resourceId) : NonEmptyString(resource, "id"));
         string? status = NonEmptyString(root, "status") ?? NonEmptyString(resource, "status")
             ?? (resource.ValueKind != JsonValueKind.Undefined ? "success" : null);
 
@@ -34,7 +40,10 @@ public sealed class TtmlLyricsParser
             Lines: parsed.Lines,
             DurationSeconds: parsed.DurationSeconds,
             LeadingSilenceSeconds: parsed.LeadingSilenceSeconds,
-            NativeOffsetSeconds: parsed.NativeOffsetSeconds);
+            NativeOffsetSeconds: parsed.NativeOffsetSeconds)
+        {
+            CatalogTrackId = playCatalogId ?? resourceCatalogId,
+        };
     }
 
     public IReadOnlyList<LyricsLine> ParseTtml(string ttmlText)
@@ -61,8 +70,14 @@ public sealed class TtmlLyricsParser
         return (default, root);
     }
 
-    private static string? CatalogLyricsId(string? value) => value is not null && value.All(char.IsAsciiDigit)
-        ? "AP_" + value : value;
+    private static long? ReadCatalogId(JsonElement root, string name)
+    {
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty(name, out var value)) return null;
+        var id = value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var number) ? number
+            : value.ValueKind == JsonValueKind.String && long.TryParse(value.GetString(), NumberStyles.None,
+                CultureInfo.InvariantCulture, out number) ? number : 0;
+        return id > 0 ? id : null;
+    }
 
     private static string? NonEmptyString(JsonElement root, string propertyName)
     {
@@ -85,6 +100,7 @@ public sealed class TtmlLyricsParser
         var body = xml.Descendants().FirstOrDefault(element => element.Name.LocalName == "body");
         var paragraphs = body?.Descendants().Where(element => element.Name.LocalName == "p") ?? [];
         var translations = ReadTranslations(xml);
+        var transliterations = ReadTransliterations(xml);
         var (romanizationsByKey, romanizationsByBegin) = ReadRomanizations(paragraphs);
         var lines = new List<LyricsLine>();
 
@@ -97,8 +113,10 @@ public sealed class TtmlLyricsParser
             var fragments = new List<TextFragment>();
             var inlineTranslations = new List<string>();
             var inlineRomanizations = new List<string>();
+            var backgroundVocals = new List<LyricsLine>();
             var invalidWordTiming = false;
-            ReadInline(paragraph, null, begin.Value, end.Value, fragments, inlineTranslations, inlineRomanizations, ref invalidWordTiming);
+            ReadInline(paragraph, null, begin.Value, end.Value, fragments, inlineTranslations, inlineRomanizations,
+                ref invalidWordTiming, backgroundVocals);
             var (text, words) = NormalizeFragments(fragments);
             if (string.IsNullOrWhiteSpace(text)) continue;
 
@@ -109,7 +127,8 @@ public sealed class TtmlLyricsParser
                 ? CollapseWhitespace(string.Join(' ', inlineRomanizations))
                 : key is not null && romanizationsByKey.TryGetValue(key, out var keyedRomanization)
                     ? keyedRomanization
-                    : romanizationsByBegin.TryGetValue(begin.Value, out var timedRomanization) ? timedRomanization : null;
+                    : key is not null && transliterations.TryGetValue(key, out var transliteration)
+                        ? transliteration : romanizationsByBegin.GetValueOrDefault(begin.Value);
             var line = new LyricsLine(
                 Begin: begin.Value,
                 End: end.Value,
@@ -117,7 +136,11 @@ public sealed class TtmlLyricsParser
                 SongPart: ResolveSongPart(paragraph),
                 Words: invalidWordTiming ? null : words,
                 Translation: translation,
-                Romanization: romanization);
+                Romanization: romanization)
+            {
+                VocalistId = ReadVocalistId(paragraph),
+                BackgroundVocals = backgroundVocals.Count > 0 ? backgroundVocals.ToArray() : null,
+            };
             if (line.Words is not null && !LyricWordTiming.IsUsable(line)) line = line with { Words = null };
             lines.Add(line);
         }
@@ -149,6 +172,13 @@ public sealed class TtmlLyricsParser
 
     private static string? AttributeValue(XElement element, string localName) => element.Attributes()
         .FirstOrDefault(attribute => attribute.Name.LocalName.Equals(localName, StringComparison.OrdinalIgnoreCase))?.Value;
+
+    private static string? ReadVocalistId(XElement paragraph)
+    {
+        var agent = paragraph.AncestorsAndSelf().Attributes(AgentAttribute).FirstOrDefault()?.Value.Trim();
+        // An IDREFS list describes a shared vocal line. Only a single agent identifies a distinct part.
+        return agent is { Length: > 0 } && !agent.Any(char.IsWhiteSpace) ? agent : null;
+    }
 
     private static bool HasRole(XElement element, string role) => AttributeValue(element, "role")?.Split(
             (char[]?)null, StringSplitOptions.RemoveEmptyEntries)
@@ -182,19 +212,41 @@ public sealed class TtmlLyricsParser
 
     private static Dictionary<string, string> ReadTranslations(XDocument xml)
     {
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
         // Observed Apple syllable-lyrics: iTunesMetadata/translations/translation/text[@for],
         // keyed by the paragraph's itunes:key. Keep the first nonempty locale in file order;
         // the present model holds one translation, not an arbitrary list of target languages.
-        foreach (var metadata in xml.Descendants().Where(element => element.Name.LocalName == "iTunesMetadata"))
-            foreach (var container in metadata.Descendants().Where(element => element.Name.LocalName == "translations"))
-                foreach (var translation in container.Elements().Where(element => element.Name.LocalName == "translation"))
-                    foreach (var text in translation.Descendants().Where(element => element.Name.LocalName == "text"))
-                    {
-                        var key = text.Attribute("for")?.Value;
-                        var value = PlainContent(text);
-                        if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value)) result.TryAdd(key, value);
-                    }
+        return ReadKeyedText(ReadMetadataGroups(xml, "translations", "translation"));
+    }
+
+    private static Dictionary<string, string> ReadTransliterations(XDocument xml)
+    {
+        // A TTML document can carry multiple reading tracks, e.g. kana and romaji.
+        // Use Latin-script tracks first and accept untagged transliterations as a fallback.
+        var tracks = ReadMetadataGroups(xml, "transliterations", "transliteration")
+            .Select(group => (Group: group, Language: group.Attribute(XNamespace.Xml + "lang")?.Value))
+            .Select(track => (track.Group, Priority: string.IsNullOrWhiteSpace(track.Language) ? 1
+                : track.Language.Split('-').Contains("Latn", StringComparer.OrdinalIgnoreCase) ? 0 : 2))
+            .Where(track => track.Priority < 2)
+            .OrderBy(track => track.Priority)
+            .Select(track => track.Group);
+        return ReadKeyedText(tracks);
+    }
+
+    private static IEnumerable<XElement> ReadMetadataGroups(XDocument xml, string containerName, string groupName) =>
+        xml.Descendants().Where(element => element.Name.LocalName == "iTunesMetadata")
+            .SelectMany(metadata => metadata.Descendants().Where(element => element.Name.LocalName == containerName))
+            .SelectMany(container => container.Elements().Where(element => element.Name.LocalName == groupName));
+
+    private static Dictionary<string, string> ReadKeyedText(IEnumerable<XElement> groups)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var group in groups)
+            foreach (var text in group.Descendants().Where(element => element.Name.LocalName == "text"))
+            {
+                var key = text.Attribute("for")?.Value;
+                var value = PlainContent(text);
+                if (!string.IsNullOrWhiteSpace(key) && !string.IsNullOrWhiteSpace(value)) result.TryAdd(key, value);
+            }
         return result;
     }
 
@@ -218,7 +270,8 @@ public sealed class TtmlLyricsParser
     }
 
     private static void ReadInline(XElement parent, WordTiming? inherited, double lineBegin, double lineEnd,
-        List<TextFragment> fragments, List<string> translations, List<string> romanizations, ref bool invalidTiming)
+        List<TextFragment> fragments, List<string>? translations, List<string>? romanizations,
+        ref bool invalidTiming, List<LyricsLine>? backgroundVocals = null)
     {
         foreach (var node in parent.Nodes())
         {
@@ -228,17 +281,23 @@ public sealed class TtmlLyricsParser
                 continue;
             }
             if (node is not XElement child) continue;
+            if (HasRole(child, "x-bg"))
+            {
+                if (backgroundVocals is not null && ReadBackgroundVocal(child, lineBegin, lineEnd) is { } vocal)
+                    backgroundVocals.Add(vocal);
+                continue;
+            }
             if (IsRomanizationRole(child))
             {
                 var romanization = PlainContent(child);
-                if (!string.IsNullOrWhiteSpace(romanization)) romanizations.Add(romanization);
+                if (!string.IsNullOrWhiteSpace(romanization)) romanizations?.Add(romanization);
                 continue;
             }
             if (IsHiddenAuxiliary(child)) continue;
             if (HasRole(child, "x-translation"))
             {
                 var translation = PlainContent(child);
-                if (!string.IsNullOrWhiteSpace(translation)) translations.Add(translation);
+                if (!string.IsNullOrWhiteSpace(translation)) translations?.Add(translation);
                 continue;
             }
             if (child.Name.LocalName == "br")
@@ -261,8 +320,46 @@ public sealed class TtmlLyricsParser
                     timing = null;
                 }
             }
-            ReadInline(child, timing, lineBegin, lineEnd, fragments, translations, romanizations, ref invalidTiming);
+            ReadInline(child, timing, lineBegin, lineEnd, fragments, translations, romanizations,
+                ref invalidTiming, backgroundVocals);
         }
+    }
+
+    private static LyricsLine? ReadBackgroundVocal(XElement element, double parentBegin, double parentEnd)
+    {
+        var begin = TryParseTimeAttribute(element, "begin");
+        var end = TryParseTimeAttribute(element, "end");
+        if ((begin ?? parentBegin) < 0 || (end ?? parentEnd) <= (begin ?? parentBegin))
+            (begin, end) = (null, null);
+
+        var fragments = new List<TextFragment>();
+        var invalidTiming = false;
+        ReadInline(element, null, begin ?? parentBegin, end ?? parentEnd, fragments, null, null, ref invalidTiming);
+        UnwrapBackgroundVocal(fragments);
+        var (text, words) = NormalizeFragments(fragments);
+        if (text.Length == 0) return null;
+
+        // Apple can omit the wrapper's timestamps and time only its constituent syllables.
+        var line = new LyricsLine(
+            begin ?? words?.Min(word => word.Begin) ?? parentBegin,
+            end ?? words?.Max(word => word.End) ?? parentEnd,
+            text, Words: invalidTiming ? null : words);
+        if (line.End <= line.Begin) line = line with { Begin = parentBegin, End = parentEnd };
+        return line.Words is not null && !LyricWordTiming.IsUsable(line) ? line with { Words = null } : line;
+    }
+
+    private static void UnwrapBackgroundVocal(List<TextFragment> fragments)
+    {
+        var first = fragments.FindIndex(fragment => !string.IsNullOrWhiteSpace(fragment.Text));
+        if (first < 0) return;
+        var last = fragments.FindLastIndex(fragment => !string.IsNullOrWhiteSpace(fragment.Text));
+        var start = fragments[first].Text.TrimStart();
+        var end = fragments[last].Text.TrimEnd();
+        if ((start[0], end[^1]) is not (('(', ')') or ('（', '）'))) return;
+
+        // The wrapper may be untimed or embedded inside the first and last timed fragments.
+        fragments[first] = fragments[first] with { Text = start[1..] };
+        fragments[last] = fragments[last] with { Text = fragments[last].Text.TrimEnd()[..^1] };
     }
 
     private static (string Text, IReadOnlyList<LyricWord>? Words) NormalizeFragments(List<TextFragment> fragments)

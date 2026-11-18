@@ -16,6 +16,12 @@
         Background="Transparent"
         ShowInTaskbar="False"
         Topmost="True">
+  <Window.ContextMenu>
+    <ContextMenu Opened="LyricsContextMenu_OnOpened">
+      <MenuItem x:Name="RefreshLyricsMenuItem" Header="{loc:Loc Lyrics.Menu.Rescan}" Click="RefreshLyricsMenuItem_OnClick" />
+      <MenuItem x:Name="ChooseLyricsMenuItem" Header="{loc:Loc Lyrics.Menu.Choose}" Click="ChooseLyricsMenuItem_OnClick" />
+    </ContextMenu>
+  </Window.ContextMenu>
   <Grid>
     <Grid.Resources>
       <Style TargetType="{x:Type primitives:Thumb}">
@@ -95,11 +101,19 @@
                         PreviewMouseLeftButtonDown="ResizeThumb_OnPreviewMouseLeftButtonDown" />
     </Grid>
 
+    <!-- The visible card. Kept separate from ShellBorder so Pure Mode can animate the card's
+         bounds inside a fixed-size window instead of resizing the layered HWND every frame. -->
+    <Border x:Name="ShellBackdrop"
+            Margin="14"
+            CornerRadius="16"
+            Background="#C8141416"
+            IsHitTestVisible="False" />
+
     <Border x:Name="ShellBorder"
             Margin="14"
             Padding="12"
             CornerRadius="16"
-            Background="#C8141416"
+            Background="Transparent"
             MouseLeftButtonDown="ShellBorder_OnMouseLeftButtonDown">
       <Grid x:Name="ContentRoot">
         <Grid.RowDefinitions>
@@ -152,17 +166,32 @@
 
           <StackPanel x:Name="CurrentLyricContainer" Grid.Row="1"
                       HorizontalAlignment="Center" VerticalAlignment="Center">
+          <StackPanel.Resources>
+            <Style x:Key="ActiveLyricStyle" TargetType="TextBlock">
+              <Setter Property="Margin" Value="0,4,0,4" />
+              <Setter Property="VerticalAlignment" Value="Center" />
+              <Setter Property="HorizontalAlignment" Value="Center" />
+              <Setter Property="MaxWidth" Value="1200" />
+              <Setter Property="TextAlignment" Value="Center" />
+              <Setter Property="Foreground" Value="White" />
+              <Setter Property="FontSize" Value="40" />
+              <Setter Property="FontWeight" Value="SemiBold" />
+              <Setter Property="TextWrapping" Value="Wrap" />
+            </Style>
+            <Style x:Key="AuxiliaryLyricStyle" TargetType="TextBlock">
+              <Setter Property="Margin" Value="0,0,0,4" />
+              <Setter Property="HorizontalAlignment" Value="Center" />
+              <Setter Property="TextAlignment" Value="Center" />
+              <Setter Property="Foreground" Value="#C8FFFFFF" />
+              <Setter Property="FontSize" Value="21" />
+              <Setter Property="TextWrapping" Value="Wrap" />
+              <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+              <Setter Property="LineStackingStrategy" Value="BlockLineHeight" />
+              <Setter Property="Visibility" Value="Collapsed" />
+            </Style>
+          </StackPanel.Resources>
           <TextBlock x:Name="CurrentLyricText"
-                     Margin="0,4,0,4"
-                     VerticalAlignment="Center"
-                     HorizontalAlignment="Center"
-                     MaxWidth="1200"
-                     TextAlignment="Center"
-                     Foreground="White"
-                     FontSize="40"
-                     FontWeight="SemiBold"
-                     TextWrapping="Wrap"
-                     TextTrimming="None"
+                     Style="{StaticResource ActiveLyricStyle}"
                      RenderTransformOrigin="0.5,0.5"
                      Text="{loc:Loc Lyrics.PlaceholderWaiting}">
             <TextBlock.RenderTransform>
@@ -176,26 +205,19 @@
                                 Opacity="0.38" />
             </TextBlock.Effect>
           </TextBlock>
+          <StackPanel x:Name="BackgroundVocalPanel"
+                      Opacity="0.72"
+                      Visibility="Collapsed" />
           <TextBlock x:Name="RomanizationLyricText"
-                     Margin="0,0,0,4"
-                     HorizontalAlignment="Center"
-                     TextAlignment="Center"
-                     Foreground="#C8FFFFFF"
-                     FontSize="21"
-                     TextWrapping="Wrap"
-                     TextTrimming="CharacterEllipsis"
-                     LineStackingStrategy="BlockLineHeight"
-                     Visibility="Collapsed" />
+                     Style="{StaticResource AuxiliaryLyricStyle}" />
           <TextBlock x:Name="TranslationLyricText"
-                     Margin="0,0,0,4"
-                     HorizontalAlignment="Center"
-                     TextAlignment="Center"
-                     Foreground="#C8FFFFFF"
-                     FontSize="21"
-                     TextWrapping="Wrap"
-                     TextTrimming="CharacterEllipsis"
-                     LineStackingStrategy="BlockLineHeight"
-                     Visibility="Collapsed" />
+                     Style="{StaticResource AuxiliaryLyricStyle}" />
+          <StackPanel x:Name="DuetLyricContainer" Visibility="Collapsed">
+            <TextBlock x:Name="DuetLyricText" Style="{StaticResource ActiveLyricStyle}" />
+            <StackPanel x:Name="DuetBackgroundVocalPanel" Opacity="0.72" Visibility="Collapsed" />
+            <TextBlock x:Name="DuetRomanizationLyricText" Style="{StaticResource AuxiliaryLyricStyle}" />
+            <TextBlock x:Name="DuetTranslationLyricText" Style="{StaticResource AuxiliaryLyricStyle}" />
+          </StackPanel>
           </StackPanel>
 
           <TextBlock x:Name="NextLyricText"
@@ -218,7 +240,11 @@
                VerticalAlignment="Center"
                Stretch="None"
                IsHitTestVisible="False"
-               Visibility="Collapsed" />
+               Visibility="Collapsed">
+          <Image.RenderTransform>
+            <TranslateTransform x:Name="LyricGhostTransform" />
+          </Image.RenderTransform>
+        </Image>
 
         <Grid x:Name="FooterPanel" Grid.Row="2" Margin="0,4,0,0">
           <TextBlock x:Name="PathText"

@@ -138,6 +138,47 @@ public sealed class NativeLyricsRuntimePriorityTests
     }
 
     [Fact]
+    public async Task SameIdRefresh_AdoptsBackgroundVocalsAndRetainsThemAcrossRefreshes()
+    {
+        var time = new ManualTime();
+        var native = Document("AP_123", words: true);
+        var rich = native with
+        {
+            Lines = [native.Lines[0] with { BackgroundVocals = [new LyricsLine(1, 3, "echo", Words: [new(1, 3, "echo")])] }],
+        };
+        var cache = new Cache(native) { ById = rich };
+        await using var runtime = Create(cache, [], time);
+        Assert.Same(native, (await runtime.SnapshotAsync()).Document);
+
+        time.Advance(6);
+        Assert.Same(rich, (await runtime.SnapshotAsync()).Document);
+
+        cache.ById = Document("AP_123", words: true, translation: "新翻译");
+        time.Advance(2);
+        Assert.Same(rich, (await runtime.SnapshotAsync()).Document);
+    }
+
+    [Fact]
+    public async Task SameIdRefresh_PrefersNativeVersionsThatIdentifyBothDuetVocalists()
+    {
+        var time = new ManualTime();
+        var first = new LyricsLine(10, 14, "lead");
+        var second = new LyricsLine(11, 15, "reply");
+        var native = Document("AP_123") with { Lines = [first, second] };
+        var duet = native with { Lines = [first with { VocalistId = "v1" }, second with { VocalistId = "v2" }] };
+        var cache = new Cache(native) { ById = duet };
+        await using var runtime = Create(cache, [], time);
+        Assert.Same(native, (await runtime.SnapshotAsync()).Document);
+
+        time.Advance(6);
+        Assert.Same(duet, (await runtime.SnapshotAsync()).Document);
+
+        cache.ById = native with { Lines = [first with { Translation = "第一句" }, second] };
+        time.Advance(2);
+        Assert.Same(duet, (await runtime.SnapshotAsync()).Document);
+    }
+
+    [Fact]
     public async Task SameIdRefresh_IsBoundedAndNeverReopensBroadCandidateScan()
     {
         var time = new ManualTime();
@@ -211,6 +252,166 @@ public sealed class NativeLyricsRuntimePriorityTests
         Assert.Equal(ExternalLyricsQueryOutcome.Rejected, rejected.Outcome);
     }
 
+    [Fact]
+    public async Task NativeWithoutRequestedFeatures_IsReplacedByAlignedQQMusicLyrics()
+    {
+        var native = Document("AP_123");
+        var qq = Document("QQ", true, "你好世界");
+        var external = new External("QQ Music", (_, _) => Task.FromResult<LyricsDocument?>(qq)) { OutranksPartialAppleLyrics = true };
+        await using var runtime = Create(new Cache(native), [external]);
+
+        var snapshot = await Wait(runtime, state => ReferenceEquals(state.Document, qq));
+
+        Assert.Equal(LyricsResolutionSource.ExternalProvider, snapshot.Resolution.Source);
+        Assert.Contains("QQ Music", snapshot.Resolution.Summary);
+    }
+
+    [Fact]
+    public async Task NativeWithWordsOnly_IsReplacedByQQMusicWithWordsAndTranslation()
+    {
+        var native = Document("AP_123", words: true);
+        var qq = Document("QQ", true, "你好世界");
+        var external = new External("QQ Music", (_, _) => Task.FromResult<LyricsDocument?>(qq)) { OutranksPartialAppleLyrics = true };
+        await using var runtime = Create(new Cache(native), [external]);
+
+        await Wait(runtime, state => ReferenceEquals(state.Document, qq));
+    }
+
+    [Fact]
+    public async Task NetEaseOutranksQQMusicWhenBothProvideEveryFeature()
+    {
+        var native = Document("AP_123");
+        var qq = Document("QQ", true, "QQ 翻译");
+        var netEase = Document("NE", true, "网易翻译");
+        var qqProvider = new External("QQ Music", (_, _) => Task.FromResult<LyricsDocument?>(qq)) { OutranksPartialAppleLyrics = true };
+        var netEaseProvider = new External("NetEase Cloud Music", (_, _) => Task.FromResult<LyricsDocument?>(netEase)) { OutranksPartialAppleLyrics = true };
+        await using var runtime = Create(new Cache(native), [netEaseProvider, qqProvider]);
+
+        var snapshot = await Wait(runtime, state => state.ExternalDiagnostics?.EnrichmentState == ExternalLyricsQueryState.Satisfied);
+
+        Assert.Same(netEase, snapshot.Document);
+        Assert.Equal(0, qqProvider.Calls);
+    }
+
+    [Fact]
+    public async Task QQMusicWithEveryFeature_BeatsNetEaseWithTranslationOnly()
+    {
+        var native = Document("AP_123");
+        var qq = Document("QQ", true, "QQ 翻译");
+        var netEase = Document("NE", translation: "网易翻译");
+        var qqProvider = new External("QQ Music", (_, _) => Task.FromResult<LyricsDocument?>(qq)) { OutranksPartialAppleLyrics = true };
+        var netEaseProvider = new External("NetEase Cloud Music", (_, _) => Task.FromResult<LyricsDocument?>(netEase)) { OutranksPartialAppleLyrics = true };
+        await using var runtime = Create(new Cache(native), [netEaseProvider, qqProvider]);
+
+        await Wait(runtime, state => ReferenceEquals(state.Document, qq));
+    }
+
+    [Fact]
+    public async Task LineTimedApple_IsReplacedByQQMusicThatSplitsAndRewordsLines()
+    {
+        // Apple: line timing only. QQ splits Apple's lines, words some differently, and adds a
+        // scat section, so only a minority of lines pair exactly and a merge stays partial.
+        var native = new LyricsDocument("AP_1", "success", "apple.json", DateTimeOffset.UnixEpoch,
+        [
+            new LyricsLine(10, 14, "alpha bravo charlie delta echo foxtrot"),
+            new LyricsLine(14, 18, "golf hotel india juliet"),
+            new LyricsLine(18, 22, "kilo lima mike november oscar papa"),
+            new LyricsLine(22, 26, "quebec romeo sierra tango"),
+            new LyricsLine(26, 30, "uniform victor whiskey xray yankee"),
+        ], 180);
+        var qq = new LyricsDocument("QQ_1", "success", "qq", DateTimeOffset.UnixEpoch,
+        [
+            Timed(0.2, 4, "la la la"),
+            Timed(10.2, 12, "alpha bravo charlie", "甲"),
+            Timed(12, 14, "delta echo foxtrot", "乙"),
+            Timed(14.1, 18, "golf hotel juliet", "丙"),
+            Timed(18.2, 20, "kilo lima mike", "丁"),
+            Timed(20, 22, "november oscar papa", "戊"),
+            Timed(22.1, 26, "quebec romeo sierra tango", "己"),
+            Timed(26.3, 28, "uniform victor", "庚"),
+            Timed(28, 30, "whiskey xray yankee", "辛"),
+            Timed(31, 33, "la la la"),
+        ], 180);
+        var external = new External("QQ Music", (_, _) => Task.FromResult<LyricsDocument?>(qq)) { OutranksPartialAppleLyrics = true };
+        await using var runtime = Create(new Cache(native), [external]);
+
+        var snapshot = await Wait(runtime, state => state.Document?.LyricsId == "QQ_1");
+
+        Assert.Equal(LyricsResolutionSource.ExternalProvider, snapshot.Resolution.Source);
+        // QQ's own text and words, but every Apple line now starts exactly at Apple's onset.
+        var lines = snapshot.Document!.Lines;
+        double BeginOf(string text) => Math.Round(lines.Single(line => line.Text == text).Begin, 6);
+        Assert.Equal(10.0, BeginOf("alpha bravo charlie"));
+        Assert.Equal(14.0, BeginOf("golf hotel juliet"));
+        Assert.Equal(18.0, BeginOf("kilo lima mike"));
+        Assert.Equal(22.0, BeginOf("quebec romeo sierra tango"));
+        Assert.Equal(26.0, BeginOf("uniform victor"));
+        // Split second halves are corrected by interpolation, keeping the line order.
+        Assert.InRange(BeginOf("delta echo foxtrot"), 11.5, 14.0);
+        Assert.All(lines.Where(line => line.Words is { Count: > 0 }),
+            line => Assert.Equal(Math.Round(line.Begin, 6), Math.Round(line.Words![0].Begin, 6)));
+        Assert.Equal(lines.OrderBy(line => line.Begin).ToArray(), lines.ToArray());
+    }
+
+    private static LyricsLine Timed(double begin, double end, string text, string? translation = null)
+    {
+        var parts = text.Split(' ');
+        var step = (end - begin) / parts.Length;
+        var words = parts.Select((part, index) => new LyricWord(begin + step * index, begin + step * (index + 1),
+            index < parts.Length - 1 ? part + " " : part)).ToArray();
+        return new LyricsLine(begin, end, text, Words: words, Translation: translation);
+    }
+
+    [Fact]
+    public async Task UnalignedQQMusicLyrics_NeverReplaceAppleMusic()
+    {
+        var native = Document("AP_123");
+        var other = Document("QQ", true, "外部翻译") with
+        {
+            Lines = [new LyricsLine(0, 4, "another lyric", Words: [new(0, 4, "another lyric")], Translation: "外部翻译")],
+        };
+        var external = new External("QQ Music", (_, _) => Task.FromResult<LyricsDocument?>(other)) { OutranksPartialAppleLyrics = true };
+        await using var runtime = Create(new Cache(native), [external]);
+
+        var snapshot = await Wait(runtime, state => state.ExternalDiagnostics?.EnrichmentState == ExternalLyricsQueryState.Completed);
+
+        Assert.Same(native, snapshot.Document);
+        Assert.Equal(LyricsResolutionSource.AppleMusicCache, snapshot.Resolution.Source);
+    }
+
+    [Fact]
+    public async Task LrcLibCanOnlyFillAppleGaps_NotReplaceAppleMusic()
+    {
+        var native = Document("AP_123");
+        var lrclib = Document("LRCLIB", true);
+        var external = new External("LRCLIB", (_, _) => Task.FromResult<LyricsDocument?>(lrclib));
+        await using var runtime = Create(new Cache(native), [external]);
+
+        var snapshot = await Wait(runtime, state => state.ExternalDiagnostics?.EnrichmentState == ExternalLyricsQueryState.Completed);
+
+        Assert.NotSame(lrclib, snapshot.Document);
+        Assert.Equal("AP_123", snapshot.Document!.LyricsId);
+        Assert.NotNull(snapshot.Document.Lines[0].Words);
+    }
+
+    [Fact]
+    public async Task WithFeaturesDisabled_AppleMusicLyricsStayPrimaryWithoutQueryingSources()
+    {
+        var native = Document("AP_123");
+        var external = new External("QQ Music", (_, _) => Task.FromResult<LyricsDocument?>(Document("QQ", true, "翻译")))
+        {
+            OutranksPartialAppleLyrics = true,
+        };
+        await using var runtime = Create(new Cache(native), [external]);
+        runtime.PreferWordTimings = false;
+        runtime.PreferTranslations = false;
+
+        var snapshot = await runtime.SnapshotAsync();
+
+        Assert.Same(native, snapshot.Document);
+        Assert.Equal(0, external.Calls);
+    }
+
     private static LyricsRuntimeService Create(Cache cache, IReadOnlyList<IExternalLyricsProvider> providers, ManualTime? time = null)
     {
         time ??= new ManualTime();
@@ -267,6 +468,7 @@ public sealed class NativeLyricsRuntimePriorityTests
     private sealed class External(string name, Func<PlayerState, CancellationToken, Task<LyricsDocument?>> fetch) : IExternalLyricsProvider
     {
         public string Name => name;
+        public bool OutranksPartialAppleLyrics { get; init; }
         public int Calls;
         public CancellationToken LastToken;
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

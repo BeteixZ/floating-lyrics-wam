@@ -276,6 +276,21 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
     }
 
     [Fact]
+    public async Task FindByLyricsIds_PrefersBackgroundVocalsWhenLeadLyricsHaveTheSameFeatures()
+    {
+        _ = CreateSyllableFile("syllable-lyrics[1].json", "AP_123", words: true, translation: false);
+        var rich = CreateSyllableFile("syllable-lyrics[2].json", "AP_123", words: true, translation: false,
+            backgroundVocal: """<span role="x-bg"><span begin="11" end="12">(echo)</span></span>""");
+        File.SetLastWriteTimeUtc(rich, DateTime.UtcNow.AddMinutes(-10));
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), [_root]);
+
+        var selected = await scanner.FindByLyricsIdsAsync(["AP_123"]);
+
+        Assert.Equal(rich, selected?.SourceFile);
+        Assert.Equal("echo", Assert.Single(Assert.Single(selected!.Lines).BackgroundVocals!).Text);
+    }
+
+    [Fact]
     public async Task SameNativeFeatures_PrefersFinerWordTimingBeforeFileRecency()
     {
         var coarse = CreateLyricsFile("ttmlLyrics-coarse.json", "AP_123", 0, "hello world", "180.000");
@@ -397,6 +412,27 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
     }
 
     [Fact]
+    public async Task NativeApiToRuntime_MatchesTheCatalogEditionWhenBothEditionsShareOneLyricAsset()
+    {
+        var correct = CreateSyllableFile("syllable-lyrics[1].json", "AP_123", words: true, translation: false,
+            catalogId: "456");
+        _ = CreateSyllableFile("syllable-lyrics[2].json", "AP_123", words: true, translation: true,
+            catalogId: "789");
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), [_root]);
+        await using var runtime = new LyricsRuntimeService(scanner, new NativePlayerProvider("Track from this edition"),
+            new LyricsSynchronizer(), catalogResolver: new FixedCatalogResolver("AP_456"));
+
+        var snapshot = await runtime.SnapshotAsync();
+
+        Assert.Equal(LyricsResolutionSource.CatalogVerifiedCache, snapshot.Resolution.Source);
+        Assert.Equal(correct, snapshot.Document!.SourceFile);
+        Assert.Equal("AP_123", snapshot.Document.LyricsId);
+        Assert.Equal(456L, snapshot.Document.CatalogTrackId);
+        Assert.Null(await scanner.FindByLyricsIdsAsync(["AP_123"]));
+        Assert.Equal(new[] { "AP_456", "AP_789" }, (await scanner.GetCachedLyricsIdsAsync()).Order());
+    }
+
+    [Fact]
     public async Task NativeApiToRuntime_UsesAppleWordTimesAndTranslationsWithoutExternalRequests()
     {
         _ = CreateSyllableFile("syllable-lyrics[1].json", "AP_123", words: true, translation: true);
@@ -423,10 +459,16 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
         Assert.Equal(0, external.CallCount);
     }
 
-    private sealed class NativePlayerProvider : IPlayerSessionProvider
+    private sealed class NativePlayerProvider(string title = "hello world") : IPlayerSessionProvider
     {
         public Task<PlayerState?> GetCurrentPlayerStateAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult<PlayerState?>(new PlayerState("hello world", "Artist", "Album", 10.5, 180, true));
+            Task.FromResult<PlayerState?>(new PlayerState(title, "Artist", "Album", 10.5, 180, true));
+    }
+
+    private sealed class FixedCatalogResolver(string id) : ICatalogSongResolver
+    {
+        public Task<IReadOnlyList<string>> ResolveLyricsIdCandidatesAsync(PlayerState player,
+            CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<string>>([id]);
     }
 
     private sealed class CountingExternalProvider : IExternalLyricsProvider
@@ -440,15 +482,18 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
         }
     }
 
-    private string CreateSyllableFile(string name, string id, bool words, bool translation)
+    private string CreateSyllableFile(string name, string id, bool words, bool translation,
+        string? backgroundVocal = null, string? catalogId = null)
     {
         var path = Path.Combine(CreateDirectory("INetCache", "B"), name);
-        File.WriteAllText(path, BuildSyllableJson(id, words, translation));
+        File.WriteAllText(path, BuildSyllableJson(id, words, translation, backgroundVocal, catalogId));
         return path;
     }
 
-    private static string BuildSyllableJson(string id, bool words, bool translation)
+    private static string BuildSyllableJson(string id, bool words, bool translation,
+        string? backgroundVocal = null, string? catalogId = null)
     {
+        catalogId ??= id[3..];
         var text = words
             ? "<span begin=\"10.000\" end=\"11.000\">hello</span> <span begin=\"11.000\" end=\"12.000\">world</span>"
             : "hello world";
@@ -456,12 +501,13 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
             ? "<head><metadata><itunes:iTunesMetadata><itunes:translations><itunes:translation type=\"subtitle\" xml:lang=\"zh-Hans\"><itunes:text for=\"native-27\">你好，世界</itunes:text></itunes:translation></itunes:translations></itunes:iTunesMetadata></metadata></head>"
             : "";
         var ttml = "<tt xmlns=\"http://www.w3.org/ns/ttml\" xmlns:itunes=\"http://music.apple.com/lyric-ttml-internal\">"
-            + localized + "<body dur=\"180.000\"><div><p begin=\"10.000\" end=\"12.000\" itunes:key=\"native-27\">" + text + "</p></div></body></tt>";
+            + localized + "<body dur=\"180.000\"><div><p begin=\"10.000\" end=\"12.000\" itunes:key=\"native-27\">"
+            + text + backgroundVocal + "</p></div></body></tt>";
         return JsonSerializer.Serialize(new
         {
-            data = new[] { new { id = id[3..], type = "syllable-lyrics", attributes = new
+            data = new[] { new { id = catalogId, type = "syllable-lyrics", attributes = new
             {
-                playParams = new { id, catalogId = id[3..], kind = "lyric" },
+                playParams = new { id, catalogId, kind = "lyric" },
                 ttmlLocalizations = ttml,
             } } },
         });

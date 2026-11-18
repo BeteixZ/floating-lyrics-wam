@@ -17,6 +17,9 @@ public interface ICatalogSongResolver
         PlayerState player,
         CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<string>> RefreshLyricsIdCandidatesAsync(PlayerState player, CancellationToken cancellationToken = default) =>
+        ResolveLyricsIdCandidatesAsync(player, cancellationToken);
+
     /// <summary>Checks cached Apple ids directly when keyword search omits a release.</summary>
     Task<IReadOnlyList<string>> VerifyCachedLyricsIdsAsync(
         PlayerState player, IReadOnlyList<string> lyricsIds,

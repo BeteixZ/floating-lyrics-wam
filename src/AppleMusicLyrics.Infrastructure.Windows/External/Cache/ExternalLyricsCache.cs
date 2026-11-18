@@ -98,7 +98,7 @@ public sealed class ExternalLyricsCache
                     return false;
                 }
                 var entry = JsonSerializer.Deserialize<CacheEntry>(stream);
-                if (entry is null || entry.Version != Version || entry.Key != key || !IsUsable(entry.Document))
+                if (entry is null || entry.Version != Version || entry.Key != key || !IsUsable(entry.Document, player.Duration))
                 {
                     return false;
                 }
@@ -122,7 +122,7 @@ public sealed class ExternalLyricsCache
     {
         lock (_gate)
         {
-            if (!_enabled || (expectedGeneration is { } expected && expected != _generation) || !IsUsable(document)) return;
+            if (!_enabled || (expectedGeneration is { } expected && expected != _generation) || !IsUsable(document, player.Duration)) return;
             var key = BuildKey(sourceName, player);
             var path = GetPath(key);
             var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
@@ -216,10 +216,11 @@ public sealed class ExternalLyricsCache
         MetadataMatching.Normalize(player.Title), MetadataMatching.Normalize(player.Artist),
         MetadataMatching.Normalize(player.Album), player.Duration.ToString("R", System.Globalization.CultureInfo.InvariantCulture)));
 
-    private static bool IsUsable(LyricsDocument? document)
+    private static bool IsUsable(LyricsDocument? document, double playbackDuration)
     {
         return document is { SourceFile: not null, Lines.Count: > 0 }
             && (document.DurationSeconds is null || double.IsFinite(document.DurationSeconds.Value))
+            && LyricsMatchPolicy.IsRecordingDurationCompatible(playbackDuration, document.DurationSeconds)
             && double.IsFinite(document.LeadingSilenceSeconds) && double.IsFinite(document.NativeOffsetSeconds)
             && document.Lines.All(line => line is not null && line.Text is not null
                 && double.IsFinite(line.Begin) && double.IsFinite(line.End) && line.Begin >= 0 && line.End >= line.Begin

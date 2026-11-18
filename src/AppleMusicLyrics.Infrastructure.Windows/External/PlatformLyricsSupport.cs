@@ -52,13 +52,13 @@ internal static class PlatformLyricsSupport
         }
 
         var durationScore = 0;
+        if (!LyricsMatchPolicy.IsRecordingDurationCompatible(player.Duration, duration))
+        {
+            return int.MinValue;
+        }
         if (double.IsFinite(player.Duration) && player.Duration > 0 && duration is > 0 && double.IsFinite(duration.Value))
         {
             var delta = Math.Abs(player.Duration - duration.Value);
-            if (delta > 15)
-            {
-                return int.MinValue;
-            }
             durationScore = 80 - (int)Math.Round(delta * 8);
         }
 

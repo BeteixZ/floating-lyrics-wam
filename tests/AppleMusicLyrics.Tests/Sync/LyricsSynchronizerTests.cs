@@ -77,6 +77,49 @@ public sealed class LyricsSynchronizerTests
     }
 
     [Fact]
+    public void Resolve_TracksTwoIndependentlyTimedDuetPartsAndResumesTheRemainingVoice()
+    {
+        var lead = new LyricsLine(10, 20, "lead") { VocalistId = "v1" };
+        var firstReply = new LyricsLine(11, 14, "first reply") { VocalistId = "v2" };
+        var secondReply = new LyricsLine(15, 21, "second reply") { VocalistId = "v2" };
+        var next = new LyricsLine(22, 24, "next") { VocalistId = "v1" };
+        var document = new LyricsDocument("id", "ok", "memory", DateTimeOffset.UtcNow, [lead, firstReply, secondReply, next]);
+        var player = new PlayerState("Song", "Artist", null, 0, 24, true);
+        var synchronizer = new LyricsSynchronizer();
+        ActiveLyricState At(double position) => synchronizer.Resolve(document, player with { Position = position });
+
+        Assert.Null(At(10).DuetLine);
+        var firstPair = At(11);
+        Assert.Same(lead, firstPair.CurrentLine);
+        Assert.Same(firstReply, firstPair.DuetLine);
+        Assert.Same(secondReply, firstPair.NextLine);
+        Assert.Same(firstPair, At(13));
+        Assert.Null(At(14).DuetLine);
+        Assert.Same(secondReply, At(14).NextLine);
+        Assert.Same(secondReply, At(15).DuetLine);
+        Assert.Same(next, At(15).NextLine);
+        Assert.Same(secondReply, At(20).CurrentLine);
+        Assert.Null(At(20).DuetLine);
+        Assert.Same(firstPair, At(11.5));
+    }
+
+    [Theory]
+    [InlineData("v1")]
+    [InlineData(null)]
+    public void Resolve_DoesNotPromoteAnOverlapWithoutADifferentTaggedVocalist(string? secondVocalist)
+    {
+        var lead = new LyricsLine(10, 20, "lead") { VocalistId = "v1" };
+        var overlapping = new LyricsLine(11, 21, "overlapping") { VocalistId = secondVocalist };
+        var document = new LyricsDocument("id", "ok", "memory", DateTimeOffset.UtcNow, [lead, overlapping]);
+        var player = new PlayerState("Song", "Artist", null, 13, 30, true);
+        var state = new LyricsSynchronizer().Resolve(document, player);
+
+        Assert.Same(lead, state.CurrentLine);
+        Assert.Null(state.DuetLine);
+        Assert.Same(overlapping, state.NextLine);
+    }
+
+    [Fact]
     public void Resolve_ReturnsCurrentLineInsideWindow()
     {
         var synchronizer = new LyricsSynchronizer();

@@ -23,4 +23,6 @@ public interface IPlayerMatchedLyricsProvider : ILyricsDocumentProvider
 
     Task<IReadOnlyList<string>> GetCachedLyricsIdsAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
+
+    void InvalidateFileIndex() { }
 }

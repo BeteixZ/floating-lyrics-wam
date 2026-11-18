@@ -24,6 +24,8 @@ public sealed class QQMusicLyricsProvider : PlatformLyricsProvider
 
     public override string Name => "QQ Music";
 
+    public override bool OutranksPartialAppleLyrics => true;
+
     protected override async Task<LyricsDocument?> FetchCoreAsync(PlayerState player, CancellationToken cancellationToken)
     {
         var searches = await Task.WhenAll(

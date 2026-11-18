@@ -27,23 +27,26 @@ public sealed class LyricsSynchronizer
             return Empty;
 
         var position = LyricsTiming.GetPosition(document, player, offsetSeconds, applyNativeOffset);
-        return _indexes.GetValue(document, static value => new TimelineIndex(value.Lines)).Resolve(position);
+        return _indexes.GetValue(document, static value => new TimelineIndex(value)).Resolve(position);
     }
 
     private sealed class TimelineIndex
     {
         private readonly IReadOnlyList<LyricsLine> _lines;
         private readonly ActiveLyricState[] _states;
+        private readonly List<DuetWindow>?[]? _duets;
         private readonly ActiveLyricState _intro;
         private readonly bool _orderedNonOverlapping;
         private int _lastIndex;
 
-        public TimelineIndex(IReadOnlyList<LyricsLine> lines)
+        public TimelineIndex(LyricsDocument document)
         {
+            var lines = document.Lines;
             _lines = lines;
             _intro = new ActiveLyricState(null, null, null, lines[0]);
             _states = new ActiveLyricState[lines.Count];
             _orderedNonOverlapping = true;
+            var orderedByBegin = true;
             for (var index = 0; index < lines.Count; index++)
             {
                 var line = lines[index];
@@ -53,7 +56,11 @@ public sealed class LyricsSynchronizer
                 if (!double.IsFinite(line.Begin) || !double.IsFinite(line.End) || line.End <= line.Begin
                     || (index > 0 && (lines[index - 1].Begin >= line.Begin || lines[index - 1].End > line.Begin)))
                     _orderedNonOverlapping = false;
+                if (!double.IsFinite(line.Begin) || (index > 0 && lines[index - 1].Begin > line.Begin))
+                    orderedByBegin = false;
             }
+            if (!_orderedNonOverlapping && document.HasMultipleVocalists())
+                _duets = BuildDuetWindows(orderedByBegin);
         }
 
         public ActiveLyricState Resolve(double position)
@@ -90,11 +97,49 @@ public sealed class LyricsSynchronizer
             for (var index = 0; index < _lines.Count; index++)
             {
                 var line = _lines[index];
-                if ((position >= line.Begin && position < line.End)
-                    || (index + 1 < _lines.Count && position >= line.End && position < _lines[index + 1].Begin))
+                if (position >= line.Begin && position < line.End)
+                    return ResolveDuet(index, position);
+                if (index + 1 < _lines.Count && position >= line.End && position < _lines[index + 1].Begin)
                     return _states[index];
             }
             return _states[^1];
         }
+
+        private List<DuetWindow>?[]? BuildDuetWindows(bool orderedByBegin)
+        {
+            List<DuetWindow>?[]? result = null;
+            for (var index = 0; index < _lines.Count; index++)
+            {
+                var lead = _lines[index];
+                if (string.IsNullOrEmpty(lead.VocalistId)) continue;
+                for (var other = index + 1; other < _lines.Count; other++)
+                {
+                    var partner = _lines[other];
+                    if (orderedByBegin && partner.Begin >= lead.End) break;
+                    if (string.IsNullOrEmpty(partner.VocalistId) || partner.VocalistId == lead.VocalistId
+                        || !(Math.Max(lead.Begin, partner.Begin) < Math.Min(lead.End, partner.End))) continue;
+
+                    var after = _states[index] with { NextLine = _states[other].NextLine };
+                    var during = after with { DuetLine = partner };
+                    result ??= new List<DuetWindow>?[_lines.Count];
+                    (result[index] ??= []).Add(new DuetWindow(partner.Begin, partner.End, during, after));
+                }
+            }
+            return result;
+        }
+
+        private ActiveLyricState ResolveDuet(int index, double position)
+        {
+            var state = _states[index];
+            if (_duets?[index] is not { } windows) return state;
+            foreach (var window in windows)
+            {
+                if (position >= window.End) state = window.After;
+                else if (position >= window.Begin) return window.During;
+            }
+            return state;
+        }
+
+        private sealed record DuetWindow(double Begin, double End, ActiveLyricState During, ActiveLyricState After);
     }
 }

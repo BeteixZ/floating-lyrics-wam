@@ -12,6 +12,7 @@ public sealed class PlatformLyricsProviderTests
     [InlineData("Other Song", "Artist", 180)]
     [InlineData("Song", "Other Artist", 180)]
     [InlineData("Song (Live)", "Artist", 180)]
+    [InlineData("Song", "Artist", 168)]
     [InlineData("Song", "Artist", 210)]
     public void ScoreCandidate_RejectsDifferentRecordings(string title, string artist, double duration)
     {

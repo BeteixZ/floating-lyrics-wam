@@ -68,9 +68,9 @@ public sealed class OvernightMonitorEngine : IDisposable
             : null;
 
         _externalLyricsProviders = _settings.ExternalLyricsEnabled
-            ? [new LrcLibLyricsProvider(timeoutSeconds: _settings.ExternalLyricsTimeoutSeconds),
+            ? [new NetEaseLyricsProvider(_settings.ExternalLyricsTimeoutSeconds),
                 new QQMusicLyricsProvider(_settings.ExternalLyricsTimeoutSeconds),
-                new NetEaseLyricsProvider(_settings.ExternalLyricsTimeoutSeconds)]
+                new LrcLibLyricsProvider(timeoutSeconds: _settings.ExternalLyricsTimeoutSeconds)]
             : [];
 
         var synchronizer = new LyricsSynchronizer();

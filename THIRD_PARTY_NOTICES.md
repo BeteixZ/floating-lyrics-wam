@@ -39,6 +39,18 @@ licenses/
 
 These bundled files are the MPL-covered sources used to build that binary and may be obtained and modified under MPL-2.0. The project repository is [BeteixZ/floating-lyrics-wam](https://github.com/BeteixZ/floating-lyrics-wam); a release's matching tag or commit contains the same source under the paths listed above. Distributors must preserve the notices and make the corresponding MPL-covered source, including their modifications, available to recipients. See MPL sections 3.1, 3.2, and 3.4; Mozilla also provides an [official FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/).
 
+## Offline Japanese readings
+
+The app uses [Apache Lucene.NET Kuromoji](https://lucenenet.apache.org/docs/4.8.0-beta00017/api/analysis-kuromoji/Lucene.Net.Analysis.Ja.html) and its bundled Japanese dictionary to generate romaji. Lucene.NET and [J2N](https://github.com/NightOwl888/J2N) are distributed under Apache License 2.0. The [bundled license text](licenses/Lucene.NET-LICENSE.txt) includes the dictionary and other Lucene.NET notices. The transitive Microsoft.Extensions assemblies are distributed under the [MIT license](licenses/Microsoft.Extensions-LICENSE.txt).
+
+```text
+Apache Lucene.Net
+Copyright 2006-2026 The Apache Software Foundation
+
+This product includes software developed at
+The Apache Software Foundation (http://www.apache.org/).
+```
+
 ## Music services and lyric content
 
 These acknowledgments concern software implementation. LyricsX, LyricsKit, and their contributors do not endorse this application. The software licenses do not grant platform API authorization or rights in returned lyric content. QQ Music and NetEase Cloud Music names identify the services accessed; their undocumented interfaces may change or restrict access. Use and redistribution of content remain subject to the applicable rights and service terms.

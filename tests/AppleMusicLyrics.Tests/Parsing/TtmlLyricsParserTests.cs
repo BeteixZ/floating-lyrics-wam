@@ -1,4 +1,5 @@
 using System.Text.Json;
+using AppleMusicLyrics.Core.Models;
 using AppleMusicLyrics.Core.Parsing;
 using AppleMusicLyrics.Core.Sync;
 using Xunit;
@@ -215,6 +216,56 @@ public sealed class TtmlLyricsParserTests
         Assert.Equal("hallo", line.Romanization);
         Assert.True(LyricWordTiming.IsUsable(line));
         Assert.Equal(2, line.Words!.Count);
+        var vocal = Assert.Single(line.BackgroundVocals!);
+        Assert.Equal("echo", vocal.Text);
+        Assert.Equal(new LyricWord(10, 12, "echo"), Assert.Single(vocal.Words!));
+    }
+
+    [Fact]
+    public void ParseLyricsJson_ReadsAppleBackgroundVocalsWithTimestampsInsideTheWrapper()
+    {
+        var ttml = Wrap("""
+            <p begin="10" end="14">
+              <span begin="10" end="12.5">Lead</span>
+              <span ttm:role="x-bg"><span begin="11.5" end="12.5">(Sing</span> <span begin="13" end="14">along)</span></span>
+              <span ttm:role="x-bg">（Echo）</span>
+              <span ttm:role="x-bg">()</span>
+            </p>
+            """);
+        var line = Assert.Single(new TtmlLyricsParser().ParseLyricsJson(NativeJson(ttml), "syllable-lyrics.json").Lines);
+
+        Assert.Equal("Lead", line.Text);
+        Assert.Equal(new LyricWord(10, 12.5, "Lead"), Assert.Single(line.Words!));
+        Assert.Collection(line.BackgroundVocals!,
+            vocal =>
+            {
+                Assert.Equal("Sing along", vocal.Text);
+                Assert.Equal(11.5, vocal.Begin);
+                Assert.Equal(14, vocal.End);
+                Assert.Equal(new[] { new LyricWord(11.5, 12.5, "Sing"), new LyricWord(13, 14, "along") }, vocal.Words);
+            },
+            vocal =>
+            {
+                Assert.Equal("Echo", vocal.Text);
+                Assert.Equal(10, vocal.Begin);
+                Assert.Equal(14, vocal.End);
+                Assert.Null(vocal.Words);
+            });
+    }
+
+    [Fact]
+    public void ParseTtml_InvalidBackgroundClockPreservesTextAndForegroundTiming()
+    {
+        var line = Assert.Single(new TtmlLyricsParser().ParseTtml(Wrap("""
+            <p begin="10" end="12"><span begin="10" end="12">Lead</span>
+              <span ttm:role="x-bg"><span begin="1" end="2">(echo)</span></span>
+            </p>
+            """)));
+        var vocal = Assert.Single(line.BackgroundVocals!);
+
+        Assert.Equal("echo", vocal.Text);
+        Assert.Null(vocal.Words);
+        Assert.Equal(new LyricWord(10, 12, "Lead"), Assert.Single(line.Words!));
     }
 
     [Fact]
@@ -267,7 +318,31 @@ public sealed class TtmlLyricsParserTests
     }
 
     [Fact]
-    public void ParseTtml_DoesNotTreatTransliterationSidecarAsTranslation()
+    public void ParseLyricsJson_MatchesLatinTransliterationByKeyAlongsideTranslation()
+    {
+        var ttml = Wrap("""
+            <p begin="1" end="2" itunes:key="L1"><span begin="1" end="2">東京</span></p>
+            <p begin="2" end="3" itunes:key="L2">明日</p>
+            """, """
+            <iTunesMetadata xmlns="http://music.apple.com/lyric-ttml-internal">
+              <translations><translation xml:lang="zh-Hans"><text for="L1">东京</text></translation></translations>
+              <transliterations>
+                <transliteration xml:lang="ja-Hira"><text for="L1">とうきょう</text><text for="L2">あした</text></transliteration>
+                <transliteration xml:lang="ja-Latn"><text for="L9">wrong line</text><text for="L1"><span begin="1" end="1.5">tou</span><span begin="1.5" end="2">kyou</span><span ttm:role="x-bg">echo</span></text></transliteration>
+              </transliterations>
+            </iTunesMetadata>
+            """);
+        var lines = new TtmlLyricsParser().ParseLyricsJson(NativeJson(ttml), "syllable-lyrics.json").Lines;
+
+        Assert.Equal("東京", lines[0].Text);
+        Assert.Equal("东京", lines[0].Translation);
+        Assert.Equal("toukyou", lines[0].Romanization);
+        Assert.True(LyricWordTiming.IsUsable(lines[0]));
+        Assert.Null(lines[1].Romanization);
+    }
+
+    [Fact]
+    public void ParseTtml_ReadsUntaggedTransliterationWithoutTreatingItAsTranslation()
     {
         var ttml = Wrap("<p begin=\"1\" end=\"2\" itunes:key=\"L1\">你好</p>", """
             <iTunesMetadata xmlns="http://music.apple.com/lyric-ttml-internal"><transliterations><transliteration><text for="L1">ni hao</text></transliteration></transliterations></iTunesMetadata>
@@ -275,6 +350,7 @@ public sealed class TtmlLyricsParserTests
         var line = Assert.Single(new TtmlLyricsParser().ParseTtml(ttml));
         Assert.Equal("你好", line.Text);
         Assert.Null(line.Translation);
+        Assert.Equal("ni hao", line.Romanization);
     }
 
     [Theory]
@@ -331,6 +407,20 @@ public sealed class TtmlLyricsParserTests
             <p begin="1" end="2">Main</p><p begin="1" end="2" ttm:role="x-bg">Background</p><p begin="1" end="2" ttm:role="x-translation">Translation only</p>
             """, "<p begin=\"0\" end=\"1\">Not a body lyric</p>"));
         Assert.Equal("Main", Assert.Single(lines).Text);
+    }
+
+    [Fact]
+    public void ParseTtml_ReadsInheritedAndExplicitVocalistIds()
+    {
+        var lines = new TtmlLyricsParser().ParseTtml(Wrap("""
+            <div ttm:agent="v1">
+              <p begin="10" end="14">First voice</p>
+              <p begin="11" end="13" ttm:agent="v2">Second voice</p>
+              <p begin="14" end="16" ttm:agent="v1 v2">Together</p>
+            </div>
+            """, """<ttm:agent type="person" xml:id="v1" /><ttm:agent type="person" xml:id="v2" />"""));
+
+        Assert.Equal(new[] { "v1", "v2", null }, lines.Select(line => line.VocalistId));
     }
 
     [Fact]

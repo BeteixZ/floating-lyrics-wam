@@ -39,6 +39,40 @@ public sealed class OverlaySnapshotPresenterTests
         Assert.Contains("Waiting", presentation.Subtitle);
     }
 
+    [Theory]
+    [InlineData("東京へ行った", null, true, "tōkyō e itta")]
+    [InlineData("スーパーで待つ", null, true, "sūpā de matsu")]
+    [InlineData("東京", null, true, "tōkyō")]
+    [InlineData("東京へ行った", "supplied reading", true, "supplied reading")]
+    [InlineData("東京へ行った", "supplied reading", false, null)]
+    [InlineData("Hello world", null, true, null)]
+    public void CreateLyrics_ShowsSuppliedOrOfflineRomajiOnlyWhenEnabled(
+        string original, string? supplied, bool enabled, string? expected)
+    {
+        var current = new LyricsLine(1, 2, original, Translation: "译文", Romanization: supplied);
+        var document = new LyricsDocument("id", "success", "netease:1", DateTimeOffset.UtcNow,
+            [current, new LyricsLine(2, 3, "また会う"), new LyricsLine(3, 4, "歌を歌う")]);
+        var snapshot = new RuntimeSnapshot(document, new PlayerState("Song", "Artist", null, 1.5, 30, true),
+            new ActiveLyricState(0, null, current, null), LyricsResolution.NoPlayer);
+
+        var presentation = OverlaySnapshotPresenter.CreateLyrics(snapshot, _english, showRomanization: enabled);
+
+        Assert.Equal(expected, presentation.RomanizationText);
+        Assert.Equal(original, presentation.CurrentText);
+        Assert.Equal("译文", presentation.TranslationText);
+    }
+
+    [Fact]
+    public void CreateLyrics_DoesNotGenerateJapaneseReadingsForChineseLyrics()
+    {
+        var current = new LyricsLine(1, 2, "明天見");
+        var document = new LyricsDocument("id", "success", "test", DateTimeOffset.UtcNow, [current]);
+        var snapshot = new RuntimeSnapshot(document, new PlayerState("Song", "Artist", null, 1.5, 30, true),
+            new ActiveLyricState(0, null, current, null), LyricsResolution.NoPlayer);
+
+        Assert.Null(OverlaySnapshotPresenter.CreateLyrics(snapshot, _english, showRomanization: true).RomanizationText);
+    }
+
     [Fact]
     public void CreateLyrics_ResolvedDocument_MapsActiveLines()
     {

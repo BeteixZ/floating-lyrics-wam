@@ -115,7 +115,7 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
         }
         // Newest first: catalog verification only checks a bounded prefix of this list.
         return documents.OrderByDescending(document => document.UpdatedAt)
-            .Select(document => CatalogLyricsId.ToCatalogId(document.LyricsId))
+            .Select(document => CatalogLyricsId.ToCatalogId(CatalogLyricsId.ForDocument(document)))
             .OfType<long>()
             .Select(CatalogLyricsId.FromCatalogId)
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -139,14 +139,14 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
             cancellationToken.ThrowIfCancellationRequested();
             var document = await TryParseLyricsDocumentAsync(file, cancellationToken).ConfigureAwait(false);
             if (document is { Lines.Count: > 0 }
-                && lyricsIds.Any(id => CatalogLyricsId.Matches(document.LyricsId, id)))
+                && lyricsIds.Any(id => CatalogLyricsId.Matches(CatalogLyricsId.ForDocument(document), id)))
             {
                 documents.Add(document);
             }
         }
 
         return lyricsIds.SelectMany(id => OrderNativeDocuments(documents
-                .Where(document => CatalogLyricsId.Matches(document.LyricsId, id))))
+                .Where(document => CatalogLyricsId.Matches(CatalogLyricsId.ForDocument(document), id))))
             .FirstOrDefault();
     }
 
@@ -231,7 +231,7 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
         || name.StartsWith("syllable-lyrics", StringComparison.OrdinalIgnoreCase);
 
     private static string GetDocumentIdentity(LyricsDocument document) =>
-        CatalogLyricsId.ToCatalogId(document.LyricsId) is long catalogId
+        CatalogLyricsId.ToCatalogId(CatalogLyricsId.ForDocument(document)) is long catalogId
             ? CatalogLyricsId.FromCatalogId(catalogId)
             : !string.IsNullOrWhiteSpace(document.LyricsId) ? "id:" + document.LyricsId.Trim()
             : "file:" + document.SourceFile;
@@ -246,12 +246,21 @@ public sealed class AppleMusicCacheScanner : IPlayerMatchedLyricsProvider
                     WordLines = timedLines.Length,
                     WordFragments = timedLines.Sum(line => line.Words!.Count),
                     TranslationLines = document.Lines.Count(line => LyricsTranslationFilter.IsMeaningful(line.Translation)),
+                    BackgroundVocalCount = document.Lines.Sum(line => line.BackgroundVocals?.Count ?? 0),
+                    BackgroundVocalWordCount = document.Lines.Sum(line =>
+                        line.BackgroundVocals?.Sum(vocal => vocal.Words?.Count ?? 0) ?? 0),
+                    RomanizationLines = document.Lines.Count(line => !string.IsNullOrWhiteSpace(line.Romanization)),
+                    HasMultipleVocalists = document.HasMultipleVocalists(),
                 };
             })
             .OrderByDescending(item => (item.WordLines > 0 ? 1 : 0) + (item.TranslationLines > 0 ? 1 : 0))
             .ThenByDescending(item => item.WordLines)
             .ThenByDescending(item => item.TranslationLines)
             .ThenByDescending(item => item.WordFragments)
+            .ThenByDescending(item => item.BackgroundVocalCount)
+            .ThenByDescending(item => item.BackgroundVocalWordCount)
+            .ThenByDescending(item => item.HasMultipleVocalists)
+            .ThenByDescending(item => item.RomanizationLines)
             .ThenByDescending(item => item.Document.UpdatedAt)
             .Select(item => item.Document);
 

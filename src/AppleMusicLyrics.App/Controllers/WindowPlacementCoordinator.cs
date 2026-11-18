@@ -37,10 +37,12 @@ public sealed class WindowPlacementCoordinator
             fallbackRect);
     }
 
-    public CapturedWindowPlacement? Capture(nint hwnd)
+    public CapturedWindowPlacement? Capture(nint hwnd) => Capture(hwnd, GetWindowRect(hwnd));
+
+    /// <summary>Captures <paramref name="rect"/> (for example, a card drawn inside a larger window).</summary>
+    public CapturedWindowPlacement? Capture(nint hwnd, PixelRect rect)
     {
         var monitors = GetMonitors();
-        var rect = GetWindowRect(hwnd);
         if (monitors.Count == 0 || rect.Width <= 0 || rect.Height <= 0)
         {
             return null;

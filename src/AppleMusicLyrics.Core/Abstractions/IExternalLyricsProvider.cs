@@ -12,9 +12,19 @@ public interface IExternalLyricsProvider
     string Name { get; }
 
     /// <summary>
+    /// True for sources preferred over Apple Music lyrics that lack the requested word timings or
+    /// translations. Their verified same-song document may replace such Apple lyrics outright;
+    /// other sources can only fill missing features on Apple's own timeline.
+    /// </summary>
+    bool OutranksPartialAppleLyrics => false;
+
+    /// <summary>
     /// Returns timed lyrics for <paramref name="player"/>, or null when this source completed its
     /// lookup but has no synchronized lyrics. Transient failures may throw so the runtime can apply
     /// bounded retry; cancellation must always be propagated.
     /// </summary>
     Task<LyricsDocument?> FetchAsync(PlayerState player, CancellationToken cancellationToken = default);
+
+    Task<LyricsDocument?> FetchFreshAsync(PlayerState player, CancellationToken cancellationToken = default) =>
+        FetchAsync(player, cancellationToken);
 }

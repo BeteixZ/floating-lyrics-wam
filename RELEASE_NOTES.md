@@ -1,5 +1,36 @@
 # Release Notes
 
+## v0.8.0 - Richer lyric sources, smoother overlay, and Apple-style word emphasis
+
+**Lyric sources**
+
+- Prefers word timing and translations when choosing lyrics. Apple Music lyrics that already have both are used as is; otherwise NetEase Cloud Music, then QQ Music, can replace them when they cover clearly more of the song with the missing features and are the same lyrics on the same timeline, even when they split or word lines differently. Apple Music's own lyrics (with gaps filled from other sources) come next, and LRCLIB last. With word highlighting and translations both off, Apple Music's lyrics stay primary. **This reverses v0.7.0, where QQ and NetEase could only fill features on Apple's lyrics.**
+- A feature now counts only when it covers most of the song, so lyrics with a few patched-in translated lines no longer stop the search for a better source.
+- NetEase and QQ lyrics that replace Apple's are re-timed onto Apple's line starts: each line starts where Apple's does, lines the provider splits are interpolated, and the provider's own syllable rhythm is kept. This fixes QQ Music lines that started noticeably early or late.
+- Online lookup now tries NetEase Cloud Music, QQ Music, then LRCLIB.
+- Adds right-click options to search again or preview and select lyrics for the current track.
+- Matches Apple Music's cached lyrics to the catalog track even when several releases share a lyric asset. Skips external recordings whose known duration is outside the matching window, including older cached results.
+- Removes composer, lyricist, and other provider credit rows from the original display timeline as well as translations, including existing cached lyrics. Covers bilingual and compound production/instrument credits, translation attribution such as "以下歌词翻译由文曲大模型提供", promotional links, and provider placeholder notices. Hides standalone section markers and track-verified opening/closing title headers and performer labels. Preserves sung producer tags, valid translations beside metadata in multiline text, lyric timestamps, and word timing.
+
+**Display**
+
+- Held words swell slightly and glow while they are sung, like Apple Music. A word near the start of a line must be held longer to qualify (about 1.8 s) than one ending the phrase (about 0.8 s), and longer holds swell more.
+- Reduces visible lyric lag: lines switch about 0.2 s before they are sung so the crossfade has finished in time, and the word highlight leads by the display's render latency.
+- Makes the line-change crossfade visible: the outgoing line fades out quickly before the next one fades in, so the two no longer overlap at full strength.
+- Shows overlapping parts from different Apple Music vocalists as two full-size lyric lines, each with its own highlighting and translation.
+- Displays Apple Music background vocals on smaller lines beneath the lead lyric, with their own word-by-word timing when available.
+- Displays Apple Music's keyed romanization tracks and generates offline romaji when Japanese lyrics have no supplied reading.
+
+**Pure Mode and window sizing**
+
+- Stops the Pure Mode card from jumping between lines: the card is drawn inside a larger transparent window and animates there, so the window is resized only when a card no longer fits. Hover fading follows the visible card.
+- Looks at the next couple of lines before shrinking: the overlay keeps its size only when an upcoming line (such as a returning duet part) needs it again, and otherwise shrinks right away. Growth is still immediate.
+- Fixes long wrapped lines in Pure Mode cutting off the translation below them (for example in "Rap God"): card height is now measured at the same wrap width the lyrics are drawn with, and never wider than the screen.
+
+Requirements remain Windows 10 version 19041 or later and the x64 .NET 10 Desktop Runtime. Exit the previous tray instance before launching the new executable.
+
+---
+
 ## v0.7.0 - Accurate timing, Apple-first lyrics, and per-song offsets
 
 - Fixes lyrics running late and drifting. Apple Music now publishes whole-second positions on a timer slightly slower than one second, which made the previous estimate lag by 0.2–1.0s in a repeating cycle of about 45 seconds. Playback position now uses each report's publish time and is accurate to a few milliseconds once that cycle has been observed. **Lyrics lead time values tuned on earlier versions will now show lyrics about 0.6s earlier and should be re-calibrated.**

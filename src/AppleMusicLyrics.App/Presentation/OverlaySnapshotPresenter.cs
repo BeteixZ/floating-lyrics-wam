@@ -19,7 +19,11 @@ public sealed record LyricsPresentation(
     LyricsLine? DisplayedLine = null,
     string? TranslationText = null,
     string? RomanizationText = null,
-    string DebugSummaryText = "");
+    string DebugSummaryText = "")
+{
+    public LyricsLine? DuetLine { get; init; }
+    public string? DuetRomanizationText { get; init; }
+}
 
 public static class OverlaySnapshotPresenter
 {
@@ -56,7 +60,7 @@ public static class OverlaySnapshotPresenter
     /// building <see cref="LyricsPresentation.PathText"/> by setting includeDetailedDiagnostics false.
     /// </summary>
     public static LyricsPresentation CreateLyrics(RuntimeSnapshot snapshot, LocalizationManager? localization = null,
-        bool showTranslation = true, bool includeDetailedDiagnostics = true)
+        bool showTranslation = true, bool includeDetailedDiagnostics = true, bool showRomanization = false)
     {
         var text = localization ?? LocalizationManager.Instance;
         var resolutionLabel = FormatResolutionLabel(snapshot.Resolution, text);
@@ -80,7 +84,8 @@ public static class OverlaySnapshotPresenter
             ?? snapshot.Document.Lines.FirstOrDefault();
         var currentText = displayedLine?.Text
             ?? text.Text("Lyrics.NoDisplayableLines");
-        var source = GetSourceLabel(snapshot.Document, snapshot.Resolution, text);
+        var source = GetSourceLabel(snapshot.Document, snapshot.Resolution.Source, text);
+        if (snapshot.IsManualSelection) source = text.Format("Lyrics.Selection.ManualSource", source);
         var statistics = Statistics.GetValue(snapshot.Document, static document => new DocumentStatistics(document));
         var wordLines = statistics.WordLines;
         var translatedLines = statistics.TranslatedLines;
@@ -104,8 +109,12 @@ public static class OverlaySnapshotPresenter
             Animate: snapshot.ActiveLyric.CurrentLine is not null,
             DisplayedLine: displayedLine,
             TranslationText: LyricsTranslationFilter.Clean(displayedLine?.Translation),
-            RomanizationText: displayedLine?.Romanization,
-            DebugSummaryText: BuildDebugSummary(snapshot, source, wordLines, translatedLines, showTranslation, text));
+            RomanizationText: LyricRomanization.Resolve(snapshot.Document, displayedLine, showRomanization),
+            DebugSummaryText: BuildDebugSummary(snapshot, source, wordLines, translatedLines, showTranslation, text))
+        {
+            DuetLine = snapshot.ActiveLyric.DuetLine,
+            DuetRomanizationText = LyricRomanization.Resolve(snapshot.Document, snapshot.ActiveLyric.DuetLine, showRomanization),
+        };
     }
 
     private static string BuildDebugSummary(RuntimeSnapshot snapshot, string source, int wordLines,
@@ -205,13 +214,13 @@ public static class OverlaySnapshotPresenter
     private static bool HasTranslation(LyricsLine line) => LyricsTranslationFilter.IsMeaningful(line.Translation)
         && MetadataMatching.Normalize(line.Translation) != MetadataMatching.Normalize(line.Text);
 
-    private static string GetSourceLabel(LyricsDocument document, LyricsResolution resolution, LocalizationManager text)
+    internal static string GetSourceLabel(LyricsDocument document, LyricsResolutionSource source, LocalizationManager text)
     {
         if (document.SourceFile.StartsWith("qqmusic:", StringComparison.OrdinalIgnoreCase)) return "QQ Music";
         if (document.SourceFile.StartsWith("netease:", StringComparison.OrdinalIgnoreCase)) return "NetEase";
         if (document.SourceFile.StartsWith("lrclib:", StringComparison.OrdinalIgnoreCase)
             || document.SourceFile.StartsWith("lrclib-plain:", StringComparison.OrdinalIgnoreCase)) return "LRCLIB";
-        return resolution.Source switch
+        return source switch
         {
             LyricsResolutionSource.AppleMusicCache or LyricsResolutionSource.CatalogVerifiedCache => text.Text("Lyrics.SourceAppleCache"),
             LyricsResolutionSource.ExternalProvider => text.Text("Lyrics.SourceExternal"),

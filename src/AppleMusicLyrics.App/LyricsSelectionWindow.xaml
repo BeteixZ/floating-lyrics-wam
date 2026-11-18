@@ -1,0 +1,69 @@
+<Window x:Class="AppleMusicLyrics.App.LyricsSelectionWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:loc="clr-namespace:AppleMusicLyrics.App.Localization"
+        Title="{loc:Loc Lyrics.Menu.Choose}"
+        Width="750" Height="485" MinWidth="565" MinHeight="350"
+        WindowStartupLocation="CenterScreen"
+        Background="#101319" Foreground="#F3F6FB" FontFamily="Segoe UI, Microsoft YaHei UI" FontSize="14"
+        UseLayoutRounding="True" TextOptions.TextFormattingMode="Ideal">
+  <Window.Resources>
+    <Style TargetType="Button">
+      <Setter Property="Foreground" Value="#182130" />
+    </Style>
+  </Window.Resources>
+  <Grid Margin="20">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+    <TextBlock x:Name="TrackTitleText" FontSize="21" FontWeight="SemiBold"
+               TextTrimming="CharacterEllipsis" Margin="0,0,0,6" />
+    <TextBlock x:Name="SearchStatusText" Grid.Row="1" Foreground="#A8B2C3"
+               TextWrapping="Wrap" Margin="0,0,0,14" AutomationProperties.LiveSetting="Polite" />
+    <Grid Grid.Row="2">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="2*" />
+        <ColumnDefinition Width="12" />
+        <ColumnDefinition Width="3*" />
+      </Grid.ColumnDefinitions>
+      <ListBox x:Name="ChoicesList" SelectionChanged="ChoicesList_OnSelectionChanged"
+               AutomationProperties.Name="{loc:Loc Lyrics.Menu.Choose}"
+               Background="#171C25" Foreground="#F3F6FB" BorderBrush="#364051"
+               ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+        <ListBox.ItemTemplate>
+          <DataTemplate>
+            <StackPanel Margin="6,6">
+              <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap" />
+              <TextBlock Text="{Binding Details}" FontSize="12" TextWrapping="Wrap" />
+            </StackPanel>
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+      <Grid Grid.Column="2">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <TextBlock x:Name="PreviewTitleText" Foreground="#A8B2C3" Margin="0,0,0,6"
+                   Text="{loc:Loc Lyrics.Selection.Preview}" />
+        <TextBox x:Name="PreviewTextBox" Grid.Row="1" IsReadOnly="True" IsUndoEnabled="False"
+                 AutomationProperties.Name="{loc:Loc Lyrics.Selection.Preview}"
+                 Background="#171C25" Foreground="#F3F6FB" BorderBrush="#364051"
+                 TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Padding="10" />
+      </Grid>
+    </Grid>
+    <DockPanel Grid.Row="3" Margin="0,16,0,0" LastChildFill="False">
+      <Button x:Name="RetryButton" DockPanel.Dock="Left" Margin="0,0,8,0" Padding="12,6"
+              Content="{loc:Loc Lyrics.Menu.Rescan}" Click="RetryButton_OnClick" />
+      <Button x:Name="AutomaticButton" DockPanel.Dock="Left" Padding="12,6"
+              Content="{loc:Loc Lyrics.Selection.Automatic}" Click="AutomaticButton_OnClick" />
+      <Button DockPanel.Dock="Right" Padding="12,6"
+              Content="{loc:Loc Diagnostics.Close}" Click="CloseButton_OnClick" />
+      <Button x:Name="UseButton" DockPanel.Dock="Right" IsDefault="True" Margin="0,0,8,0" Padding="12,6"
+              Content="{loc:Loc Lyrics.Selection.Use}" Click="UseButton_OnClick" />
+    </DockPanel>
+  </Grid>
+</Window>

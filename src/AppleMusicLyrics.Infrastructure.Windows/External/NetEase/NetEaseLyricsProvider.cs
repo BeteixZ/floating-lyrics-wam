@@ -29,6 +29,8 @@ public sealed class NetEaseLyricsProvider : PlatformLyricsProvider
 
     public override string Name => "NetEase Cloud Music";
 
+    public override bool OutranksPartialAppleLyrics => true;
+
     protected override async Task<LyricsDocument?> FetchCoreAsync(PlayerState player, CancellationToken cancellationToken)
     {
         var search = await SearchAsync(player, cancellationToken).ConfigureAwait(false);

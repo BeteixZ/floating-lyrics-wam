@@ -29,6 +29,8 @@ public abstract class PlatformLyricsProvider : IExternalLyricsProvider, IDisposa
 
     public abstract string Name { get; }
 
+    public virtual bool OutranksPartialAppleLyrics => false;
+
     public async Task<LyricsDocument?> FetchAsync(PlayerState player, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();

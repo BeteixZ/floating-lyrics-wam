@@ -7,4 +7,10 @@ public sealed record RuntimeSnapshot(
     LyricsResolution Resolution,
     double? RawPositionSeconds = null,
     double? EstimatedPositionSeconds = null,
-    ExternalLyricsDiagnostics? ExternalDiagnostics = null);
+    ExternalLyricsDiagnostics? ExternalDiagnostics = null)
+{
+    public int TrackGeneration { get; init; }
+    public bool IsManualSelection { get; init; }
+    public bool CanManageLyrics => Player is { Duration: > 0 } player && double.IsFinite(player.Duration)
+        && !string.IsNullOrWhiteSpace(player.Title);
+}
