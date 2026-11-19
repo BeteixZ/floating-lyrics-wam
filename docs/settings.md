@@ -14,7 +14,7 @@ Settings are organized into five tabs, with Apply, Cancel, and Save available on
 | Lyrics | Word highlighting, translations, romanization, timing offset, per-song offsets, and native timing correction |
 | Window | Layout, Pure Mode, click-through, and window/background opacity |
 | Interaction | Automatic hiding, paused fading, and hover behavior |
-| Advanced | Online sources, caching, compatibility, matching, and diagnostics |
+| Advanced | Online sources, updates, caching, compatibility, matching, and diagnostics |
 
 Chinese glyphs and Chinese punctuation use the selected Chinese font; Latin text retains its own font. Font changes can be checked in the mixed-text preview and applied to the overlay without restarting. Existing settings files remain usable. Apply saves the current choices immediately; Cancel discards only edits made since the last Apply.
 

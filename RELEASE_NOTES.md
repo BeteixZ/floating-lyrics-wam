@@ -1,5 +1,26 @@
 # Release Notes
 
+## v0.9.0 - In-app updates
+
+**Updates**
+
+- The app now updates itself from GitHub Releases. It checks for a new version 20 seconds after startup and once a day, shows a Windows notification and an **Update to vX…** item in the tray, and opens a window with the release notes.
+- **Update and restart** downloads the package, verifies its size and the SHA-256 checksum GitHub publishes, installs it over the current folder, and restarts. Settings, saved positions, and the lyrics cache are kept.
+- **Skip this version** stays quiet about that release until a newer one is out; **Check for updates…** in the tray works any time and still offers a skipped version.
+- The automatic check can be turned off in Settings → Advanced → **Check for updates automatically**. It sends only the app name and version to GitHub.
+- If the app's folder cannot be written to, the window points to the release page instead of installing.
+
+**Other changes**
+
+- Release pages on GitHub now show these release notes instead of an auto-generated commit list.
+- The README is available in English, Simplified Chinese, and Traditional Chinese, with a new demo and FAQ.
+
+**Upgrading from 0.8.0 or earlier:** these versions cannot update themselves. Exit the running app from the tray, extract this release over the old folder (or into a new one), and start it. Updates after 0.9.0 are installed from inside the app.
+
+Requirements remain Windows 10 version 19041 or later and the x64 .NET 10 Desktop Runtime.
+
+---
+
 ## v0.8.0 - Richer lyric sources, smoother overlay, and Apple-style word emphasis
 
 **Lyric sources**

@@ -48,6 +48,8 @@ public partial class MainWindow : Window
     private readonly WindowInteropService _windowInteropService;
     private readonly WindowPlacementCoordinator _windowPlacementCoordinator;
     private readonly TrayIconController _trayIconController;
+    private readonly UpdateCoordinator _updates;
+    private UpdateWindow? _updateWindow;
     private DiagnosticsWindow? _diagnosticsWindow;
     private LyricsSelectionWindow? _lyricsSelectionWindow;
     private bool _canManageLyrics;
@@ -141,7 +143,14 @@ public partial class MainWindow : Window
             RefreshCurrentLyrics,
             OpenLyricsSelection,
             OpenSettingsWindow,
-            Close);
+            Close,
+            () => OpenUpdateWindow(checkNow: false));
+        _updates = new UpdateCoordinator(_settings, PersistCurrentSettings, Dispatcher);
+        _updates.AvailabilityChanged += () => _trayIconController.SetAvailableUpdate(_updates.Available?.Version.ToString());
+        _updates.NewReleaseFound += release => _trayIconController.ShowNotification(
+            LocalizationManager.Instance.Format("Update.Balloon.Available.Title", release.Version),
+            LocalizationManager.Instance.Text("Update.Balloon.Available.Text"),
+            () => OpenUpdateWindow(checkNow: false));
         ApplyWindowBounds();
         ApplyAppearanceSettings();
 
@@ -230,6 +239,7 @@ public partial class MainWindow : Window
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
+        StartUpdates();
         ApplyAdaptiveFontSizes();
         ApplyClickThrough();
         QueueDiagnosticsLayoutRefresh();
@@ -1417,6 +1427,8 @@ public partial class MainWindow : Window
         _runtimePollingController.Dispose();
         StopMouseTracker();
         PersistCurrentSettings();
+        _updateWindow?.Close();
+        _updates.Dispose();
         _trayIconController.Dispose();
         _runtimeService.DisposeAsync().AsTask().GetAwaiter().GetResult();
         _catalogResolver?.Dispose();
@@ -1935,6 +1947,41 @@ public partial class MainWindow : Window
             $"{player.PlayerText}{Environment.NewLine}{FormatTimingText(snapshot)}{Environment.NewLine}{lyrics.PathText}");
     }
 
+    private void StartUpdates()
+    {
+        // Remove packages left by earlier updates, then start the automatic schedule.
+        _updates.Installer.CleanUp(AppContext.BaseDirectory);
+        _updates.ApplySchedule();
+        var text = LocalizationManager.Instance;
+        switch (System.Windows.Application.Current.Properties[App.UpdateOutcomeKey] as string)
+        {
+            case App.UpdateOutcomeInstalled:
+                _trayIconController.ShowNotification(text.Format("Update.Balloon.Updated.Title", _updates.CurrentVersion),
+                    text.Text("Update.Balloon.Updated.Text"));
+                break;
+            case App.UpdateOutcomeFailed:
+                _trayIconController.ShowNotification(text.Text("Update.Balloon.Failed.Title"),
+                    text.Text("Update.Balloon.Failed.Text"), () => UpdateCoordinator.OpenReleasePage(null));
+                break;
+        }
+    }
+
+    // A known release opens directly; otherwise (or when asked to) the window checks first.
+    private void OpenUpdateWindow(bool checkNow)
+    {
+        if (_isClosed) return;
+        if (_updateWindow is not null)
+        {
+            _updateWindow.Activate();
+            return;
+        }
+
+        _updateWindow = new UpdateWindow(_updates, checkNow ? null : _updates.Available);
+        _updateWindow.Closed += (_, _) => _updateWindow = null;
+        _updateWindow.Show();
+        _updateWindow.Activate();
+    }
+
     private void OpenSettingsWindow()
     {
         var cacheGeneration = _externalLyricsCache?.Generation;
@@ -1950,7 +1997,8 @@ public partial class MainWindow : Window
             dialogSettings,
             previewSettings => ApplySettings(previewSettings, persist: true, cacheGeneration),
             lyricsCache: _externalLyricsCache,
-            openDiagnostics: OpenDiagnosticsWindow)
+            openDiagnostics: OpenDiagnosticsWindow,
+            checkForUpdates: () => OpenUpdateWindow(checkNow: true))
         {
             Owner = IsVisible ? this : null,
         };
@@ -2057,6 +2105,7 @@ public partial class MainWindow : Window
 
         CancelPureModeBoundsAnimation();
         CopySettings(sourceSettings, _settings);
+        _updates.ApplySchedule();
         _externalLyricsCache?.Configure(_settings.PersistExternalLyricsCache, _settings.ExternalLyricsCacheMaxMegabytes);
         // Applying unrelated edits after Clear must not repopulate the current song.
         if (!cacheWasEnabled && _settings.PersistExternalLyricsCache)
@@ -2558,6 +2607,8 @@ public partial class MainWindow : Window
         target.ExternalLyricsTimeoutSeconds = copy.ExternalLyricsTimeoutSeconds;
         target.PersistExternalLyricsCache = copy.PersistExternalLyricsCache;
         target.ExternalLyricsCacheMaxMegabytes = copy.ExternalLyricsCacheMaxMegabytes;
+        target.CheckForUpdates = copy.CheckForUpdates;
+        target.SkippedUpdateVersion = copy.SkippedUpdateVersion;
         target.UiLanguage = copy.UiLanguage;
         target.WindowX = copy.WindowX;
         target.WindowY = copy.WindowY;

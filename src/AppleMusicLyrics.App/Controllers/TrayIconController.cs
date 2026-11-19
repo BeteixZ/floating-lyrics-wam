@@ -19,6 +19,7 @@ public sealed class TrayIconController : IDisposable
     private readonly Forms.ToolStripMenuItem _diagnosticsMenuItem;
     private readonly Forms.ToolStripMenuItem _refreshLyricsMenuItem;
     private readonly Forms.ToolStripMenuItem _chooseLyricsMenuItem;
+    private readonly Forms.ToolStripMenuItem _updateMenuItem;
     private readonly Forms.ToolStripMenuItem _settingsMenuItem;
     private readonly Forms.ToolStripMenuItem _exitMenuItem;
 
@@ -34,7 +35,8 @@ public sealed class TrayIconController : IDisposable
         Action refreshLyrics,
         Action chooseLyrics,
         Action openSettings,
-        Action exit)
+        Action exit,
+        Action openUpdates)
     {
         var menu = new Forms.ContextMenuStrip();
         var text = LocalizationManager.Instance;
@@ -49,6 +51,7 @@ public sealed class TrayIconController : IDisposable
         _refreshLyricsMenuItem = AddItem(menu, text.Text("Lyrics.Menu.Rescan"), dispatcher, refreshLyrics);
         _chooseLyricsMenuItem = AddItem(menu, text.Text("Lyrics.Menu.Choose"), dispatcher, chooseLyrics);
         menu.Items.Add(new Forms.ToolStripSeparator());
+        _updateMenuItem = AddItem(menu, text.Text("Update.Tray.Check"), dispatcher, openUpdates);
         _settingsMenuItem = AddItem(menu, text.Text("Tray.Settings"), dispatcher, openSettings);
         _exitMenuItem = AddItem(menu, text.Text("Tray.Exit"), dispatcher, exit);
 
@@ -61,6 +64,34 @@ public sealed class TrayIconController : IDisposable
             ContextMenuStrip = menu,
         };
         _notifyIcon.DoubleClick += (_, _) => dispatcher.Invoke(toggleOverlay);
+        _notifyIcon.BalloonTipClicked += (_, _) =>
+        {
+            var action = _balloonAction;
+            _balloonAction = null;
+            if (action is not null) dispatcher.Invoke(action);
+        };
+        _notifyIcon.BalloonTipClosed += (_, _) => _balloonAction = null;
+    }
+
+    private Action? _balloonAction;
+    private string? _availableUpdateVersion;
+
+    /// <summary>Shows a newer version in the tray menu (null: the plain "Check for updates" item).</summary>
+    public void SetAvailableUpdate(string? version)
+    {
+        _availableUpdateVersion = version;
+        var text = LocalizationManager.Instance;
+        _updateMenuItem.Text = version is null ? text.Text("Update.Tray.Check") : text.Format("Update.Tray.Available", version);
+        _updateMenuItem.Font = version is null
+            ? new Font(_updateMenuItem.Font, System.Drawing.FontStyle.Regular)
+            : new Font(_updateMenuItem.Font, System.Drawing.FontStyle.Bold);
+    }
+
+    /// <summary>Shows a Windows notification; <paramref name="onClick"/> runs if the user clicks it.</summary>
+    public void ShowNotification(string title, string text, Action? onClick = null)
+    {
+        _balloonAction = onClick;
+        _notifyIcon.ShowBalloonTip(8000, title, text, Forms.ToolTipIcon.Info);
     }
 
     public void Update(
@@ -85,6 +116,9 @@ public sealed class TrayIconController : IDisposable
         _chooseLyricsMenuItem.Text = text.Text("Lyrics.Menu.Choose");
         _refreshLyricsMenuItem.Enabled = canManageLyrics;
         _chooseLyricsMenuItem.Enabled = canManageLyrics;
+        _updateMenuItem.Text = _availableUpdateVersion is null
+            ? text.Text("Update.Tray.Check")
+            : text.Format("Update.Tray.Available", _availableUpdateVersion);
         _settingsMenuItem.Text = text.Text("Tray.Settings");
         _exitMenuItem.Text = text.Text("Tray.Exit");
         _clickThroughMenuItem.Checked = clickThrough;

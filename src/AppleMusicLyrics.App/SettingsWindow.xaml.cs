@@ -19,6 +19,7 @@ public partial class SettingsWindow : Window
 {
     private readonly Action<AppSettings>? _applyPreview;
     private readonly Action? _openDiagnostics;
+    private readonly Action? _checkForUpdates;
     private readonly ExternalLyricsCache? _lyricsCache;
     private readonly DispatcherTimer _cacheUsageTimer;
     private readonly LocalizationManager _localization = LocalizationManager.Instance;
@@ -36,12 +37,13 @@ public partial class SettingsWindow : Window
     private string? _cacheStatusKey;
 
     public SettingsWindow(AppSettings settings, Action<AppSettings>? applyPreview = null, ExternalLyricsCache? lyricsCache = null,
-        Action? openDiagnostics = null)
+        Action? openDiagnostics = null, Action? checkForUpdates = null)
     {
         _languageOnCancel = _localization.Preference;
         Settings = settings.Clone();
         _applyPreview = applyPreview;
         _openDiagnostics = openDiagnostics;
+        _checkForUpdates = checkForUpdates;
         _lyricsCache = lyricsCache;
         _localization.SetLanguage(Settings.UiLanguage);
         InitializeComponent();
@@ -69,6 +71,8 @@ public partial class SettingsWindow : Window
     public AppSettings Settings { get; }
 
     private void OpenDiagnosticsButton_OnClick(object sender, RoutedEventArgs e) => _openDiagnostics?.Invoke();
+
+    private void CheckUpdatesButton_OnClick(object sender, RoutedEventArgs e) => _checkForUpdates?.Invoke();
 
     protected override void OnClosed(EventArgs e)
     {

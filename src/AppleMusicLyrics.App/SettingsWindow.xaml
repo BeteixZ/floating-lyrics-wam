@@ -642,6 +642,13 @@
               </Border>
               <Border Style="{StaticResource CardStyle}">
                 <StackPanel>
+                  <TextBlock Style="{StaticResource SectionTitleStyle}" Text="{loc:Loc Settings.Section.Updates}" />
+                  <CheckBox Style="{StaticResource ToggleStyle}" Content="{loc:Loc Settings.Toggle.CheckUpdates}" ToolTip="{loc:Loc Settings.ToolTip.CheckUpdates}" IsChecked="{Binding Settings.CheckForUpdates, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" />
+                  <Button x:Name="CheckUpdatesButton" Content="{loc:Loc Settings.Action.CheckUpdatesNow}" Style="{StaticResource GhostButtonStyle}" HorizontalAlignment="Left" Margin="0,12,0,0" Click="CheckUpdatesButton_OnClick" />
+                </StackPanel>
+              </Border>
+              <Border Style="{StaticResource CardStyle}">
+                <StackPanel>
                   <TextBlock Style="{StaticResource SectionTitleStyle}" Text="{loc:Loc Settings.Section.Cache}" />
                   <CheckBox x:Name="PersistExternalLyricsCacheCheckBox" Style="{StaticResource ToggleStyle}" Content="{loc:Loc Settings.Toggle.PersistCache}" IsChecked="{Binding Settings.PersistExternalLyricsCache, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" />
                   <Grid Style="{StaticResource SliderHeaderGridStyle}" Margin="0,12,0,6">

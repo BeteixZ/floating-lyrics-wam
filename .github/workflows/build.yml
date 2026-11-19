@@ -93,6 +93,25 @@ jobs:
       contents: write
 
     steps:
+      - name: Checkout release notes
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: RELEASE_NOTES.md
+          sparse-checkout-cone-mode: false
+
+      # The release body is what the in-app updater shows: this tag's section of RELEASE_NOTES.md.
+      - name: Extract release notes
+        shell: bash
+        run: |
+          awk -v tag="$GITHUB_REF_NAME" '
+            $0 == "## " tag || index($0, "## " tag " ") == 1 { found = 1; next }
+            found && (/^## / || /^---$/) { exit }
+            found { print }
+          ' RELEASE_NOTES.md > release-notes.md
+          if [ -z "$(tr -d '[:space:]' < release-notes.md)" ]; then
+            echo "See [RELEASE_NOTES.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/RELEASE_NOTES.md)." > release-notes.md
+          fi
+
       - name: Download Release Artifact
         uses: actions/download-artifact@v4
         with:
@@ -104,4 +123,4 @@ jobs:
         with:
           name: AppleMusicLyrics ${{ github.ref_name }}
           files: artifacts/${{ needs.build-test.outputs.zip_name }}
-          generate_release_notes: true
+          body_path: release-notes.md

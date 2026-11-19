@@ -54,6 +54,14 @@ public sealed class AppSettings
     // One shared disk quota for all external sources; the cache clamps this to 1..1024 MiB.
     public int ExternalLyricsCacheMaxMegabytes { get; set; } = 64;
 
+    // Ask GitHub Releases for a newer version at startup and once a day. The request carries only
+    // the app name and version; turning this off leaves the manual "Check for updates" action.
+    public bool CheckForUpdates { get; set; } = true;
+
+    // A release the user chose to skip. Automatic checks stay quiet about exactly this version;
+    // a manual check still offers it, and any later release is offered again.
+    public string SkippedUpdateVersion { get; set; } = string.Empty;
+
     // Normal mode window position and size
     public int WindowX { get; set; } = 100;
 
@@ -165,6 +173,8 @@ public sealed class AppSettings
             ExternalLyricsTimeoutSeconds = ExternalLyricsTimeoutSeconds,
             PersistExternalLyricsCache = PersistExternalLyricsCache,
             ExternalLyricsCacheMaxMegabytes = ExternalLyricsCacheMaxMegabytes,
+            CheckForUpdates = CheckForUpdates,
+            SkippedUpdateVersion = SkippedUpdateVersion,
             WindowX = WindowX,
             WindowY = WindowY,
             WindowWidth = WindowWidth,

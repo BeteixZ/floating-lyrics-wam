@@ -54,6 +54,7 @@ Apple Music for Windows has no desktop lyrics. Apple Music Lyrics adds an always
 
 - Fonts (separately for Latin, Chinese, and translations), colors, glow, opacity, and timing offsets, with per-song offsets
 - English, Simplified Chinese, and Traditional Chinese interface; more languages via [JSON language packs](docs/localization.md)
+- Updates itself from GitHub Releases: a tray notification when a new version is out, then one click to download, verify, and restart
 - Works fully offline when online features are disabled; no accounts, logins, or API keys
 
 ## Quick start
@@ -64,7 +65,7 @@ Apple Music for Windows has no desktop lyrics. Apple Music Lyrics adds an always
 2. Extract it anywhere and run `AppleMusicLyrics.App.exe`.
 3. Play a song in Apple Music. The lyrics appear in the overlay, and the app lives in the system tray.
 
-When upgrading, exit the previous version from the tray first. Settings are kept in `%LOCALAPPDATA%\AppleMusicLyrics`.
+From then on the app checks for new versions and updates itself: use **Check for updates…** in the tray, or wait for the notification. Settings are kept in `%LOCALAPPDATA%\AppleMusicLyrics` and survive updates. (Versions before 0.9.0 have no updater: exit the old version from the tray and replace its folder by hand once.)
 
 ## Using the overlay
 
@@ -128,7 +129,7 @@ By default it only follows Apple Music's media session. **Allow media sessions o
 <details>
 <summary><b>Does it work offline? What does it send online?</b></summary>
 
-With online features disabled, it only reads Apple Music's local cache and sends nothing. With them enabled, it sends the song title and artist (and, for some services, album and duration) to Apple's iTunes Search API and the enabled lyric services. Details: [Network and privacy](docs/lyric-sources.md#network-and-privacy).
+With online features and the automatic update check disabled, it only reads Apple Music's local cache and sends nothing. With them enabled, it sends the song title and artist (and, for some services, album and duration) to Apple's iTunes Search API and the enabled lyric services, and asks GitHub for the latest release version. Details: [Network and privacy](docs/lyric-sources.md#network-and-privacy).
 </details>
 
 ## Known limitations

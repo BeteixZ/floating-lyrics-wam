@@ -18,8 +18,9 @@ A missing lyric is preferred over displaying a low-confidence wrong lyric unless
 
 ## Network and privacy
 
-Apple catalog verification and external lyric lookup are enabled by default and can be disabled in Settings for fully offline operation.
+Apple catalog verification, external lyric lookup, and the automatic update check are enabled by default and can each be disabled in Settings for fully offline operation.
 
+- **GitHub Releases (updates)**: at startup and once a day, the app asks the GitHub API for this repository's latest release. The request carries only the app name and version as its User-Agent; no song or personal data is sent. When you choose to update, the release package is downloaded from GitHub and checked against the SHA-256 digest GitHub publishes for it before anything is installed. Turn off **Check for updates automatically** in the Advanced tab to stop the scheduled check; **Check for updates…** in the tray still works on demand.
 - **Apple iTunes Search API**: when local candidates are ambiguous, the app sends title and artist to verify the Apple catalog song ID.
 - **LRCLIB**: the app sends title, artist, album, and duration for exact lookup, with title/artist search fallback. Synchronized lyrics are used when available; plain-only lyrics are displayed with an approximate evenly projected timeline and identified as `lrclib-plain` in diagnostics.
 - **NetEase Cloud Music**: the app sends title and artist to search NetEase, then requests lyrics by the matched song ID. It is queried first for missing lyrics or for enabled word timing/translations missing from Apple's result. When artist names differ across languages, it verifies the candidate's artist ID and aliases through NetEase artist metadata before accepting the recording. YRC and older klyric word timing is preserved, with LRC fallback and supplied translated lyrics.

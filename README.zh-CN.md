@@ -54,6 +54,7 @@ Windows 版 Apple Music 没有桌面歌词。Apple Music Lyrics 提供一个始�
 
 - 字体（拉丁文、中文、译文可分别设置）、颜色、发光、不透明度和时间偏移，可按歌曲记住偏移
 - 界面支持简体中文、繁體中文和英文，可通过 [JSON 语言包](docs/localization.md)扩展（英文文档）
+- 通过 GitHub Releases 自动更新：有新版本时托盘提示，一键下载、校验并重启
 - 关闭联网功能后可完全离线使用；无需账号、登录或 API Key
 
 ## 快速开始
@@ -64,7 +65,7 @@ Windows 版 Apple Music 没有桌面歌词。Apple Music Lyrics 提供一个始�
 2. 解压到任意位置，运行 `AppleMusicLyrics.App.exe`。
 3. 在 Apple Music 中播放歌曲，歌词就会出现在浮层上；程序常驻系统托盘。
 
-升级前请先从托盘退出旧版本。设置保存在 `%LOCALAPPDATA%\AppleMusicLyrics`。
+之后程序会自动检查新版本并自行更新：可在托盘中选择**检查更新…**，或等待更新提示。设置保存在 `%LOCALAPPDATA%\AppleMusicLyrics`，更新后保留。（0.9.0 之前的版本没有更新功能，需要先从托盘退出旧版本，手动替换一次文件夹。）
 
 ## 使用方法
 
@@ -128,7 +129,7 @@ Windows 版 Apple Music 没有桌面歌词。Apple Music Lyrics 提供一个始�
 <details>
 <summary><b>能离线使用吗？联网时会发送什么？</b></summary>
 
-关闭联网功能后，程序只读取 Apple Music 的本地缓存，不发送任何内容。开启后，会把歌名和歌手（部分服务还包括专辑和时长）发送给 Apple 的 iTunes Search API 和已启用的歌词服务。详见 [Network and privacy](docs/lyric-sources.md#network-and-privacy)（英文）。
+关闭联网功能和自动检查更新后，程序只读取 Apple Music 的本地缓存，不发送任何内容。开启后，会把歌名和歌手（部分服务还包括专辑和时长）发送给 Apple 的 iTunes Search API 和已启用的歌词服务，并向 GitHub 查询最新版本号。详见 [Network and privacy](docs/lyric-sources.md#network-and-privacy)（英文）。
 </details>
 
 ## 已知限制
