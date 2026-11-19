@@ -17,7 +17,7 @@
 
 [**下载**](https://github.com/BeteixZ/floating-lyrics-wam/releases/latest) · [功能](#功能) · [快速开始](#快速开始) · [常见问题](#常见问题) · [更新日志](RELEASE_NOTES.md)
 
-<img src=".github/assets/demo.gif" alt="桌面歌词浮层：同步显示当前歌词及其翻译" width="720">
+<img src=".github/assets/demo.gif" alt="纯净模式歌词卡片：逐字高亮、长音发光、翻译与下一句" width="720">
 
 </div>
 

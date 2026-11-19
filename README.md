@@ -17,7 +17,7 @@
 
 [**Download**](https://github.com/BeteixZ/floating-lyrics-wam/releases/latest) · [Features](#features) · [Quick start](#quick-start) · [FAQ](#faq) · [Release notes](RELEASE_NOTES.md)
 
-<img src=".github/assets/demo.gif" alt="Floating lyrics overlay showing a synchronized line with its translation" width="720">
+<img src=".github/assets/demo.gif" alt="Pure Mode lyrics card with word-by-word highlighting, glowing held words, translations, and the next line" width="720">
 
 </div>
 
