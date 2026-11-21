@@ -286,7 +286,8 @@ public sealed class NativeLyricsRuntimePriorityTests
         var reissue = Document("NE_REISSUE", words: true);
         var original = Document("NE_ORIGINAL", true, "网易翻译");
         var netEase = new External("NetEase Cloud Music", (query, _) => Task.FromResult<LyricsDocument?>(
-            query.Album == "Album (Deluxe Edition)" ? reissue : original)) { OutranksPartialAppleLyrics = true };
+            query.Album == "Album (Deluxe Edition)" ? reissue : original))
+        { OutranksPartialAppleLyrics = true };
         var time = new ManualTime();
         await using var runtime = new LyricsRuntimeService(new Cache(native), new Player("Album (Deluxe Edition)"),
             new LyricsSynchronizer(), new PlaybackClock(time), timeProvider: time)
