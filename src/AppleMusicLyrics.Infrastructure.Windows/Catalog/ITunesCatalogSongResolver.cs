@@ -13,7 +13,7 @@ namespace AppleMusicLyrics.Infrastructure.Windows.Catalog;
 /// </summary>
 public sealed class ITunesCatalogSongResolver : ICatalogSongResolver, IDisposable
 {
-    private const int MaxCacheEntries = 2048;
+    internal const int MaxCacheEntries = 2048;
     // Bounds cached-id verification to two lookup requests per storefront for each track.
     private const int LookupBatchSize = 100;
     internal const int MaxVerifiedLookupIds = 200;
@@ -24,6 +24,10 @@ public sealed class ITunesCatalogSongResolver : ICatalogSongResolver, IDisposabl
     private readonly IReadOnlyList<string> _storefronts;
     private readonly string? _cachePath;
     private readonly Dictionary<string, string[]> _cache = new(StringComparer.Ordinal);
+    // Insertion order for eviction. A Dictionary reuses a removed entry's slot for the next insert,
+    // so its enumeration order is not insertion order: evicting Keys.First() once full removed the
+    // entry added just before, and new tracks never stayed cached.
+    private readonly LinkedList<string> _cacheOrder = new();
     // Session-only: new lyric files can appear at any time, so misses are never persisted.
     private readonly Dictionary<string, HashSet<long>> _verifiedMisses = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -368,12 +372,13 @@ public sealed class ITunesCatalogSongResolver : ICatalogSongResolver, IDisposabl
 
             foreach (var (key, value) in entries)
             {
-                _cache[key] = value;
+                if (_cache.TryAdd(key, value)) _cacheOrder.AddLast(key);
             }
 
-            while (_cache.Count > MaxCacheEntries)
+            while (_cache.Count > MaxCacheEntries && _cacheOrder.First is { } oldest)
             {
-                _cache.Remove(_cache.Keys.First());
+                _cache.Remove(oldest.Value);
+                _cacheOrder.RemoveFirst();
             }
         }
         catch (Exception)
@@ -395,8 +400,15 @@ public sealed class ITunesCatalogSongResolver : ICatalogSongResolver, IDisposabl
 
     private void RememberIds(string key, string[] ids)
     {
-        if (!_cache.ContainsKey(key) && _cache.Count >= MaxCacheEntries)
-            _cache.Remove(_cache.Keys.First());
+        if (!_cache.ContainsKey(key))
+        {
+            while (_cache.Count >= MaxCacheEntries && _cacheOrder.First is { } oldest)
+            {
+                _cache.Remove(oldest.Value);
+                _cacheOrder.RemoveFirst();
+            }
+            _cacheOrder.AddLast(key);
+        }
         _cache[key] = ids;
     }
 
@@ -418,7 +430,9 @@ public sealed class ITunesCatalogSongResolver : ICatalogSongResolver, IDisposabl
             var temporaryPath = _cachePath + ".tmp";
             try
             {
-                File.WriteAllText(temporaryPath, JsonSerializer.Serialize(_cache));
+                // Written oldest first, so the next load restores the eviction order.
+                File.WriteAllText(temporaryPath, JsonSerializer.Serialize(
+                    _cacheOrder.ToDictionary(key => key, key => _cache[key], StringComparer.Ordinal)));
                 File.Move(temporaryPath, _cachePath, overwrite: true);
             }
             finally

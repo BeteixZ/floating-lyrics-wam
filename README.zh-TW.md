@@ -89,10 +89,10 @@ Windows 版 Apple Music 沒有桌面歌詞。Apple Music Lyrics 提供一個永�
 | 1 | Apple Music（本機快取） | 已開啟的功能（逐字、翻譯）涵蓋歌曲的大部分 |
 | 2 | 網易雲音樂 | 這些功能的涵蓋明顯更完整，且確認是同一份歌詞 |
 | 3 | QQ 音樂 | 條件同上，且網易雲沒有更好的結果 |
-| 4 | Apple Music（本機快取） | 其他情況；缺少的功能可從其他來源補到 Apple 的時間軸上 |
+| 4 | Apple Music（本機快取） | 已確認曲目且有逐行時間戳記，其他來源可補齊缺少的功能 |
 | 5 | LRCLIB | 以上皆無時 |
 
-逐字高亮與翻譯都關閉時，只要 Apple 有歌詞就一律使用 Apple 的歌詞。網易雲或 QQ 的歌詞只有在確認與 Apple 是同一份歌詞時才會取代 Apple，並會對齊到 Apple 的逐行時間。完整規則與各服務會收到哪些資訊，請見 [Lyric sources, matching, and privacy](docs/lyric-sources.md)（英文）。
+逐字高亮與翻譯都關閉時，優先使用已確認曲目且有逐行時間戳記的 Apple 歌詞。如果 Apple 只有純文字，程式會尋找包括 LRCLIB 在內的同步歌詞。網易雲或 QQ 取代有時間軸的 Apple 歌詞時，須確認為同一份歌詞並對齊到 Apple 的逐行時間。 [歌詞來源、比對與隱私（英文）](docs/lyric-sources.md)
 
 ## 常見問題
 

@@ -72,6 +72,26 @@ public sealed class WindowPlacementServiceTests
         Assert.Equal("DISPLAY2", result.Monitor.DeviceName);
     }
 
+    // A fresh install has no saved monitor; the legacy default coordinates (100, 100) used to put
+    // the first window in the top-left corner of whichever monitor held that point.
+    [Fact]
+    public void Resolve_FreshInstallStartsAtBottomCenterOfPrimary()
+    {
+        var defaults = new AppleMusicLyrics.Core.Configuration.AppSettings();
+        var result = WindowPlacementService.Resolve(
+            [Secondary, Primary],
+            defaults.PureModeMonitorId,
+            defaults.PureModeRelativeCenterX,
+            defaults.PureModeRelativeCenterY,
+            600,
+            100,
+            new PixelRect(-2300, 50, -1700, 150));
+
+        Assert.Equal("DISPLAY1", result.Monitor.DeviceName);
+        Assert.Equal(Primary.WorkAreaPx.Width / 2.0, result.WindowRectPx.CenterX);
+        Assert.InRange(result.WindowRectPx.Bottom, 900, Primary.WorkAreaPx.Bottom);
+    }
+
     [Fact]
     public void Resolve_ClampsWindowFullyInsideWorkArea()
     {

@@ -106,6 +106,13 @@ public partial class MainWindow : Window
     private const double LookaheadSeconds = 6.0;
     private const double LookaheadStepSeconds = 0.2;
     private const int LookaheadLineChanges = 2;
+    // Duets trade short lines between singers, often overlapping, every second or two. Sizing
+    // for just the next two lines resized the card on nearly every line, so size for the next
+    // stretch of the song instead; single-singer songs still shrink as soon as lines get short.
+    private const double DuetLookaheadSeconds = 10.0;
+    private const int DuetLookaheadLineChanges = 8;
+    private LyricsDocument? _vocalistsCheckedDocument;
+    private bool _documentHasMultipleVocalists;
     private const double PureEnvelopePaddingXDip = 220.0;
     private const double PureEnvelopePaddingYDip = 80.0;
 
@@ -651,7 +658,9 @@ public partial class MainWindow : Window
         var duetTransition = (_duetLyric.Line is not null || duet is not null)
             && line is not null
             && (ReferenceEquals(_currentLyric.Line, line) || ReferenceEquals(_duetLyric.Line, line));
-        var shouldAnimate = presentation.Animate && !duetTransition;
+        // A line previewed during the prelude or an interlude stays in place when it starts.
+        var sameLine = line is not null && ReferenceEquals(_currentLyric.Line, line);
+        var shouldAnimate = presentation.Animate && !duetTransition && !sameLine;
         _lastLyricAnimationKey = lyricKey;
 
         if (!shouldAnimate)
@@ -1352,10 +1361,17 @@ public partial class MainWindow : Window
             yield break;
         }
 
+        if (!ReferenceEquals(_vocalistsCheckedDocument, snapshot.Document))
+        {
+            _vocalistsCheckedDocument = snapshot.Document;
+            _documentHasMultipleVocalists = snapshot.Document.HasMultipleVocalists();
+        }
+        var horizon = _documentHasMultipleVocalists ? DuetLookaheadSeconds : LookaheadSeconds;
+        var maxChanges = _documentHasMultipleVocalists ? DuetLookaheadLineChanges : LookaheadLineChanges;
         var lastCurrent = snapshot.ActiveLyric.CurrentLine;
         var lastDuet = snapshot.ActiveLyric.DuetLine;
         var changes = 0;
-        for (var ahead = LookaheadStepSeconds; ahead <= LookaheadSeconds && changes < LookaheadLineChanges;
+        for (var ahead = LookaheadStepSeconds; ahead <= horizon && changes < maxChanges;
              ahead += LookaheadStepSeconds)
         {
             var future = player with { Position = player.Position + ahead };
@@ -1985,20 +2001,18 @@ public partial class MainWindow : Window
     private void OpenSettingsWindow()
     {
         var cacheGeneration = _externalLyricsCache?.Generation;
-        // Show the offset actually in effect so the slider reflects a per-song calibration.
-        var dialogSettings = _settings;
-        if (_settings.PerSongOffsetEnabled)
-        {
-            dialogSettings = _settings.Clone();
-            dialogSettings.LyricsOffsetSeconds = _runtimeService.LyricsOffsetSeconds;
-        }
+        var player = _runtimeService.GetFrameSnapshot().Player;
 
         var settingsWindow = new SettingsWindow(
-            dialogSettings,
+            _settings,
             previewSettings => ApplySettings(previewSettings, persist: true, cacheGeneration),
             lyricsCache: _externalLyricsCache,
             openDiagnostics: OpenDiagnosticsWindow,
-            checkForUpdates: () => OpenUpdateWindow(checkNow: true))
+            checkForUpdates: () => OpenUpdateWindow(checkNow: true),
+            songOffset: player is { Title.Length: > 0 }
+                ? new SettingsWindow.SongOffsetEditor(player.Title, _runtimeService.GetSongOffset(player),
+                    value => _runtimeService.SetSongOffset(player, value))
+                : null)
         {
             Owner = IsVisible ? this : null,
         };
@@ -2093,17 +2107,19 @@ public partial class MainWindow : Window
 
     private void ApplySettings(AppSettings sourceSettings, bool persist, long? expectedCacheGeneration = null)
     {
+        // In Pure Mode the window is a transparent envelope larger than the card. Shrink it back
+        // to the card first: ApplyAppearanceSettings does so anyway, and restoring the envelope's
+        // corner onto the card-sized window afterwards moved the card up and left on every save.
+        CancelPureModeBoundsAnimation();
+        ExitPureEnvelope(resizeWindowToCard: true);
         var currentLeft = Left;
         var currentTop = Top;
         var currentWidth = Width;
         var currentHeight = Height;
         var currentPureMode = _settings.PureMode;
         var cacheWasEnabled = _settings.PersistExternalLyricsCache;
-        var offsetChanged = sourceSettings.LyricsOffsetSeconds != _settings.LyricsOffsetSeconds;
-        var perSongOffsetWasEnabled = _settings.PerSongOffsetEnabled;
         var requestedPureMode = sourceSettings.PureMode;
 
-        CancelPureModeBoundsAnimation();
         CopySettings(sourceSettings, _settings);
         _updates.ApplySchedule();
         _externalLyricsCache?.Configure(_settings.PersistExternalLyricsCache, _settings.ExternalLyricsCacheMaxMegabytes);
@@ -2119,18 +2135,7 @@ public partial class MainWindow : Window
 
         _playerProvider.AllowNonAppleMediaSessions = _settings.AllowNonAppleMediaSessions;
         _runtimeService.PerSongOffsetEnabled = _settings.PerSongOffsetEnabled;
-        if (offsetChanged || !_settings.PerSongOffsetEnabled)
-        {
-            _runtimeService.LyricsOffsetSeconds = _settings.LyricsOffsetSeconds;
-            if (offsetChanged)
-            {
-                _runtimeService.RememberCurrentOffset();
-            }
-        }
-        else if (!perSongOffsetWasEnabled)
-        {
-            _runtimeService.ApplyPerSongOffset();
-        }
+        _runtimeService.GlobalLyricsOffsetSeconds = _settings.LyricsOffsetSeconds;
 
         _runtimeService.ApplyNativeLyricOffset = _settings.ApplyNativeLyricOffset;
         _runtimeService.AllowLowConfidenceLyrics = _settings.AllowLowConfidenceLyrics;
@@ -2353,7 +2358,9 @@ public partial class MainWindow : Window
             ? CreateLyricTextMeasurement(content.Duet, DuetLyricText, currentFontSize, pixelsPerDip)
             : null;
         var secondary = content.Secondary
-            .Select(row => CreateLyricTextMeasurement(row.Text, row.Element, row.FontSize, pixelsPerDip)).ToArray();
+            .Select((row, index) => (Text: CreateLyricTextMeasurement(row.Text, row.Element, row.FontSize, pixelsPerDip),
+                Spacing: GetSecondaryRowSpacing(row.Element, index > 0 ? content.Secondary[index - 1].Element : null,
+                    row.FontSize))).ToArray();
         var previous = !string.IsNullOrWhiteSpace(content.Previous)
             ? CreateLyricTextMeasurement(content.Previous, PreviousLyricText, contextFontSize, pixelsPerDip)
             : null;
@@ -2362,7 +2369,7 @@ public partial class MainWindow : Window
             : null;
 
         var desiredContentWidth = Math.Max(Math.Max(current.NaturalWidth, duet?.NaturalWidth ?? 0),
-            Math.Max(secondary.Select(text => text.NaturalWidth).DefaultIfEmpty().Max(),
+            Math.Max(secondary.Select(row => row.Text.NaturalWidth).DefaultIfEmpty().Max(),
                 Math.Max(previous?.NaturalWidth ?? 0, next?.NaturalWidth ?? 0))) + PureModeContextWrapInset + 2;
         var contentWidth = Math.Clamp(desiredContentWidth, minContentWidth, maxContentWidth);
         var contentHeight = MeasureContentHeight(contentWidth, current, duet, secondary, previous, next);
@@ -2397,8 +2404,17 @@ public partial class MainWindow : Window
             Math.Ceiling(Math.Min(contentHeight, maxContentHeight) + extraHeightPadding));
     }
 
+    // Every row has a 4 DIP bottom margin. A translation that is not under romanization also has
+    // a gap above it (see LyricLineView.UpdateAuxiliaryMargins).
+    private double GetSecondaryRowSpacing(TextBlock element, TextBlock? previous, double fontSize)
+    {
+        var isTranslation = element == TranslationLyricText || element == DuetTranslationLyricText;
+        var followsRomanization = previous == RomanizationLyricText || previous == DuetRomanizationLyricText;
+        return isTranslation && !followsRomanization ? LyricLineView.GetAuxiliaryGap(fontSize) + 4 : 4;
+    }
+
     private double MeasureContentHeight(double contentWidth, LyricTextMeasurement current, LyricTextMeasurement? duet,
-        IReadOnlyList<LyricTextMeasurement> secondary,
+        IReadOnlyList<(LyricTextMeasurement Text, double Spacing)> secondary,
         LyricTextMeasurement? previous, LyricTextMeasurement? next)
     {
         var lyricMaxLines = _settings.SingleLineMode ? 1 : (_settings.PureMode ? 4 : 2);
@@ -2412,9 +2428,9 @@ public partial class MainWindow : Window
         {
             totalHeight += duet.MeasureHeight(lyricWidth, lyricMaxLines) + DuetLyricText.Margin.Top + DuetLyricText.Margin.Bottom;
         }
-        foreach (var text in secondary)
+        foreach (var row in secondary)
         {
-            totalHeight += text.MeasureHeight(lyricWidth, 2) + 4;
+            totalHeight += row.Text.MeasureHeight(lyricWidth, 2) + row.Spacing;
         }
 
         // Use PureMode-specific margin values

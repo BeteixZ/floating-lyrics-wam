@@ -33,4 +33,5 @@ Project.md
 
 # Tooling working directory
 .mimocode/
+.agentbridge/
 semantic-review/

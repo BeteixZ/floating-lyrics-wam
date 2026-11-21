@@ -277,6 +277,33 @@ public sealed class NativeLyricsRuntimePriorityTests
         await Wait(runtime, state => ReferenceEquals(state.Document, qq));
     }
 
+    // One source answers both the reissue and its original album: the original's richer lyrics
+    // must be shown, not the reissue's answer that was already chosen from the same source.
+    [Fact]
+    public async Task RicherOriginalAlbumAnswerFromTheSameSource_ReplacesItsReissueAnswer()
+    {
+        var native = Document("AP_123");
+        var reissue = Document("NE_REISSUE", words: true);
+        var original = Document("NE_ORIGINAL", true, "网易翻译");
+        var netEase = new External("NetEase Cloud Music", (query, _) => Task.FromResult<LyricsDocument?>(
+            query.Album == "Album (Deluxe Edition)" ? reissue : original)) { OutranksPartialAppleLyrics = true };
+        var time = new ManualTime();
+        await using var runtime = new LyricsRuntimeService(new Cache(native), new Player("Album (Deluxe Edition)"),
+            new LyricsSynchronizer(), new PlaybackClock(time), timeProvider: time)
+        {
+            ExternalLyricsProviders = [netEase],
+            PreferWordTimings = true,
+            PreferTranslations = true,
+        };
+
+        var snapshot = await Wait(runtime, state => state.ExternalDiagnostics?.EnrichmentState
+            is ExternalLyricsQueryState.Satisfied or ExternalLyricsQueryState.Completed);
+
+        Assert.Equal(2, netEase.Calls);
+        Assert.Equal("NE_ORIGINAL", snapshot.Document!.LyricsId);
+        Assert.Equal("网易翻译", snapshot.Document.Lines[0].Translation);
+    }
+
     [Fact]
     public async Task NetEaseOutranksQQMusicWhenBothProvideEveryFeature()
     {
@@ -459,10 +486,10 @@ public sealed class NativeLyricsRuntimePriorityTests
         }
     }
 
-    private sealed class Player : IPlayerSessionProvider
+    private sealed class Player(string album = "Album") : IPlayerSessionProvider
     {
         public Task<PlayerState?> GetCurrentPlayerStateAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult<PlayerState?>(new PlayerState("Song", "Artist", "Album", 1, 180, true));
+            Task.FromResult<PlayerState?>(new PlayerState("Song", "Artist", album, 1, 180, true));
     }
 
     private sealed class External(string name, Func<PlayerState, CancellationToken, Task<LyricsDocument?>> fetch) : IExternalLyricsProvider

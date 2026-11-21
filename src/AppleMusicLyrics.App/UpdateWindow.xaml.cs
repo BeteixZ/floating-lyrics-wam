@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.IO;
 using System.Text;
 using System.Windows;
 using AppleMusicLyrics.App.Localization;
@@ -85,10 +86,12 @@ public partial class UpdateWindow : Window
         DownloadProgress.Value = 0;
         DownloadProgress.Visibility = Visibility.Visible;
         StatusText.Text = _text.Format("Update.Status.Downloading", 0);
-        var progress = new Progress<double>(value =>
+        var progress = new Progress<UpdateDownloadProgress>(value =>
         {
-            DownloadProgress.Value = value;
-            StatusText.Text = _text.Format("Update.Status.Downloading", (int)Math.Round(value * 100));
+            if (!_installing || _lifetime.IsCancellationRequested) return;
+            DownloadProgress.Value = value.Fraction;
+            StatusText.Text = value.Retrying ? _text.Text("Update.Status.DownloadRetrying")
+                : _text.Format("Update.Status.Downloading", (int)Math.Round(value.Fraction * 100));
         });
 
         string staging;
@@ -107,18 +110,21 @@ public partial class UpdateWindow : Window
                 UpdateFailure.Verification => "Update.Status.Verification",
                 UpdateFailure.InvalidPackage => "Update.Status.InvalidPackage",
                 UpdateFailure.NoPackage => "Update.Status.NoPackage",
+                UpdateFailure.DownloadTimeout => "Update.Status.DownloadTimeout",
                 _ => "Update.Status.Network",
             });
             ResetAfterFailure();
             return;
         }
 
+        if (_lifetime.IsCancellationRequested) return;
+        _installing = false; // Ignore progress callbacks once the package has been staged.
         StatusText.Text = _text.Text("Update.Status.Installing");
         try
         {
             _updates.LaunchInstaller(staging);
         }
-        catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException)
+        catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException or IOException or UnauthorizedAccessException)
         {
             StatusText.Text = _text.Text("Update.Status.LaunchFailed");
             ResetAfterFailure();

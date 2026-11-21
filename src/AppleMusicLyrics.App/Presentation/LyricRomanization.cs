@@ -28,6 +28,24 @@ internal static class LyricRomanization
     private static string? Generate(string text)
     {
         text = text.Normalize(NormalizationForm.FormKC);
+        if (Read(text, out var unresolved) is { } kana) return Romanize(kana, text);
+        // Lyrics typed on a Chinese input method often carry simplified characters in place of
+        // the kanji (离れ for 離れ, 见 for 見), which the Japanese dictionary cannot read. Swap
+        // only the characters of the words it could not read for their kanji and try again.
+        var kanjiText = KanjiVariants.Replace(text, unresolved);
+        return kanjiText != text && Read(kanjiText, out _) is { } retried ? Romanize(retried, text) : null;
+    }
+
+    private static string? Romanize(string kana, string text)
+    {
+        var romanized = RomanizeKana(kana).Trim();
+        return !ContainsKana(romanized) && romanized != text && romanized.Any(char.IsLetter) ? romanized : null;
+    }
+
+    /// <summary>The line in kana, or null when a word with kanji has no known reading.</summary>
+    private static string? Read(string text, out List<(int Start, int End)> unresolved)
+    {
+        unresolved = [];
         using var reader = new System.IO.StringReader(text);
         using var tokenizer = new JapaneseTokenizer(AttributeSource.AttributeFactory.DEFAULT_ATTRIBUTE_FACTORY,
             reader, null, discardPunctuation: true, JapaneseTokenizerMode.NORMAL);
@@ -55,6 +73,8 @@ internal static class LyricRomanization
 
             var pronunciation = part?.StartsWith("助詞-", StringComparison.Ordinal) == true && surface is "は" or "へ" or "を"
                 ? reading.GetPronunciation() : reading.GetReading();
+            if (isJapanese && pronunciation is null && ContainsIdeographs(surface))
+                unresolved.Add((offset.StartOffset, offset.EndOffset));
             phoneticText.Append(isJapanese ? pronunciation ?? ToKatakana(surface) : surface);
             previousWasJapanese = isJapanese;
             cursor = offset.EndOffset;
@@ -64,9 +84,7 @@ internal static class LyricRomanization
 
         var kana = phoneticText.ToString();
         // An unresolved word can be a name or a creative reading. Avoid guessing its kanji.
-        if (ContainsIdeographs(kana)) return null;
-        var romanized = RomanizeKana(kana).Trim();
-        return !ContainsKana(romanized) && romanized != text && romanized.Any(char.IsLetter) ? romanized : null;
+        return unresolved.Count > 0 || ContainsIdeographs(kana) ? null : kana;
     }
 
     private static string ToKatakana(string text) => string.Create(text.Length, text, static (output, input) =>

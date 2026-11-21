@@ -253,24 +253,71 @@ public sealed class KaraokeTextControllerTests
             [new LyricWord(1, 1.3, "Oh "), new LyricWord(1.3, 4, "baby")]);
         controller.SetLine(line.Text, line, enabled: true);
 
-        // The short word stays a run; the held one gets its own element with the same sweep brush.
-        var container = Assert.Single(text.Inlines.OfType<InlineUIContainer>());
-        var word = Assert.IsType<TextBlock>(container.Child);
-        Assert.Equal("baby", word.Text);
-        Assert.IsType<LinearGradientBrush>(word.Foreground);
-        Assert.Equal("Oh ", Assert.Single(text.Inlines.OfType<Run>()).Text);
+        // The short word is one floating element; the held one becomes one element per letter.
+        var containers = text.Inlines.OfType<InlineUIContainer>().ToArray();
+        Assert.Equal(2, containers.Length);
+        Assert.Equal("Oh", Assert.IsType<TextBlock>(containers[0].Child).Text);
+        var letters = Assert.IsType<StackPanel>(containers[1].Child).Children.Cast<TextBlock>().ToArray();
+        Assert.Equal(["b", "a", "b", "y"], letters.Select(letter => letter.Text));
+        Assert.Equal(" ", Assert.Single(text.Inlines.OfType<Run>()).Text);
         Assert.Equal(line.Text, controller.DisplayText);
+        static ScaleTransform Scale(TextBlock letter) =>
+            Assert.IsType<TransformGroup>(letter.RenderTransform).Children.OfType<ScaleTransform>().Single();
+        static double Wipe(TextBlock letter) => ((LinearGradientBrush)letter.Foreground).GradientStops[1].Offset;
 
         controller.Update(1.0);
-        Assert.Null(word.Effect);
+        Assert.All(letters, letter => Assert.Null(letter.Effect));
+
+        // 44% through "baby": the wipe has passed "b", is inside "a", and has not reached "by".
         controller.Update(2.5);
-        var scale = Assert.IsType<TransformGroup>(word.RenderTransform).Children.OfType<ScaleTransform>().Single();
-        Assert.True(scale.ScaleX > 1.05);
-        Assert.NotNull(word.Effect);
-        Assert.Equal(1.2 / 2.7, ((LinearGradientBrush)word.Foreground).GradientStops[1].Offset, 3);
+        Assert.True(Wipe(letters[0]) >= 0.999);
+        Assert.InRange(Wipe(letters[1]), 0.01, 0.99);
+        Assert.True(Wipe(letters[2]) < 0 && Wipe(letters[3]) < 0);
+        // The letters it reached have risen and glow; the rest wait for it, like a wave.
+        Assert.True(Scale(letters[0]).ScaleX > 1.05);
+        Assert.NotNull(letters[0].Effect);
+        Assert.True(Scale(letters[1]).ScaleX > 1.05);
+        Assert.Equal(1, Scale(letters[2]).ScaleX);
+        Assert.Equal(1, Scale(letters[3]).ScaleX);
+        Assert.Null(letters[3].Effect);
+
         controller.Update(6);
-        Assert.Equal(1, scale.ScaleX);
-        Assert.Null(word.Effect);
+        Assert.All(letters, letter =>
+        {
+            Assert.Equal(1, Scale(letter).ScaleX);
+            Assert.Null(letter.Effect);
+            Assert.True(Wipe(letter) >= 0.999);
+        });
+    });
+
+    [Fact]
+    public void Update_FloatsEachSungWordUpWithASoftWipe() => OnSta(() =>
+    {
+        var text = new TextBlock { FontSize = 40 };
+        var controller = new KaraokeTextController(text, emphasizeSustainedWords: true);
+        var line = new LyricsLine(1, 3, "Then love", Words:
+            [new LyricWord(1, 1.4, "Then "), new LyricWord(1.4, 1.8, "love")]);
+        controller.SetLine(line.Text, line, enabled: true);
+        var words = text.Inlines.OfType<InlineUIContainer>().Select(container => (TextBlock)container.Child).ToArray();
+        static double Lift(TextBlock word) => ((TranslateTransform)word.RenderTransform).Y;
+        static LinearGradientBrush Brush(TextBlock word) => (LinearGradientBrush)word.Foreground;
+
+        controller.Update(1.0);
+        Assert.All(words, word => Assert.Equal(0, Lift(word)));
+        // Not yet reached: the soft edge waits fully before the word.
+        Assert.True(Brush(words[0]).GradientStops[2].Offset <= 0);
+
+        controller.Update(1.6);
+        Assert.InRange(Lift(words[0]), -40 * 0.045 - 0.01, -1);
+        Assert.InRange(Lift(words[1]), Lift(words[0]), 0);
+        // Half-way through "love": a soft edge straddles the middle instead of a hard cut.
+        var stops = Brush(words[1]).GradientStops;
+        Assert.True(stops[1].Offset < 0.5 && stops[2].Offset > 0.5);
+
+        // Sung words stay up with the line rather than dropping back.
+        controller.Update(2.9);
+        Assert.All(words, word => Assert.Equal(-40 * 0.045, Lift(word), 3));
+        Assert.True(Brush(words[1]).GradientStops[1].Offset >= 0.999);
     });
 
     [Theory]

@@ -355,6 +355,49 @@ public sealed class ITunesCatalogSongResolverTests
         }
     }
 
+    [Fact]
+    public async Task Cache_WhenFullEvictsTheOldestEntryAndKeepsEachNewTrack()
+    {
+        // Full cache: once full, the previous code evicted the entry added just before each new one.
+        var path = Path.Combine(Path.GetTempPath(), "aml-catalog-" + Guid.NewGuid().ToString("N") + ".json");
+        var old = Enumerable.Range(0, ITunesCatalogSongResolver.MaxCacheEntries)
+            .ToDictionary(index => $"v2|old{index}|artist|album|180", index => new[] { $"AP_{index + 1}" });
+        File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(old));
+        static PlayerState Track(string title) => new(title, "Charli xcx", "BRAT", 30, 134, true);
+        var handler = new StorefrontHandler(request => System.Text.Json.JsonSerializer.Serialize(new
+        {
+            results = new[] { new { trackId = Uri.UnescapeDataString(request.RequestUri!.Query).Contains("360") ? 360L : 777L,
+                trackName = Uri.UnescapeDataString(request.RequestUri!.Query).Contains("360") ? "360" : "Club classics",
+                artistName = "Charli xcx", collectionName = "BRAT", trackTimeMillis = 134000 } },
+        }));
+        try
+        {
+            using (var resolver = new ITunesCatalogSongResolver("us", path, messageHandler: handler))
+            {
+                Assert.Equal(["AP_360"], await resolver.ResolveLyricsIdCandidatesAsync(Track("360")));
+                Assert.Equal(["AP_777"], await resolver.ResolveLyricsIdCandidatesAsync(Track("Club classics")));
+            }
+
+            var saved = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string[]>>(File.ReadAllText(path))!;
+            Assert.Equal(ITunesCatalogSongResolver.MaxCacheEntries, saved.Count);
+            Assert.Contains("v2|360|charlixcx|brat|134", saved.Keys);
+            Assert.Contains("v2|clubclassics|charlixcx|brat|134", saved.Keys);
+            Assert.DoesNotContain("v2|old0|artist|album|180", saved.Keys);
+            Assert.DoesNotContain("v2|old1|artist|album|180", saved.Keys);
+            Assert.Contains("v2|old2|artist|album|180", saved.Keys);
+
+            // Both tracks answer from the reloaded cache without a network request.
+            var requests = handler.RequestCount;
+            using var reloaded = new ITunesCatalogSongResolver("us", path, messageHandler: handler);
+            Assert.Equal(["AP_360"], await reloaded.ResolveLyricsIdCandidatesAsync(Track("360")));
+            Assert.Equal(requests, handler.RequestCount);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     private sealed class StorefrontHandler(Func<HttpRequestMessage, string> payload) : HttpMessageHandler
     {
         public int RequestCount { get; private set; }

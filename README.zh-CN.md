@@ -89,10 +89,10 @@ Windows 版 Apple Music 没有桌面歌词。Apple Music Lyrics 提供一个始�
 | 1 | Apple Music（本地缓存） | 已开启的功能（逐字、翻译）覆盖了歌曲的大部分 |
 | 2 | 网易云音乐 | 这些功能的覆盖明显更完整，且确认是同一份歌词 |
 | 3 | QQ 音乐 | 条件同上，且网易云没有更好的结果 |
-| 4 | Apple Music（本地缓存） | 其他情况；缺少的功能可从其他来源补到 Apple 的时间轴上 |
+| 4 | Apple Music（本地缓存） | 已确认曲目且有逐行时间戳，其他来源可补齐缺失功能 |
 | 5 | LRCLIB | 以上都没有时 |
 
-逐字高亮和翻译都关闭时，只要 Apple 有歌词就始终使用 Apple 的歌词。网易云或 QQ 的歌词只有在确认与 Apple 是同一份歌词时才会替换 Apple，并会对齐到 Apple 的逐行时间。完整规则以及各服务会收到哪些信息，见 [Lyric sources, matching, and privacy](docs/lyric-sources.md)（英文）。
+逐字高亮和翻译都关闭时，优先使用已确认曲目且带逐行时间戳的 Apple 歌词。如果 Apple 只有纯文本，程序会查找包括 LRCLIB 在内的同步歌词。网易云或 QQ 替换带时间轴的 Apple 歌词时，需要确认是同一份歌词，并对齐到 Apple 的逐行时间。 [歌词来源、匹配与隐私（英文）](docs/lyric-sources.md)
 
 ## 常见问题
 

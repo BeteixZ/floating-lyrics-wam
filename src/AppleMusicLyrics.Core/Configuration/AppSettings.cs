@@ -13,7 +13,12 @@ public sealed class AppSettings
     // It used to default to 0.28 while the clock also pushed the estimate forward by a guessed
     // ~0.48s. That guess is gone, so the default absorbs it to keep the timing people already
     // calibrated by ear; an existing settings.ini still holding 0.28 wants roughly +0.5.
-    public double LyricsOffsetSeconds { get; set; } = 0.78;
+    //
+    // Measured frame by frame against Apple Music's own lyrics (new line half faded in vs Apple's
+    // first word half highlighted): at 0.78 lines were a median 0.20–0.26 s late (three songs, one
+    // session); at 1.0 they were 0.12 s early (30 lines, another session). The two sessions point
+    // to about 1.03 and 0.88; this sits between them, as sessions differ by about 0.15 s.
+    public double LyricsOffsetSeconds { get; set; } = 0.9;
 
     // Honour the lyricOffset Apple ships inside a TTML document, which corrects lyric timings for
     // the particular master being played. Only a minority of documents carry one.
@@ -47,9 +52,8 @@ public sealed class AppSettings
 
     public double ExternalLyricsTimeoutSeconds { get; set; } = 6.0;
 
-    // Keep completed external lyric documents across app restarts. Disabled by default so users explicitly
-    // choose whether lyric data should be retained on disk.
-    public bool PersistExternalLyricsCache { get; set; }
+    // Keep completed external lyric documents across app restarts.
+    public bool PersistExternalLyricsCache { get; set; } = true;
 
     // One shared disk quota for all external sources; the cache clamps this to 1..1024 MiB.
     public int ExternalLyricsCacheMaxMegabytes { get; set; } = 64;
@@ -76,21 +80,26 @@ public sealed class AppSettings
 
     public int PureModeWindowY { get; set; } = 100;
 
-    // Versioned per-monitor placement. Negative anchors mean an older settings file that should be
-    // migrated from the legacy absolute coordinates above on the next successful capture.
+    // Versioned per-monitor placement: the window's center as a fraction of the monitor's work area.
+    // A fresh install starts at the bottom center of the primary monitor. Negative anchors mean an
+    // older settings file that should be migrated from the legacy absolute coordinates above.
     public int WindowPlacementVersion { get; set; }
+
+    public const double DefaultRelativeCenterX = 0.5;
+
+    public const double DefaultRelativeCenterY = 0.9;
 
     public string WindowMonitorId { get; set; } = string.Empty;
 
-    public double WindowRelativeCenterX { get; set; } = -1.0;
+    public double WindowRelativeCenterX { get; set; } = DefaultRelativeCenterX;
 
-    public double WindowRelativeCenterY { get; set; } = -1.0;
+    public double WindowRelativeCenterY { get; set; } = DefaultRelativeCenterY;
 
     public string PureModeMonitorId { get; set; } = string.Empty;
 
-    public double PureModeRelativeCenterX { get; set; } = -1.0;
+    public double PureModeRelativeCenterX { get; set; } = DefaultRelativeCenterX;
 
-    public double PureModeRelativeCenterY { get; set; } = -1.0;
+    public double PureModeRelativeCenterY { get; set; } = DefaultRelativeCenterY;
 
     public int MinWindowWidth { get; set; } = 280;
 

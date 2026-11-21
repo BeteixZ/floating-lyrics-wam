@@ -10,8 +10,13 @@
     <DebugType>none</DebugType>
     <ApplicationIcon>icon.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <NoWarn>$(NoWarn);WFO0003</NoWarn>
+    <!-- WPF0001: Window.ThemeMode (Fluent theme with Mica) is still marked experimental. -->
+    <NoWarn>$(NoWarn);WFO0003;WPF0001</NoWarn>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AppleMusicLyrics.Tests" />
+  </ItemGroup>
 
   <ItemGroup>
     <Resource Include="icon.ico" />

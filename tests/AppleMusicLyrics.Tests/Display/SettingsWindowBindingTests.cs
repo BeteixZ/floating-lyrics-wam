@@ -20,6 +20,37 @@ namespace AppleMusicLyrics.Tests.Display;
 [Collection("Localization")]
 public sealed class SettingsWindowBindingTests
 {
+    [Fact]
+    public void Apply_KeepsTheGlobalOffsetSeparateFromTheSongBeingEdited() => OnSta(() =>
+    {
+        AppSettings? applied = null;
+        var saved = new List<double>();
+        var window = new SettingsWindow(new AppSettings { LyricsOffsetSeconds = 0.78 },
+            settings => applied = settings, songOffset: new("Test song", 1.20, saved.Add));
+        try
+        {
+            SelectTab(window, "LyricsTab");
+            var applyButton = (Button)window.FindName("ApplyButton");
+            var defaultSlider = (Slider)window.FindName("LyricsOffsetSlider");
+            var songSlider = (Slider)window.FindName("SongOffsetSlider");
+            applyButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Equal(0.78, applied?.LyricsOffsetSeconds);
+            Assert.Equal(1.20, songSlider.Value);
+            Assert.Empty(saved);
+
+            songSlider.Value = 1.36;
+            applyButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Equal(0.78, applied?.LyricsOffsetSeconds);
+            Assert.Equal(1.36, Assert.Single(saved));
+
+            defaultSlider.Value = 0.94;
+            applyButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Equal(0.94, applied?.LyricsOffsetSeconds);
+            Assert.Single(saved);
+        }
+        finally { window.Close(); }
+    });
+
     [Theory]
     [InlineData(true, false)]
     [InlineData(false, true)]

@@ -73,6 +73,19 @@ public sealed class IniSettingsStore : ISettingsStore
             }
         }
 
+        // A file written before per-monitor placement holds only absolute coordinates. Keep using
+        // them instead of the fresh-install anchor; the placement code migrates them on startup.
+        if (!values.ContainsKey(nameof(AppSettings.WindowRelativeCenterX))
+            && values.ContainsKey(nameof(AppSettings.WindowX)))
+        {
+            settings.WindowRelativeCenterX = settings.WindowRelativeCenterY = -1.0;
+        }
+        if (!values.ContainsKey(nameof(AppSettings.PureModeRelativeCenterX))
+            && values.ContainsKey(nameof(AppSettings.PureModeWindowX)))
+        {
+            settings.PureModeRelativeCenterX = settings.PureModeRelativeCenterY = -1.0;
+        }
+
         return settings;
     }
 

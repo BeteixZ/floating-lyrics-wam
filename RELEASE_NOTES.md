@@ -1,5 +1,45 @@
 # Release Notes
 
+## v0.10.0 - Tighter sync, duets and interludes, and remembered lyric choices
+
+**Timing**
+
+- Lyrics now line up with Apple Music's own lyrics view. The playback clock locks onto the true position about a second after a track starts, a seek, or a resume, where it used to take up to 45 seconds, and it ignores the burst of early reports Apple Music sends while a track starts.
+- The default lyrics advance is now 0.90 s, measured frame by frame against Apple Music's own lyrics. **Existing settings keep their saved value; 0.9.0's default was 0.78 s, which shows lines about 0.2 s late. Set Settings → Default lyrics advance to 0.90 s to use the new calibration.**
+- When a singer's next line starts while the previous one is still fading, the overlay moves on at once instead of holding the earlier line.
+- In an instrumental break longer than 4 seconds, the overlay previews the next line instead of holding the last one.
+- In duets, a reply that comes in as the lead's last note fades takes over the line, while a reply sung over the lead is shown alongside it.
+- **Current track advance** in Settings saves a calibration for just the playing song when **Remember lyric offset per song** is on.
+
+**Lyrics**
+
+- **Choose lyrics…** can remember your pick for a recording (**Remember this version for this track**). It is reused when that recording plays again, also after a restart and after clearing the lyrics cache. **Use automatic selection** removes it.
+- For a reissue such as "Butterfly: 25th Anniversary Expanded Edition" or "E=MC2 (Deluxe Version)", online sources are searched again under the original album name when the reissue's lookup finds no lyrics or lacks word timing or translations. Live, remix, acoustic, "Taylor's Version" and clean albums are never treated as the original.
+- A reissue's own Apple Music lyrics that are cached only later, when its lyrics view is opened, replace the online lyrics shown meanwhile.
+- When the catalog cannot be reached, a lyrics file Apple Music downloads for the playing track (and only that track) is used, so songs with one-word titles such as "360" are no longer left without lyrics.
+- Synchronized online lyrics, including LRCLIB, now take precedence over Apple Music lyrics that have no timestamps.
+- Backing vocals that some sources write as split-second fragments between the lead lines are shown in one smaller row under the lead line, as Apple Music shows backing vocals, instead of flickering past as lines of their own.
+- Japanese romanization reads the Simplified Chinese characters some sources use in place of kanji (离 for 離, 见 for 見) as the kanji.
+- The online lyrics cache is on by default for new installs. An existing setting is kept.
+
+**Display**
+
+- As in Apple Music, each sung word floats up slightly behind a soft-edged highlight, and a held word rises, swells and glows letter by letter as the highlight passes through it.
+- The line crossfade runs only when the line actually changes.
+- On a fresh install the overlay starts at the bottom centre of the primary monitor instead of the top-left corner. Saved positions from earlier versions are kept.
+- Settings, Diagnostics and the update window use the Windows 11 Fluent style and follow the system's light or dark mode.
+
+**Updates**
+
+- A stalled download is retried once before the update gives up.
+- Updates from 0.10.0 onward install file by file. If a file cannot be replaced, or the new version exits right after starting, the previous files are restored and the old version is restarted. (The update to 0.10.0 itself still runs 0.9.0's installer.)
+
+**Upgrading from 0.9.0:** use **Update to v0.10.0** in the tray or **Check for updates…**. Settings, saved positions, per-song offsets, and the lyrics cache are kept.
+
+Requirements remain Windows 10 version 19041 or later and the x64 .NET 10 Desktop Runtime.
+
+---
+
 ## v0.9.0 - In-app updates
 
 **Updates**

@@ -121,8 +121,9 @@ public sealed class UpdateCoordinator : IDisposable
         var current = Environment.ProcessPath
             ?? Path.Combine(InstallDirectory, UpdateInstaller.ExecutableName);
         var helper = Installer.PrepareHelper(current);
-        using var _ = Process.Start(UpdateInstaller.CreateApplyStartInfo(
-            helper, stagingDirectory, InstallDirectory, Environment.ProcessId));
+        using var process = Process.Start(UpdateInstaller.CreateApplyStartInfo(
+            helper, stagingDirectory, InstallDirectory, Environment.ProcessId))
+            ?? throw new InvalidOperationException("The update helper did not start.");
     }
 
     public static void OpenReleasePage(ReleaseInfo? release)

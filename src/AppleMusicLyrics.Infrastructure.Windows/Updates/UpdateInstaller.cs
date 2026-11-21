@@ -9,6 +9,7 @@ public enum UpdateFailure
 {
     NoPackage,
     Network,
+    DownloadTimeout,
     Verification,
     InvalidPackage,
     NotWritable,
@@ -20,26 +21,32 @@ public sealed class UpdateException(UpdateFailure failure, Exception? inner = nu
     public UpdateFailure Failure { get; } = failure;
 }
 
+public readonly record struct UpdateDownloadProgress(double Fraction, bool Retrying = false);
+
+public sealed class UpdateRollbackException(string backupDirectory)
+    : IOException($"Could not fully restore the previous version. Its files are backed up in {backupDirectory}.")
+{
+    public string BackupDirectory { get; } = backupDirectory;
+}
+
 /// <summary>
 /// Downloads, verifies, and installs a release package for the portable (unzipped) app.
 /// <para>
 /// Installing works in two processes. The running app stages the new version in
 /// <c>%LOCALAPPDATA%\AppleMusicLyrics\updates\staging-&lt;version&gt;</c>, copies its OWN
 /// executable to a helper folder, starts that copy with <see cref="ApplyArgument"/>, and exits.
-/// The helper waits for the old process to end, copies the staged folder over the install folder,
-/// starts the updated app, and exits. Running the installer from the current version (not from
-/// the package being installed) means any release can be installed, including one whose own
-/// installer is missing or broken. Files are only added or overwritten, never deleted, and
-/// settings live outside the install folder, so nothing the user keeps there is lost.
+/// The helper waits for the old process to exit, backs up the files it replaces, and starts the
+/// new app. If an installation or restart fails, the helper restores the previous installation.
 /// </para>
 /// </summary>
-public sealed class UpdateInstaller(string updatesRoot)
+public sealed class UpdateInstaller(string updatesRoot, TimeSpan? downloadIdleTimeout = null)
 {
     public const string ExecutableName = "AppleMusicLyrics.App.exe";
     public const string ApplyArgument = "--apply-update";
     public const string UpdatedArgument = "--updated";
     private const string StagingPrefix = "staging-";
     private const string HelperPrefix = "helper-";
+    private readonly TimeSpan _downloadIdleTimeout = downloadIdleTimeout ?? TimeSpan.FromSeconds(20);
 
     public string UpdatesRoot { get; } = updatesRoot;
 
@@ -48,22 +55,40 @@ public sealed class UpdateInstaller(string updatesRoot)
     /// extracts it to a fresh staging folder. Returns that folder.
     /// </summary>
     public async Task<string> DownloadAndStageAsync(HttpClient httpClient, ReleaseInfo release,
-        IProgress<double>? progress = null, CancellationToken cancellationToken = default)
+        IProgress<UpdateDownloadProgress>? progress = null, CancellationToken cancellationToken = default)
     {
         var asset = release.Package ?? throw new UpdateException(UpdateFailure.NoPackage);
-        Directory.CreateDirectory(UpdatesRoot);
-        var name = SafeName(release.Version.ToString());
+        var name = $"{SafeName(release.Version.ToString())}-{Guid.NewGuid():N}";
         var download = Path.Combine(UpdatesRoot, $"{name}.zip.part");
         var staging = Path.Combine(UpdatesRoot, StagingPrefix + name);
+        var staged = false;
 
         try
         {
-            await DownloadVerifiedAsync(httpClient, asset, download, progress, cancellationToken).ConfigureAwait(false);
-            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+            Directory.CreateDirectory(UpdatesRoot);
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    await DownloadVerifiedAsync(httpClient, asset, download, progress, cancellationToken).ConfigureAwait(false);
+                    break;
+                }
+                catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested)
+                {
+                    if (attempt > 0) throw new UpdateException(UpdateFailure.DownloadTimeout, error);
+                    progress?.Report(new(0, Retrying: true));
+                }
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
             // ExtractToDirectory rejects entries that would land outside the destination.
             ZipFile.ExtractToDirectory(download, staging);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!File.Exists(Path.Combine(staging, ExecutableName)))
+                throw new UpdateException(UpdateFailure.InvalidPackage);
+            staged = true;
         }
-        catch (Exception error) when (error is HttpRequestException or TaskCanceledException { CancellationToken.IsCancellationRequested: false })
+        catch (HttpRequestException error)
         {
             throw new UpdateException(UpdateFailure.Network, error);
         }
@@ -74,38 +99,40 @@ public sealed class UpdateInstaller(string updatesRoot)
         finally
         {
             TryDelete(download);
-        }
-
-        if (!File.Exists(Path.Combine(staging, ExecutableName)))
-        {
-            TryDeleteDirectory(staging);
-            throw new UpdateException(UpdateFailure.InvalidPackage);
+            if (!staged) TryDeleteDirectory(staging);
         }
 
         return staging;
     }
 
-    private static async Task DownloadVerifiedAsync(HttpClient httpClient, ReleaseAsset asset, string path,
-        IProgress<double>? progress, CancellationToken cancellationToken)
+    private async Task DownloadVerifiedAsync(HttpClient httpClient, ReleaseAsset asset, string path,
+        IProgress<UpdateDownloadProgress>? progress, CancellationToken cancellationToken)
     {
+        using var idle = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        idle.CancelAfter(_downloadIdleTimeout);
         using var response = await httpClient.GetAsync(asset.DownloadUrl, HttpCompletionOption.ResponseHeadersRead,
-            cancellationToken).ConfigureAwait(false);
+            idle.Token).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
         var expected = asset.Size > 0 ? asset.Size : response.Content.Headers.ContentLength ?? 0;
 
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         long received = 0;
-        await using (var input = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
+        idle.CancelAfter(_downloadIdleTimeout);
+        await using var input = await response.Content.ReadAsStreamAsync(idle.Token).ConfigureAwait(false);
+        idle.CancelAfter(Timeout.InfiniteTimeSpan);
         await using (var output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true))
         {
             var buffer = new byte[81920];
-            int read;
-            while ((read = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
+            while (true)
             {
+                idle.CancelAfter(_downloadIdleTimeout);
+                var read = await input.ReadAsync(buffer.AsMemory(), idle.Token).ConfigureAwait(false);
+                idle.CancelAfter(Timeout.InfiniteTimeSpan);
+                if (read == 0) break;
                 await output.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
                 hash.AppendData(buffer, 0, read);
                 received += read;
-                if (expected > 0) progress?.Report(Math.Min(1.0, received / (double)expected));
+                if (expected > 0) progress?.Report(new(Math.Min(1.0, received / (double)expected)));
             }
         }
 
@@ -192,10 +219,10 @@ public sealed class UpdateInstaller(string updatesRoot)
     /// contain the app, so a tampered argument cannot spray files into another folder.
     /// </summary>
     public static bool Apply(string sourceDirectory, string targetDirectory, int processId, TimeSpan waitTimeout,
-        Action<string> log)
+        Action<string> log, Func<bool>? startUpdatedApplication = null)
     {
-        var source = Path.GetFullPath(sourceDirectory);
-        var target = Path.GetFullPath(targetDirectory);
+        var source = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sourceDirectory));
+        var target = Path.TrimEndingDirectorySeparator(Path.GetFullPath(targetDirectory));
         if (!File.Exists(Path.Combine(source, ExecutableName)))
         {
             log($"Refusing to install: {source} does not contain {ExecutableName}.");
@@ -206,23 +233,53 @@ public sealed class UpdateInstaller(string updatesRoot)
             log($"Refusing to install: {target} does not contain {ExecutableName}.");
             return false;
         }
-        if (string.Equals(source.TrimEnd('\\'), target.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+        if (IsInside(source, target) || IsInside(target, source))
         {
-            log("Source and target are the same folder.");
+            log("The staging and installation folders overlap.");
             return false;
         }
 
-        WaitForExit(processId, waitTimeout, log);
-        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        if (!WaitForExit(processId, waitTimeout))
         {
-            var relative = Path.GetRelativePath(source, file);
-            var destination = Path.Combine(target, relative);
-            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            if (!CopyWithRetry(file, destination, log)) return false;
+            log($"Process {processId} did not exit in time. Installation was skipped.");
+            return false;
         }
 
+        // Keep backups separate from staging and helper folders. The restarted app cleans those
+        // folders on startup, while this helper may still need to roll back.
+        var backup = Path.Combine(Path.GetDirectoryName(source)!, $"rollback-{Guid.NewGuid():N}");
+        var transaction = new UpdateFileTransaction(target, backup);
+        try
+        {
+            Directory.CreateDirectory(backup);
+            var files = Directory.GetFiles(source, "*", SearchOption.AllDirectories);
+            var executable = Path.Combine(source, ExecutableName);
+            foreach (var file in files.OrderBy(file => file.Equals(executable, StringComparison.OrdinalIgnoreCase))
+                         .ThenBy(file => file, StringComparer.OrdinalIgnoreCase))
+                transaction.Replace(file, Path.GetRelativePath(source, file));
+
+            if (startUpdatedApplication is not null && !startUpdatedApplication())
+                throw new IOException("The updated application exited during startup.");
+        }
+        catch (Exception error)
+        {
+            log($"Update failed: {error.Message}");
+            if (!transaction.RollBack(log)) throw new UpdateRollbackException(backup);
+            TryDeleteDirectory(backup);
+            log("The previous installation is intact.");
+            return false;
+        }
+
+        TryDeleteDirectory(backup);
         log($"Installed {source} into {target}.");
         return true;
+    }
+
+    private static bool IsInside(string directory, string parent)
+    {
+        var relative = Path.GetRelativePath(parent, directory);
+        return !Path.IsPathRooted(relative) && relative != ".."
+            && !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal);
     }
 
     /// <summary>Removes staging and helper folders and partial downloads, except the folder the current process runs from.</summary>
@@ -240,39 +297,17 @@ public sealed class UpdateInstaller(string updatesRoot)
         foreach (var part in Directory.EnumerateFiles(UpdatesRoot, "*.zip.part")) TryDelete(part);
     }
 
-    private static void WaitForExit(int processId, TimeSpan timeout, Action<string> log)
+    private static bool WaitForExit(int processId, TimeSpan timeout)
     {
-        if (processId <= 0) return;
+        if (processId <= 0) return true;
         try
         {
             using var process = Process.GetProcessById(processId);
-            if (!process.WaitForExit(timeout)) log($"Process {processId} still running after {timeout.TotalSeconds:0}s; copying anyway.");
+            return process.WaitForExit(timeout);
         }
         catch (ArgumentException)
         {
-            // Already exited.
-        }
-    }
-
-    private static bool CopyWithRetry(string source, string destination, Action<string> log)
-    {
-        for (var attempt = 1; ; attempt++)
-        {
-            try
-            {
-                File.Copy(source, destination, overwrite: true);
-                return true;
-            }
-            catch (Exception error) when ((error is IOException or UnauthorizedAccessException) && attempt < 40)
-            {
-                // The old process can hold files briefly after it reports exit (antivirus, handles).
-                Thread.Sleep(250);
-            }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
-            {
-                log($"Could not replace {destination}: {error.GetType().Name}.");
-                return false;
-            }
+            return true; // Already exited.
         }
     }
 

@@ -17,9 +17,12 @@ namespace AppleMusicLyrics.App;
 
 public partial class SettingsWindow : Window
 {
+    public sealed record SongOffsetEditor(string Title, double? SavedValue, Action<double> Save);
+
     private readonly Action<AppSettings>? _applyPreview;
     private readonly Action? _openDiagnostics;
     private readonly Action? _checkForUpdates;
+    private readonly SongOffsetEditor? _songOffset;
     private readonly ExternalLyricsCache? _lyricsCache;
     private readonly DispatcherTimer _cacheUsageTimer;
     private readonly LocalizationManager _localization = LocalizationManager.Instance;
@@ -33,17 +36,21 @@ public partial class SettingsWindow : Window
     private bool _closed;
     private bool _saveAccepted;
     private bool _cacheClearing;
+    private bool _hasSavedSongOffset;
+    private double _songOffsetBaseline;
+    private double _globalOffsetBaseline;
     private ExternalLyricsCacheUsage _cacheUsage = new(0, 0, true);
     private string? _cacheStatusKey;
 
     public SettingsWindow(AppSettings settings, Action<AppSettings>? applyPreview = null, ExternalLyricsCache? lyricsCache = null,
-        Action? openDiagnostics = null, Action? checkForUpdates = null)
+        Action? openDiagnostics = null, Action? checkForUpdates = null, SongOffsetEditor? songOffset = null)
     {
         _languageOnCancel = _localization.Preference;
         Settings = settings.Clone();
         _applyPreview = applyPreview;
         _openDiagnostics = openDiagnostics;
         _checkForUpdates = checkForUpdates;
+        _songOffset = songOffset;
         _lyricsCache = lyricsCache;
         _localization.SetLanguage(Settings.UiLanguage);
         InitializeComponent();
@@ -289,6 +296,15 @@ public partial class SettingsWindow : Window
         HoverFadeDurationSlider.Value = Settings.HoverFadeDuration;
         HoverFadeMinOpacitySlider.Value = Settings.HoverFadeMinOpacity;
         LyricsOffsetSlider.Value = Settings.LyricsOffsetSeconds;
+        _globalOffsetBaseline = Math.Round(LyricsOffsetSlider.Value, 2);
+        if (_songOffset is { } songOffset)
+        {
+            SongOffsetPanel.Visibility = Visibility.Visible;
+            SongOffsetTitleText.Text = songOffset.Title;
+            _hasSavedSongOffset = songOffset.SavedValue.HasValue;
+            SongOffsetSlider.Value = songOffset.SavedValue ?? Settings.LyricsOffsetSeconds;
+            _songOffsetBaseline = Math.Round(SongOffsetSlider.Value, 2);
+        }
         OverlayOpacitySlider.Value = Settings.OverlayOpacity;
         PureModeDragOpacitySlider.Value = Settings.PureModeDragOpacity;
         BackgroundAlphaSlider.Value = Math.Round(((Settings.BackgroundAlpha ?? (Settings.PureMode ? 72 : 200)) / 255.0) * 100, 0);
@@ -316,6 +332,7 @@ public partial class SettingsWindow : Window
         }
 
         _saveAccepted = true;
+        SaveSongOffset();
         DialogResult = true;
     }
 
@@ -327,11 +344,29 @@ public partial class SettingsWindow : Window
         }
 
         _applyPreview?.Invoke(Settings.Clone());
+        SaveSongOffset();
         _languageOnCancel = _localization.Preference;
         RefreshCacheUsage();
     }
 
     private void CancelButton_OnClick(object sender, RoutedEventArgs e) => Close();
+
+    private void SaveSongOffset()
+    {
+        if (_songOffset is null) return;
+        var value = Math.Round(SongOffsetSlider.Value, 2);
+        if (Settings.PerSongOffsetEnabled && value != _songOffsetBaseline)
+        {
+            _songOffset.Save(value);
+            _hasSavedSongOffset = true;
+            _songOffsetBaseline = value;
+        }
+        else if (!_hasSavedSongOffset && value == _songOffsetBaseline)
+        {
+            SongOffsetSlider.Value = LyricsOffsetSlider.Value;
+            _songOffsetBaseline = Math.Round(SongOffsetSlider.Value, 2);
+        }
+    }
 
     private bool TryUpdateSettingsFromEditors(bool showErrors)
     {
@@ -370,7 +405,12 @@ public partial class SettingsWindow : Window
         Settings.HoverFadeEnabled = HoverFadeCheckBox.IsChecked == true;
         Settings.HoverFadeDuration = Math.Round(HoverFadeDurationSlider.Value, 2);
         Settings.HoverFadeMinOpacity = Math.Round(HoverFadeMinOpacitySlider.Value, 2);
-        Settings.LyricsOffsetSeconds = Math.Round(LyricsOffsetSlider.Value, 2);
+        var globalOffset = Math.Round(LyricsOffsetSlider.Value, 2);
+        if (globalOffset != _globalOffsetBaseline)
+        {
+            Settings.LyricsOffsetSeconds = globalOffset;
+            _globalOffsetBaseline = globalOffset;
+        }
         Settings.OverlayOpacity = Math.Round(OverlayOpacitySlider.Value, 2);
         Settings.PureModeDragOpacity = Math.Round(PureModeDragOpacitySlider.Value, 2);
         if (_backgroundAlphaEdited)
@@ -502,6 +542,7 @@ public partial class SettingsWindow : Window
     private void UpdateSliderLabels()
     {
         LyricsOffsetValueText.Text = _localization.Format("Settings.Unit.SignedSeconds", LyricsOffsetSlider.Value);
+        SongOffsetValueText.Text = _localization.Format("Settings.Unit.SignedSeconds", SongOffsetSlider.Value);
         OverlayOpacityValueText.Text = _localization.Format("Settings.Unit.Percent", OverlayOpacitySlider.Value);
         PureModeDragOpacityValueText.Text = _localization.Format("Settings.Unit.Percent", PureModeDragOpacitySlider.Value);
         BackgroundAlphaValueText.Text = _localization.Format("Settings.Unit.WholePercent", BackgroundAlphaSlider.Value);

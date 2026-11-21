@@ -1,4 +1,4 @@
-<Window x:Class="AppleMusicLyrics.App.SettingsWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:loc="clr-namespace:AppleMusicLyrics.App.Localization" Title="{loc:Loc Settings.Title}" Width="740" Height="720" MinWidth="620" MinHeight="520" WindowStartupLocation="CenterOwner" FontFamily="Segoe UI, Microsoft YaHei UI" Foreground="White" UseLayoutRounding="True" TextOptions.TextFormattingMode="Ideal" Background="#0B0C10">
+<Window x:Class="AppleMusicLyrics.App.SettingsWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:loc="clr-namespace:AppleMusicLyrics.App.Localization" Title="{loc:Loc Settings.Title}" Width="740" Height="720" MinWidth="620" MinHeight="520" WindowStartupLocation="CenterOwner" FontFamily="Segoe UI, Microsoft YaHei UI" ThemeMode="System" UseLayoutRounding="True" TextOptions.TextFormattingMode="Ideal">
   <Window.Resources>
     <!-- Palette -->
     <Color x:Key="AccentColor">#FF3B60</Color>
@@ -7,24 +7,18 @@
       <GradientStop Offset="0" Color="#FF4F7E" />
       <GradientStop Offset="1" Color="#FF2D55" />
     </LinearGradientBrush>
-    <SolidColorBrush x:Key="CardBrush" Color="#16181F" />
-    <SolidColorBrush x:Key="CardBorderBrush" Color="#262B35" />
-    <SolidColorBrush x:Key="InputBrush" Color="#0E1015" />
-    <SolidColorBrush x:Key="InputBorderBrush" Color="#2E3540" />
-    <SolidColorBrush x:Key="TrackBrush" Color="#2B313B" />
-    <SolidColorBrush x:Key="KnobBrush" Color="#B7BEC9" />
-    <SolidColorBrush x:Key="PrimaryTextBrush" Color="#F3F6FB" />
-    <SolidColorBrush x:Key="SecondaryTextBrush" Color="#969FAD" />
+    <!-- Everything else comes from the Fluent theme (ThemeMode), so it follows the system's
+         light or dark mode over the Mica backdrop. -->
     <!-- Section + label typography -->
     <Style x:Key="SectionTitleStyle" TargetType="TextBlock">
       <Setter Property="FontSize" Value="12" />
       <Setter Property="FontWeight" Value="Bold" />
-      <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
       <Setter Property="Margin" Value="2,0,0,16" />
     </Style>
     <Style x:Key="FieldLabelStyle" TargetType="TextBlock">
       <Setter Property="FontSize" Value="13" />
-      <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
       <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
     <Style x:Key="ValueLabelStyle" TargetType="TextBlock">
@@ -35,16 +29,16 @@
     </Style>
     <!-- Card -->
     <Style x:Key="CardStyle" TargetType="Border">
-      <Setter Property="Background" Value="{StaticResource CardBrush}" />
+      <Setter Property="Background" Value="{DynamicResource CardBackgroundFillColorDefaultBrush}" />
       <Setter Property="CornerRadius" Value="16" />
       <Setter Property="Padding" Value="20" />
       <Setter Property="Margin" Value="0,0,0,14" />
-      <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />
+      <Setter Property="BorderBrush" Value="{DynamicResource CardStrokeColorDefaultBrush}" />
       <Setter Property="BorderThickness" Value="1" />
     </Style>
     <!-- Toggle switch (CheckBox) -->
     <Style x:Key="ToggleStyle" TargetType="CheckBox">
-      <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
       <Setter Property="FontSize" Value="13.5" />
       <Setter Property="Cursor" Value="Hand" />
       <Setter Property="HorizontalContentAlignment" Value="Left" />
@@ -58,16 +52,19 @@
                   <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
                 <ContentPresenter VerticalAlignment="Center" />
-                <Border x:Name="Track" Grid.Column="1" Width="44" Height="26" CornerRadius="13" Background="{StaticResource TrackBrush}" VerticalAlignment="Center">
-                  <Ellipse x:Name="Knob" Width="18" Height="18" Margin="4,0,0,0" HorizontalAlignment="Left" Fill="{StaticResource KnobBrush}" />
+                <Border x:Name="Track" Grid.Column="1" Width="44" Height="22" CornerRadius="11" Background="{DynamicResource ControlAltFillColorSecondaryBrush}" BorderBrush="{DynamicResource ControlStrongStrokeColorDefaultBrush}" BorderThickness="1" VerticalAlignment="Center">
+                  <Ellipse x:Name="Knob" Width="12" Height="12" Margin="4,0,0,0" HorizontalAlignment="Left" Fill="{DynamicResource TextFillColorSecondaryBrush}" />
                 </Border>
               </Grid>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsChecked" Value="True">
                 <Setter TargetName="Track" Property="Background" Value="{StaticResource AccentGradient}" />
+                <Setter TargetName="Track" Property="BorderThickness" Value="0" />
                 <Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right" />
-                <Setter TargetName="Knob" Property="Margin" Value="0,0,4,0" />
+                <Setter TargetName="Knob" Property="Margin" Value="0,0,5,0" />
+                <Setter TargetName="Knob" Property="Width" Value="14" />
+                <Setter TargetName="Knob" Property="Height" Value="14" />
                 <Setter TargetName="Knob" Property="Fill" Value="White" />
               </Trigger>
               <Trigger Property="IsMouseOver" Value="True">
@@ -86,8 +83,8 @@
         <Setter.Value>
           <ControlTemplate TargetType="Thumb">
             <Grid>
-              <Ellipse Width="18" Height="18" Fill="White" />
-              <Ellipse Width="18" Height="18" Fill="{StaticResource AccentBrush}" Opacity="0" x:Name="Glow" />
+              <Ellipse Width="20" Height="20" Fill="{DynamicResource ControlSolidFillColorDefaultBrush}" Stroke="{DynamicResource ControlStrokeColorDefaultBrush}" StrokeThickness="1" />
+              <Ellipse Width="10" Height="10" Fill="{StaticResource AccentBrush}" />
             </Grid>
           </ControlTemplate>
         </Setter.Value>
@@ -100,13 +97,13 @@
         <Setter.Value>
           <ControlTemplate TargetType="Slider">
             <Grid VerticalAlignment="Center">
-              <Border Height="6" CornerRadius="3" Background="{StaticResource TrackBrush}" VerticalAlignment="Center" />
+              <Border Height="4" CornerRadius="2" Background="{DynamicResource ControlStrongFillColorDefaultBrush}" VerticalAlignment="Center" />
               <Track x:Name="PART_Track">
                 <Track.DecreaseRepeatButton>
                   <RepeatButton Command="Slider.DecreaseLarge" Focusable="False" IsTabStop="False">
                     <RepeatButton.Template>
                       <ControlTemplate TargetType="RepeatButton">
-                        <Border Height="6" CornerRadius="3" Background="{StaticResource AccentGradient}" VerticalAlignment="Center" />
+                        <Border Height="4" CornerRadius="2" Background="{StaticResource AccentGradient}" VerticalAlignment="Center" />
                       </ControlTemplate>
                     </RepeatButton.Template>
                   </RepeatButton>
@@ -131,14 +128,14 @@
     </Style>
     <!-- TextBox -->
     <Style x:Key="EditorTextBoxStyle" TargetType="TextBox">
-      <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
-      <Setter Property="CaretBrush" Value="White" />
+      <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
+      <Setter Property="CaretBrush" Value="{DynamicResource TextFillColorPrimaryBrush}" />
       <Setter Property="SelectionBrush" Value="{StaticResource AccentBrush}" />
       <Setter Property="FontSize" Value="13" />
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="TextBox">
-            <Border x:Name="Bd" CornerRadius="9" Background="{StaticResource InputBrush}" BorderBrush="{StaticResource InputBorderBrush}" BorderThickness="1" Padding="11,8">
+            <Border x:Name="Bd" CornerRadius="9" Background="{DynamicResource ControlFillColorDefaultBrush}" BorderBrush="{DynamicResource ControlElevationBorderBrush}" BorderThickness="1" Padding="11,8">
               <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center" />
             </Border>
             <ControlTemplate.Triggers>
@@ -153,16 +150,16 @@
     <!-- ComboBox -->
     <ControlTemplate x:Key="ComboToggleTemplate" TargetType="ToggleButton">
       <Border x:Name="ArrowBorder" Background="Transparent" CornerRadius="0,8,8,0" Padding="10">
-        <Path Width="9" Height="5" Stretch="Fill" Fill="{StaticResource SecondaryTextBrush}" Data="M0,0 L4,4 L8,0 Z" />
+        <Path Width="9" Height="5" Stretch="Fill" Fill="{DynamicResource TextFillColorSecondaryBrush}" Data="M0,0 L4,4 L8,0 Z" />
       </Border>
       <ControlTemplate.Triggers>
         <Trigger Property="IsMouseOver" Value="True">
-          <Setter TargetName="ArrowBorder" Property="Background" Value="#242B35" />
+          <Setter TargetName="ArrowBorder" Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}" />
         </Trigger>
       </ControlTemplate.Triggers>
     </ControlTemplate>
     <Style x:Key="EditorComboBoxItemStyle" TargetType="ComboBoxItem">
-      <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
       <Setter Property="Padding" Value="10,7" />
       <Setter Property="Template">
         <Setter.Value>
@@ -172,10 +169,11 @@
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsHighlighted" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#232A34" />
+                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}" />
               </Trigger>
               <Trigger Property="IsSelected" Value="True">
                 <Setter TargetName="Bd" Property="Background" Value="{StaticResource AccentBrush}" />
+                <Setter Property="Foreground" Value="White" />
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -183,7 +181,7 @@
       </Setter>
     </Style>
     <Style x:Key="EditorComboBoxStyle" TargetType="ComboBox">
-      <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
       <Setter Property="FontSize" Value="13" />
       <Setter Property="MinHeight" Value="38" />
       <Setter Property="IsEditable" Value="True" />
@@ -196,12 +194,12 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="34" />
               </Grid.ColumnDefinitions>
-              <Border x:Name="ComboBorder" Grid.ColumnSpan="2" Background="{StaticResource InputBrush}" BorderBrush="{StaticResource InputBorderBrush}" BorderThickness="1" CornerRadius="9" />
+              <Border x:Name="ComboBorder" Grid.ColumnSpan="2" Background="{DynamicResource ControlFillColorDefaultBrush}" BorderBrush="{DynamicResource ControlElevationBorderBrush}" BorderThickness="1" CornerRadius="9" />
               <ContentPresenter x:Name="SelectionContent" Grid.Column="0" Margin="11,8,2,8" VerticalAlignment="Center" IsHitTestVisible="False" Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}" ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}" />
-              <TextBox x:Name="PART_EditableTextBox" Grid.Column="0" Margin="10,6,1,6" Visibility="Collapsed" VerticalContentAlignment="Center" Background="Transparent" BorderThickness="0" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" CaretBrush="White" SelectionBrush="{StaticResource AccentBrush}" IsReadOnly="{TemplateBinding IsReadOnly}" Text="{Binding Text, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+              <TextBox x:Name="PART_EditableTextBox" Grid.Column="0" Margin="10,6,1,6" Visibility="Collapsed" VerticalContentAlignment="Center" Background="Transparent" BorderThickness="0" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" CaretBrush="{DynamicResource TextFillColorPrimaryBrush}" SelectionBrush="{StaticResource AccentBrush}" IsReadOnly="{TemplateBinding IsReadOnly}" Text="{Binding Text, RelativeSource={RelativeSource TemplatedParent}, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
               <ToggleButton Grid.Column="1" Focusable="False" ClickMode="Press" Template="{StaticResource ComboToggleTemplate}" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" />
               <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" PopupAnimation="Fade" Focusable="False">
-                <Border Margin="0,5,0,0" MaxHeight="260" MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}" Background="#14171D" BorderBrush="{StaticResource CardBorderBrush}" BorderThickness="1" CornerRadius="10" Padding="6">
+                <Border Margin="0,5,0,0" MaxHeight="260" MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}" Background="{DynamicResource SolidBackgroundFillColorQuarternaryBrush}" BorderBrush="{DynamicResource SurfaceStrokeColorFlyoutBrush}" BorderThickness="1" CornerRadius="10" Padding="6">
                   <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="True">
                     <ItemsPresenter />
                   </ScrollViewer>
@@ -223,7 +221,7 @@
     </Style>
     <!-- Buttons -->
     <Style x:Key="GhostButtonStyle" TargetType="Button">
-      <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
       <Setter Property="FontSize" Value="13" />
       <Setter Property="Cursor" Value="Hand" />
       <Setter Property="MinWidth" Value="92" />
@@ -231,15 +229,15 @@
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="Bd" CornerRadius="10" Background="#1E232B" BorderBrush="{StaticResource InputBorderBrush}" BorderThickness="1" Padding="{TemplateBinding Padding}">
+            <Border x:Name="Bd" CornerRadius="8" Background="{DynamicResource ControlFillColorDefaultBrush}" BorderBrush="{DynamicResource ControlElevationBorderBrush}" BorderThickness="1" Padding="{TemplateBinding Padding}">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#272D37" />
+                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource ControlFillColorSecondaryBrush}" />
               </Trigger>
               <Trigger Property="IsPressed" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#171B22" />
+                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource ControlFillColorTertiaryBrush}" />
               </Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -256,7 +254,7 @@
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="Bd" CornerRadius="10" Background="{StaticResource AccentGradient}" Padding="{TemplateBinding Padding}">
+            <Border x:Name="Bd" CornerRadius="8" Background="{StaticResource AccentGradient}" Padding="{TemplateBinding Padding}">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
             </Border>
             <ControlTemplate.Triggers>
@@ -272,50 +270,20 @@
       </Setter>
     </Style>
     <Style x:Key="ActionButtonStyle" TargetType="Button">
-      <Setter Property="Foreground" Value="{StaticResource PrimaryTextBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}" />
       <Setter Property="FontSize" Value="12" />
       <Setter Property="Cursor" Value="Hand" />
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
-            <Border x:Name="Bd" CornerRadius="8" Background="#222831" Padding="12,8">
+            <Border x:Name="Bd" CornerRadius="6" Background="{DynamicResource ControlFillColorDefaultBrush}" BorderBrush="{DynamicResource ControlElevationBorderBrush}" BorderThickness="1" Padding="12,7">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Bd" Property="Background" Value="#2B323D" />
+                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource ControlFillColorSecondaryBrush}" />
               </Trigger>
             </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
-    <!-- Scrollbar -->
-    <Style TargetType="ScrollBar">
-      <Setter Property="Width" Value="8" />
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="ScrollBar">
-            <Grid Background="Transparent">
-              <Track x:Name="PART_Track" IsDirectionReversed="True">
-                <Track.DecreaseRepeatButton>
-                  <RepeatButton Command="ScrollBar.PageUpCommand" Opacity="0" Focusable="False" />
-                </Track.DecreaseRepeatButton>
-                <Track.IncreaseRepeatButton>
-                  <RepeatButton Command="ScrollBar.PageDownCommand" Opacity="0" Focusable="False" />
-                </Track.IncreaseRepeatButton>
-                <Track.Thumb>
-                  <Thumb>
-                    <Thumb.Template>
-                      <ControlTemplate TargetType="Thumb">
-                        <Border CornerRadius="4" Background="#39414D" Margin="2,0" />
-                      </ControlTemplate>
-                    </Thumb.Template>
-                  </Thumb>
-                </Track.Thumb>
-              </Track>
-            </Grid>
           </ControlTemplate>
         </Setter.Value>
       </Setter>
@@ -325,7 +293,7 @@
       <Setter Property="Margin" Value="0,0,0,6" />
     </Style>
     <Style x:Key="SettingsTabItemStyle" TargetType="TabItem">
-      <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+      <Setter Property="Foreground" Value="{DynamicResource TextFillColorSecondaryBrush}" />
       <Setter Property="FontSize" Value="14" />
       <Setter Property="FontWeight" Value="SemiBold" />
       <Setter Property="HorizontalContentAlignment" Value="Stretch" />
@@ -339,14 +307,14 @@
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="TabBorder" Property="Background" Value="#252C37" />
+                <Setter TargetName="TabBorder" Property="Background" Value="{DynamicResource SubtleFillColorSecondaryBrush}" />
               </Trigger>
               <Trigger Property="IsSelected" Value="True">
                 <Setter TargetName="TabBorder" Property="Background" Value="{StaticResource AccentGradient}" />
                 <Setter Property="Foreground" Value="White" />
               </Trigger>
               <Trigger Property="IsKeyboardFocused" Value="True">
-                <Setter TargetName="TabBorder" Property="BorderBrush" Value="White" />
+                <Setter TargetName="TabBorder" Property="BorderBrush" Value="{DynamicResource FocusStrokeColorOuterBrush}" />
                 <Setter TargetName="TabBorder" Property="BorderThickness" Value="1" />
               </Trigger>
             </ControlTemplate.Triggers>
@@ -365,7 +333,7 @@
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="*" />
               </Grid.RowDefinitions>
-              <Border Grid.Row="0" Background="#10141B" BorderBrush="{StaticResource CardBorderBrush}" BorderThickness="1" CornerRadius="12" Padding="4" Margin="0,0,0,14">
+              <Border Grid.Row="0" Background="{DynamicResource ControlAltFillColorSecondaryBrush}" BorderBrush="{DynamicResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="12" Padding="4" Margin="0,0,0,14">
                 <UniformGrid Rows="1" IsItemsHost="True" />
               </Border>
               <ContentPresenter x:Name="PART_SelectedContentHost" Grid.Row="1" ContentSource="SelectedContent" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" />
@@ -376,12 +344,6 @@
     </Style>
   </Window.Resources>
   <Border xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Border.Background>
-      <LinearGradientBrush StartPoint="0,0" EndPoint="0.4,1">
-        <GradientStop Offset="0" Color="#0C0E13" />
-        <GradientStop Offset="1" Color="#121620" />
-      </LinearGradientBrush>
-    </Border.Background>
     <Grid Margin="22">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto" />
@@ -393,7 +355,7 @@
           <ColumnDefinition Width="*" />
           <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
-        <TextBlock FontSize="23" FontWeight="SemiBold" VerticalAlignment="Center" Foreground="{StaticResource PrimaryTextBrush}" Text="{loc:Loc Settings.Title}" />
+        <TextBlock FontSize="23" FontWeight="SemiBold" VerticalAlignment="Center" Foreground="{DynamicResource TextFillColorPrimaryBrush}" Text="{loc:Loc Settings.Title}" />
         <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="16,0,0,0">
           <TextBlock Style="{StaticResource FieldLabelStyle}" Margin="0,0,10,0" Text="{loc:Loc Settings.Language}" />
           <ComboBox x:Name="LanguageComboBox" Width="145" Style="{StaticResource EditorComboBoxStyle}" IsEditable="False" DisplayMemberPath="NativeName" SelectedValuePath="Code" SelectionChanged="LanguageComboBox_OnSelectionChanged" />
@@ -421,10 +383,10 @@
                     <ComboBox x:Name="FontFamilyComboBox" Grid.Row="1" Style="{StaticResource EditorComboBoxStyle}" IsEditable="True" IsTextSearchEnabled="True" StaysOpenOnEdit="True" DisplayMemberPath="DisplayName" SelectedValuePath="CanonicalName" TextSearch.TextPath="DisplayName" SelectionChanged="FontChoice_OnChanged" ToolTip="{loc:Loc Settings.ToolTip.Font}" />
                     <ComboBox x:Name="ChineseFontFamilyComboBox" Grid.Row="1" Grid.Column="2" Style="{StaticResource EditorComboBoxStyle}" IsEditable="True" IsTextSearchEnabled="True" StaysOpenOnEdit="True" DisplayMemberPath="DisplayName" SelectedValuePath="CanonicalName" TextSearch.TextPath="DisplayName" SelectionChanged="FontChoice_OnChanged" ToolTip="{loc:Loc Settings.ToolTip.ChineseFont}" />
                   </Grid>
-                  <Border Background="{StaticResource InputBrush}" BorderBrush="{StaticResource InputBorderBrush}" BorderThickness="1" CornerRadius="10" Padding="16" Margin="0,14,0,16">
+                  <Border Background="{DynamicResource ControlFillColorDefaultBrush}" BorderBrush="{DynamicResource ControlElevationBorderBrush}" BorderThickness="1" CornerRadius="10" Padding="16" Margin="0,14,0,16">
                     <StackPanel>
-                      <TextBlock x:Name="FontPreviewText" Text="{loc:Loc Settings.Preview.Main}" FontSize="32" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{StaticResource PrimaryTextBrush}" />
-                      <TextBlock x:Name="FontPreviewContextText" Text="{loc:Loc Settings.Preview.Context}" FontSize="18" TextWrapping="Wrap" Foreground="{StaticResource SecondaryTextBrush}" Margin="0,8,0,0" />
+                      <TextBlock x:Name="FontPreviewText" Text="{loc:Loc Settings.Preview.Main}" FontSize="32" FontWeight="SemiBold" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorPrimaryBrush}" />
+                      <TextBlock x:Name="FontPreviewContextText" Text="{loc:Loc Settings.Preview.Context}" FontSize="18" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}" Margin="0,8,0,0" />
                     </StackPanel>
                   </Border>
                   <Grid Style="{StaticResource SliderHeaderGridStyle}">
@@ -452,8 +414,8 @@
                   <TextBlock Style="{StaticResource SectionTitleStyle}" Text="{loc:Loc Settings.Section.Translation}" />
                   <TextBlock Style="{StaticResource FieldLabelStyle}" Text="{loc:Loc Settings.Field.TranslationFont}" Margin="0,0,0,7" />
                   <ComboBox x:Name="TranslationFontFamilyComboBox" Style="{StaticResource EditorComboBoxStyle}" IsEditable="True" IsTextSearchEnabled="True" StaysOpenOnEdit="True" DisplayMemberPath="DisplayName" SelectedValuePath="CanonicalName" TextSearch.TextPath="DisplayName" SelectionChanged="FontChoice_OnChanged" ToolTip="{loc:Loc Settings.ToolTip.Font}" />
-                  <Border Background="{StaticResource InputBrush}" BorderBrush="{StaticResource InputBorderBrush}" BorderThickness="1" CornerRadius="10" Padding="16" Margin="0,14,0,16">
-                    <TextBlock x:Name="TranslationFontPreviewText" Text="{loc:Loc Settings.Preview.Main}" FontSize="20" TextWrapping="Wrap" Foreground="{StaticResource SecondaryTextBrush}" />
+                  <Border Background="{DynamicResource ControlFillColorDefaultBrush}" BorderBrush="{DynamicResource ControlElevationBorderBrush}" BorderThickness="1" CornerRadius="10" Padding="16" Margin="0,14,0,16">
+                    <TextBlock x:Name="TranslationFontPreviewText" Text="{loc:Loc Settings.Preview.Main}" FontSize="20" TextWrapping="Wrap" Foreground="{DynamicResource TextFillColorSecondaryBrush}" />
                   </Border>
                   <Grid Style="{StaticResource SliderHeaderGridStyle}">
                     <Grid.ColumnDefinitions>
@@ -482,7 +444,7 @@
                     <StackPanel Margin="0,0,8,0">
                       <TextBlock Style="{StaticResource FieldLabelStyle}" Margin="0,0,0,7" HorizontalAlignment="Left" Text="{loc:Loc Settings.Field.CurrentColor}" />
                       <DockPanel LastChildFill="False">
-                        <Border x:Name="CurrentColorPreview" Width="34" Height="34" CornerRadius="9" BorderBrush="{StaticResource InputBorderBrush}" BorderThickness="1" DockPanel.Dock="Left" />
+                        <Border x:Name="CurrentColorPreview" Width="34" Height="34" CornerRadius="9" BorderBrush="{DynamicResource ControlElevationBorderBrush}" BorderThickness="1" DockPanel.Dock="Left" />
                         <TextBox x:Name="CurrentColorTextBox" Width="86" Margin="10,0,0,0" VerticalAlignment="Center" DockPanel.Dock="Left" Style="{StaticResource EditorTextBoxStyle}" Text="#FFFFFF" />
                         <Button Content="{loc:Loc Settings.Action.Choose}" Tag="Current" Margin="8,0,0,0" VerticalAlignment="Center" DockPanel.Dock="Left" Style="{StaticResource ActionButtonStyle}" Click="PickColorButton_OnClick" />
                       </DockPanel>
@@ -490,7 +452,7 @@
                     <StackPanel Margin="8,0,0,0">
                       <TextBlock Style="{StaticResource FieldLabelStyle}" Margin="0,0,0,7" HorizontalAlignment="Left" Text="{loc:Loc Settings.Field.ContextColor}" />
                       <DockPanel LastChildFill="False">
-                        <Border x:Name="ContextColorPreview" Width="34" Height="34" CornerRadius="9" BorderBrush="{StaticResource InputBorderBrush}" BorderThickness="1" DockPanel.Dock="Left" />
+                        <Border x:Name="ContextColorPreview" Width="34" Height="34" CornerRadius="9" BorderBrush="{DynamicResource ControlElevationBorderBrush}" BorderThickness="1" DockPanel.Dock="Left" />
                         <TextBox x:Name="ContextColorTextBox" Width="86" Margin="10,0,0,0" VerticalAlignment="Center" DockPanel.Dock="Left" Style="{StaticResource EditorTextBoxStyle}" Text="#C8C8C8" />
                         <Button Content="{loc:Loc Settings.Action.Choose}" Tag="Context" Margin="8,0,0,0" VerticalAlignment="Center" DockPanel.Dock="Left" Style="{StaticResource ActionButtonStyle}" Click="PickColorButton_OnClick" />
                       </DockPanel>
@@ -500,7 +462,7 @@
                     <StackPanel Margin="0,0,8,0">
                       <TextBlock Style="{StaticResource FieldLabelStyle}" Margin="0,0,0,7" HorizontalAlignment="Left" Text="{loc:Loc Settings.Field.PausedColor}" />
                       <DockPanel LastChildFill="False">
-                        <Border x:Name="PausedColorPreview" Width="34" Height="34" CornerRadius="9" BorderBrush="{StaticResource InputBorderBrush}" BorderThickness="1" DockPanel.Dock="Left" />
+                        <Border x:Name="PausedColorPreview" Width="34" Height="34" CornerRadius="9" BorderBrush="{DynamicResource ControlElevationBorderBrush}" BorderThickness="1" DockPanel.Dock="Left" />
                         <TextBox x:Name="PausedColorTextBox" Width="86" Margin="10,0,0,0" VerticalAlignment="Center" DockPanel.Dock="Left" Style="{StaticResource EditorTextBoxStyle}" Text="#AAAAAA" />
                         <Button Content="{loc:Loc Settings.Action.Choose}" Tag="Paused" Margin="8,0,0,0" VerticalAlignment="Center" DockPanel.Dock="Left" Style="{StaticResource ActionButtonStyle}" Click="PickColorButton_OnClick" />
                       </DockPanel>
@@ -508,7 +470,7 @@
                     <StackPanel Margin="8,0,0,0">
                       <TextBlock Style="{StaticResource FieldLabelStyle}" Margin="0,0,0,7" HorizontalAlignment="Left" Text="{loc:Loc Settings.Field.GlowColor}" />
                       <DockPanel LastChildFill="False">
-                        <Border x:Name="GlowColorPreview" Width="34" Height="34" CornerRadius="9" BorderBrush="{StaticResource InputBorderBrush}" BorderThickness="1" DockPanel.Dock="Left" />
+                        <Border x:Name="GlowColorPreview" Width="34" Height="34" CornerRadius="9" BorderBrush="{DynamicResource ControlElevationBorderBrush}" BorderThickness="1" DockPanel.Dock="Left" />
                         <TextBox x:Name="GlowColorTextBox" Width="86" Margin="10,0,0,0" VerticalAlignment="Center" DockPanel.Dock="Left" Style="{StaticResource EditorTextBoxStyle}" Text="#FFFFFF" />
                         <Button Content="{loc:Loc Settings.Action.Choose}" Tag="Glow" Margin="8,0,0,0" VerticalAlignment="Center" DockPanel.Dock="Left" Style="{StaticResource ActionButtonStyle}" Click="PickColorButton_OnClick" />
                       </DockPanel>
@@ -543,9 +505,22 @@
                   </Grid>
                   <!-- The clock no longer adds a guessed forward push of its own, so the useful range
                    for this hand-tuned value sits about half a second higher than it used to. -->
-                  <Slider x:Name="LyricsOffsetSlider" Style="{StaticResource ModernSliderStyle}" Minimum="-0.20" Maximum="1.60" TickFrequency="0.02" Value="0.78" ValueChanged="SliderValueChanged" />
+                  <Slider x:Name="LyricsOffsetSlider" Style="{StaticResource ModernSliderStyle}" Minimum="-0.20" Maximum="1.60" TickFrequency="0.02" Value="0.9" ValueChanged="SliderValueChanged" />
                   <CheckBox Style="{StaticResource ToggleStyle}" Content="{loc:Loc Settings.Toggle.NativeOffset}" ToolTip="{loc:Loc Settings.ToolTip.NativeOffset}" IsChecked="{Binding Settings.ApplyNativeLyricOffset, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" />
-                  <CheckBox Style="{StaticResource ToggleStyle}" Content="{loc:Loc Settings.Toggle.PerSongOffset}" ToolTip="{loc:Loc Settings.ToolTip.PerSongOffset}" IsChecked="{Binding Settings.PerSongOffsetEnabled, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" />
+                  <CheckBox x:Name="PerSongOffsetCheckBox" Style="{StaticResource ToggleStyle}" Content="{loc:Loc Settings.Toggle.PerSongOffset}" ToolTip="{loc:Loc Settings.ToolTip.PerSongOffset}" IsChecked="{Binding Settings.PerSongOffsetEnabled, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" />
+                  <StackPanel x:Name="SongOffsetPanel" Visibility="Collapsed" IsEnabled="{Binding IsChecked, ElementName=PerSongOffsetCheckBox, Mode=OneWay}">
+                    <Grid Style="{StaticResource SliderHeaderGridStyle}">
+                      <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                      </Grid.ColumnDefinitions>
+                      <TextBlock Style="{StaticResource FieldLabelStyle}" Text="{loc:Loc Settings.Field.SongOffset}" />
+                      <TextBlock x:Name="SongOffsetValueText" Grid.Column="1" Style="{StaticResource ValueLabelStyle}" />
+                    </Grid>
+                    <TextBlock x:Name="SongOffsetTitleText" TextTrimming="CharacterEllipsis" />
+                    <Slider x:Name="SongOffsetSlider" Style="{StaticResource ModernSliderStyle}" Minimum="-0.20" Maximum="1.60" TickFrequency="0.02" Value="0.78" ValueChanged="SliderValueChanged"
+                            AutomationProperties.Name="{loc:Loc Settings.Field.SongOffset}" />
+                  </StackPanel>
                 </StackPanel>
               </Border>
             </StackPanel>
@@ -667,11 +642,11 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel VerticalAlignment="Center">
                       <TextBlock Style="{StaticResource FieldLabelStyle}" Text="{loc:Loc Settings.Field.CacheUsage}" />
-                      <TextBlock x:Name="ExternalLyricsCacheUsageValueText" Foreground="{StaticResource PrimaryTextBrush}" FontSize="16" FontWeight="SemiBold" Margin="0,5,0,0" />
+                      <TextBlock x:Name="ExternalLyricsCacheUsageValueText" Foreground="{DynamicResource TextFillColorPrimaryBrush}" FontSize="16" FontWeight="SemiBold" Margin="0,5,0,0" />
                     </StackPanel>
                     <Button x:Name="ClearExternalLyricsCacheButton" Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Center" Content="{loc:Loc Settings.Action.ClearCache}" Style="{StaticResource GhostButtonStyle}" Click="ClearExternalLyricsCacheButton_OnClick" />
                   </Grid>
-                  <TextBlock x:Name="ExternalLyricsCacheStatusText" Foreground="{StaticResource SecondaryTextBrush}" FontSize="12" Margin="0,8,0,0" TextWrapping="Wrap" Visibility="Collapsed" />
+                  <TextBlock x:Name="ExternalLyricsCacheStatusText" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="12" Margin="0,8,0,0" TextWrapping="Wrap" Visibility="Collapsed" />
                 </StackPanel>
               </Border>
               <Border Style="{StaticResource CardStyle}">

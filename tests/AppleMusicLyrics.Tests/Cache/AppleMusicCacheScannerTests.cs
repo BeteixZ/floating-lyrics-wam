@@ -459,6 +459,47 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
         Assert.Equal(0, external.CallCount);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NativeApiToRuntime_UsesSynchronizedLrcLibOnlyWhenAppleHasNoTimeline(bool appleHasLineTiming)
+    {
+        if (appleHasLineTiming)
+        {
+            _ = CreateSyllableFile("syllable-lyrics[1].json", "AP_123", words: false, translation: false);
+        }
+        else
+        {
+            const string untimedTtml = """
+                <tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" itunes:timing="None">
+                  <body dur="180.000"><div><p>hello world</p></div></body>
+                </tt>
+                """;
+            File.WriteAllText(Path.Combine(_root, "ttmlLyrics[1].json"), JsonSerializer.Serialize(new
+            {
+                lyricsId = "AP_123",
+                status = "success",
+                ttml = untimedTtml,
+            }));
+        }
+
+        var scanner = new AppleMusicCacheScanner(new TtmlLyricsParser(), [_root]);
+        var lrc = new LrcLyricsParser().Parse("[00:10.250]hello world", "lrclib:123", "LRCLIB_123", 180);
+        var external = new CountingExternalProvider(lrc);
+        await using var runtime = new LyricsRuntimeService(scanner, new NativePlayerProvider(), new LyricsSynchronizer())
+        {
+            ExternalLyricsProviders = [external],
+        };
+
+        _ = await runtime.SnapshotAsync();
+        var snapshot = await runtime.SnapshotAsync();
+
+        Assert.Equal(appleHasLineTiming ? LyricsResolutionSource.AppleMusicCache : LyricsResolutionSource.ExternalProvider,
+            snapshot.Resolution.Source);
+        Assert.Equal(appleHasLineTiming ? 10.0 : 10.25, Assert.Single(snapshot.Document!.Lines).Begin);
+        Assert.Equal(appleHasLineTiming ? 0 : 1, external.CallCount);
+    }
+
     private sealed class NativePlayerProvider(string title = "hello world") : IPlayerSessionProvider
     {
         public Task<PlayerState?> GetCurrentPlayerStateAsync(CancellationToken cancellationToken = default) =>
@@ -471,14 +512,14 @@ public sealed class AppleMusicCacheScannerTests : IDisposable
             CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<string>>([id]);
     }
 
-    private sealed class CountingExternalProvider : IExternalLyricsProvider
+    private sealed class CountingExternalProvider(LyricsDocument? lyrics = null) : IExternalLyricsProvider
     {
-        public string Name => "Unexpected external query";
+        public string Name => "LRCLIB";
         public int CallCount { get; private set; }
         public Task<LyricsDocument?> FetchAsync(PlayerState player, CancellationToken cancellationToken = default)
         {
             CallCount++;
-            return Task.FromResult<LyricsDocument?>(null);
+            return Task.FromResult(lyrics);
         }
     }
 

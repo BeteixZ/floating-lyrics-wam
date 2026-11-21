@@ -21,6 +21,20 @@ namespace AppleMusicLyrics.Core.Sync;
 /// the estimate is the centre of that intersection. A bound that contradicts older ones evicts
 /// them, so a small seek or a stray report cannot hold the estimate on a stale timeline.
 ///
+/// A seek or a resume is different, and better (measured November 2026). Apple Music publishes the
+/// target at once, but playback reaches it only about one timer period later, when the timer, restarted
+/// with playback, republishes the same value. Until then the position is about a second short of the
+/// report, the opposite of the floor rule; at the republish it equals the reported value to within a few
+/// hundredths of a second. That republish therefore pins the phase about a second after a seek, where
+/// the bounds alone take some 45 seconds. An anchor that later reports contradict is evicted like any
+/// other bound.
+///
+/// A new track is similar (eight recorded starts, November 2026). Its first report, 0, arrives with the
+/// new title about a second before playback starts: playback stood at -0.99s (every start within
+/// ±0.03s) when it was published. That instant anchors the timeline at once. For the next four seconds
+/// Apple Music sends a burst of reports that run up to a second ahead of playback; they would push the
+/// estimate early, so they are ignored until the regular cadence takes over.
+///
 /// What no amount of sampling can reveal is how far SMTC's reports lag the audio actually coming out
 /// of the speakers. That constant is the user-facing lyrics offset, and it is applied elsewhere.
 /// </summary>
@@ -52,6 +66,31 @@ public sealed class PlaybackClock
     // but never let a buffering/abandoned Playing session advance through the rest of a song.
     private const double MaxExtrapolationSeconds = 3.0;
 
+    // After a seek or resume, playback is about this far short of the value published with it.
+    private const double SeekLeadSeconds = 1.0;
+
+    // The restarted timer republishes the seek value one period (about 1.022s) later.
+    private const double AnchorTickMinSeconds = 0.85;
+    private const double AnchorTickMaxSeconds = 1.25;
+
+    // At that republish the true position is within this window around the value. The best-pinned
+    // recording measured -0.03; four shorter ones allow anything from -0.03 to +0.006.
+    private const double AnchorEarlySeconds = 0.06;
+    private const double AnchorLateSeconds = 0.03;
+
+    // Where playback stood when a new track's first report (0) was published: -0.99s in all eight
+    // recordings, ±0.03s. The window also covers seeing the burst's second report, 0.03s later.
+    private const double TrackStartEarliestSeconds = -1.03;
+    private const double TrackStartLatestSeconds = -0.92;
+
+    // The start-up burst ended within 3.9s of the first report and the regular reports began by 4.9s.
+    private const double TrackStartBurstSeconds = 4.6;
+
+    // How far a paused estimate may sit outside the second the paused report names. The early side
+    // also allows for a report rounded rather than floored, as seek reports are.
+    private const double PausedEarlySlackSeconds = 0.6;
+    private const double PausedLateSlackSeconds = 0.1;
+
     private readonly TimeProvider _timeProvider;
     private readonly (double Low, double High)[] _bounds = new (double, double)[MaxBounds];
     private long _startTimestamp;
@@ -67,6 +106,11 @@ public sealed class PlaybackClock
     private bool _rawStalled;
     private bool _playing;
     private bool _initialized;
+    private bool _seekPending;
+    private bool _anchorPending;
+    private double _burstUntil = double.NegativeInfinity;
+    private double _anchorPublished;
+    private double _anchorValue;
 
     public PlaybackClock(TimeProvider? timeProvider = null)
     {
@@ -74,8 +118,14 @@ public sealed class PlaybackClock
         _startTimestamp = _timeProvider.GetTimestamp();
     }
 
-    public void Reset()
+    /// <param name="seeking">
+    /// The reset follows a seek within the same track, so the next report is a seek report.
+    /// </param>
+    public void Reset(bool seeking = false)
     {
+        _seekPending = seeking;
+        _anchorPending = false;
+        _burstUntil = double.NegativeInfinity;
         _startTimestamp = _timeProvider.GetTimestamp();
         _boundCount = 0;
         _boundStart = 0;
@@ -113,7 +163,8 @@ public sealed class PlaybackClock
 
         if (!_initialized)
         {
-            Reseed(rawPosition, playing, age);
+            Reseed(rawPosition, playing, age, restart: _seekPending, trackStart: !_seekPending);
+            _seekPending = false;
             _playing = playing;
             _previousPollElapsed = _playbackElapsed;
             _initialized = true;
@@ -123,26 +174,35 @@ public sealed class PlaybackClock
         var rawChanged = Math.Abs(rawPosition - _lastRawPosition) > 0.0005;
         if (rawChanged)
         {
-            var predicted = _playbackElapsed + _offset;
+            // When the report was published. Without a timestamp it changed after the previous
+            // poll and no later than this one. A timestamp names the instant, which can precede the
+            // previous poll: Windows has been measured delivering reports up to a second after
+            // their timestamp (November 2026), and treating them as fresh ran the lyrics late.
+            var publishedEarliest = _previousPollElapsed;
+            var publishedLatest = _playbackElapsed;
+            if (age is double known)
+            {
+                publishedEarliest = publishedLatest = _playbackElapsed - known;
+            }
+
+            // Judge a jump against where playback was when the value was published, not now; a
+            // late delivery otherwise looks like a seek and discards the settled timeline.
+            var predicted = publishedLatest + _offset;
             if (!_playing || !playing || wasStalled || Math.Abs(rawPosition - predicted) > DiscontinuitySeconds)
             {
                 // A paused seek or the first new edge after a stall is authoritative, even if
-                // the jump is small. Old bounds no longer describe this playback epoch.
-                Reseed(rawPosition, playing, age);
+                // the jump is small. Old bounds no longer describe this playback epoch. A playing
+                // jump or a resume restarts Apple Music's timer, which a stall does not.
+                Reseed(rawPosition, playing, age, restart: !wasStalled || !_playing);
             }
             else
             {
-                // The report changed after the previous poll and no later than this one. A
-                // publish timestamp narrows that window to an instant, but never leaves it.
-                var publishedEarliest = _previousPollElapsed;
-                var publishedLatest = _playbackElapsed;
-                if (age is double known)
+                // Start-up burst reports run ahead of playback and would contradict the anchor.
+                if (publishedLatest >= _burstUntil)
                 {
-                    publishedEarliest = publishedLatest = Math.Clamp(_playbackElapsed - known,
-                        _previousPollElapsed, _playbackElapsed);
+                    AddBound(rawPosition - publishedLatest, rawPosition + 1 - publishedEarliest);
                 }
-
-                AddBound(rawPosition - publishedLatest, rawPosition + 1 - publishedEarliest);
+                _anchorPending = false;
                 _lastRawPosition = rawPosition;
                 _lastRawChangeElapsed = _playbackElapsed;
                 _rawStalled = false;
@@ -153,16 +213,35 @@ public sealed class PlaybackClock
             // Paused wall time must not consume the watchdog. A resume starts a fresh grace period.
             _lastRawChangeElapsed = _playbackElapsed;
             _rawStalled = false;
+            if (age is double resumedAge)
+            {
+                StartFromRestart(rawPosition, _playbackElapsed - resumedAge);
+            }
         }
         else
         {
             _rawStalled = wasStalled;
+            if (_anchorPending && playing && _playing && age is double republishedAge)
+            {
+                TryAnchor(rawPosition, _playbackElapsed - republishedAge);
+            }
         }
 
         // Do not converge phase while paused (including repeated pause polls) or after a stall.
         if (_playing && playing && !_rawStalled)
         {
             SlewOffset(advancingDelta);
+        }
+
+        var estimate = _playbackElapsed + _offset;
+        if (!playing && (estimate < rawPosition - PausedEarlySlackSeconds || estimate >= rawPosition + 1 + PausedLateSlackSeconds))
+        {
+            // A paused report states where playback stopped; an estimate outside its second is stale.
+            _boundCount = 0;
+            _boundStart = 0;
+            _anchorPending = false;
+            _burstUntil = double.NegativeInfinity;
+            _targetOffset = _offset = rawPosition - _playbackElapsed;
         }
         _playing = playing;
         _previousPollElapsed = _playbackElapsed;
@@ -198,13 +277,35 @@ public sealed class PlaybackClock
 
     private double CurrentSeconds => _timeProvider.GetElapsedTime(_startTimestamp).TotalSeconds;
 
-    private void Reseed(double rawPosition, bool playing, double? ageSeconds)
+    private void Reseed(double rawPosition, bool playing, double? ageSeconds, bool restart = false,
+        bool trackStart = false)
     {
         _boundCount = 0;
         _boundStart = 0;
+        _anchorPending = false;
+        _burstUntil = double.NegativeInfinity;
+        if (trackStart && playing && ageSeconds is double startAge && rawPosition < 0.5)
+        {
+            // The first report of a new track: playback starts about a second later.
+            var published = _playbackElapsed - startAge;
+            _lastRawPosition = rawPosition;
+            _lastRawChangeElapsed = _playbackElapsed;
+            _rawStalled = false;
+            AddBound(rawPosition + TrackStartEarliestSeconds - published, rawPosition + TrackStartLatestSeconds - published);
+            _offset = _targetOffset;
+            _burstUntil = published + TrackStartBurstSeconds;
+            return;
+        }
+
         _lastRawPosition = rawPosition;
         _lastRawChangeElapsed = _playbackElapsed;
         _rawStalled = false;
+        if (restart && playing && ageSeconds is double restartAge)
+        {
+            StartFromRestart(rawPosition, _playbackElapsed - restartAge);
+            return;
+        }
+
         if (playing && ageSeconds is double age)
         {
             // A timestamped report bounds the timeline from its very first observation.
@@ -218,6 +319,39 @@ public sealed class PlaybackClock
 
         // A seek or track change must land immediately; easing in would drag the old song's phase
         // across the boundary.
+        _offset = _targetOffset;
+    }
+
+    // A seek or resume report: playback is about a second short of it until the timer republishes it.
+    private void StartFromRestart(double rawPosition, double published)
+    {
+        _boundCount = 0;
+        _boundStart = 0;
+        _targetOffset = _offset = rawPosition - SeekLeadSeconds - published;
+        _anchorPending = true;
+        _anchorPublished = published;
+        _anchorValue = rawPosition;
+    }
+
+    private void TryAnchor(double rawPosition, double published)
+    {
+        var since = published - _anchorPublished;
+        if (since < AnchorTickMinSeconds)
+        {
+            // A seek can publish its target more than once as it settles; the last one is the
+            // instant the timer restarted.
+            if (since > 0.0005 && Math.Abs(rawPosition - _anchorValue) <= 0.0005)
+            {
+                StartFromRestart(rawPosition, published);
+            }
+            return;
+        }
+        _anchorPending = false;
+        if (since > AnchorTickMaxSeconds || Math.Abs(rawPosition - _anchorValue) > 0.0005) return;
+
+        AddBound(rawPosition - AnchorEarlySeconds - published, rawPosition + AnchorLateSeconds - published);
+        // Lyrics moved with the seek a moment ago; land on the pinned timeline now rather than
+        // easing across it for the next few seconds.
         _offset = _targetOffset;
     }
 

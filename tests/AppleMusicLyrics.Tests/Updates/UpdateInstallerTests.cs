@@ -73,15 +73,62 @@ public sealed class UpdateInstallerTests : IDisposable
     {
         var zip = CreateZip(("AppleMusicLyrics.App.exe", "new exe"), ("AppleMusicLyrics.Core.dll", "core"), ("Languages/en-US.json", "{}"));
         var installer = new UpdateInstaller(Path.Combine(_root, "updates"));
-        var progress = new List<double>();
+        var progress = new List<UpdateDownloadProgress>();
 
         var staging = await installer.DownloadAndStageAsync(Client(zip), Release(zip, Sha256(zip)),
             new SynchronousProgress(progress.Add));
 
         Assert.Equal("new exe", File.ReadAllText(Path.Combine(staging, "AppleMusicLyrics.App.exe")));
         Assert.True(File.Exists(Path.Combine(staging, "Languages", "en-US.json")));
-        Assert.Equal(1.0, progress[^1]);
+        Assert.Equal(1.0, progress[^1].Fraction);
         Assert.Empty(Directory.GetFiles(installer.UpdatesRoot, "*.part"));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DownloadAndStage_RetriesAStalledBodyOnceAndDiscardsPartialFiles(bool secondAttemptStalls)
+    {
+        var zip = CreateZip((UpdateInstaller.ExecutableName, "exe"));
+        var handler = new StreamingHandler(attempt => attempt == 1 || secondAttemptStalls
+            ? new StallAfterChunkStream(zip) : new MemoryStream(zip));
+        using var client = new HttpClient(handler);
+        var installer = new UpdateInstaller(Path.Combine(_root, "updates"), TimeSpan.FromMilliseconds(80));
+        var progress = new List<UpdateDownloadProgress>();
+        var release = Release(zip, Sha256(zip));
+
+        if (secondAttemptStalls)
+        {
+            var error = await Assert.ThrowsAsync<UpdateException>(() =>
+                installer.DownloadAndStageAsync(client, release, new SynchronousProgress(progress.Add)));
+            Assert.Equal(UpdateFailure.DownloadTimeout, error.Failure);
+            Assert.Empty(Directory.GetDirectories(installer.UpdatesRoot));
+        }
+        else
+        {
+            var staged = await installer.DownloadAndStageAsync(client, release, new SynchronousProgress(progress.Add));
+            Assert.Equal("exe", File.ReadAllText(Path.Combine(staged, UpdateInstaller.ExecutableName)));
+        }
+
+        Assert.Equal(2, handler.Attempts);
+        Assert.Single(progress, item => item.Retrying);
+        Assert.Empty(Directory.GetFiles(installer.UpdatesRoot, "*.part"));
+    }
+
+    [Fact]
+    public async Task DownloadAndStage_UserCancellationDoesNotRetry()
+    {
+        var zip = CreateZip((UpdateInstaller.ExecutableName, "exe"));
+        var handler = new StreamingHandler(_ => new StallAfterChunkStream(zip));
+        using var client = new HttpClient(handler);
+        using var cancellation = new CancellationTokenSource();
+        var installer = new UpdateInstaller(Path.Combine(_root, "updates"));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => installer.DownloadAndStageAsync(
+            client, Release(zip, Sha256(zip)), new SynchronousProgress(_ => cancellation.Cancel()), cancellation.Token));
+
+        Assert.Equal(1, handler.Attempts);
+        Assert.Empty(Directory.GetFileSystemEntries(installer.UpdatesRoot));
     }
 
     [Fact]
@@ -155,6 +202,94 @@ public sealed class UpdateInstallerTests : IDisposable
     }
 
     [Fact]
+    public void Apply_OnCopyFailure_RestoresReplacedFilesAndRemovesNewFiles()
+    {
+        var source = Directory.CreateDirectory(Path.Combine(_root, "staging")).FullName;
+        var target = Directory.CreateDirectory(Path.Combine(_root, "install")).FullName;
+        File.WriteAllText(Path.Combine(source, UpdateInstaller.ExecutableName), "new exe");
+        File.WriteAllText(Path.Combine(target, UpdateInstaller.ExecutableName), "old exe");
+        File.WriteAllText(Path.Combine(source, "a.txt"), "new data");
+        File.WriteAllText(Path.Combine(target, "a.txt"), "old data");
+        Directory.CreateDirectory(Path.Combine(source, "b", "sub"));
+        File.WriteAllText(Path.Combine(source, "b", "sub", "new.txt"), "new file");
+        Directory.CreateDirectory(Path.Combine(source, "z-blocked"));
+        File.WriteAllText(Path.Combine(source, "z-blocked", "other.txt"), "cannot copy");
+        File.WriteAllText(Path.Combine(target, "z-blocked"), "existing user file");
+        var log = new List<string>();
+
+        Assert.False(UpdateInstaller.Apply(source, target, 0, TimeSpan.Zero, log.Add,
+            () => throw new InvalidOperationException("The copy should have failed before launch.")));
+
+        Assert.Equal("old exe", File.ReadAllText(Path.Combine(target, UpdateInstaller.ExecutableName)));
+        Assert.Equal("old data", File.ReadAllText(Path.Combine(target, "a.txt")));
+        Assert.Equal("existing user file", File.ReadAllText(Path.Combine(target, "z-blocked")));
+        Assert.False(Directory.Exists(Path.Combine(target, "b")));
+        Assert.Empty(Directory.GetDirectories(_root, "rollback-*"));
+        Assert.Contains(log, message => message.StartsWith("Update failed:", StringComparison.Ordinal)
+            && message.Contains("z-blocked", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Apply_WhenTheUpdatedAppExits_RestoresTheOriginalExecutable()
+    {
+        var source = Directory.CreateDirectory(Path.Combine(_root, "staging")).FullName;
+        var target = Directory.CreateDirectory(Path.Combine(_root, "install")).FullName;
+        var executable = Path.Combine(target, UpdateInstaller.ExecutableName);
+        File.WriteAllText(Path.Combine(source, UpdateInstaller.ExecutableName), "new exe");
+        File.WriteAllText(executable, "old exe");
+        var startedWith = string.Empty;
+
+        Assert.False(UpdateInstaller.Apply(source, target, 0, TimeSpan.Zero, _ => { }, () =>
+        {
+            startedWith = File.ReadAllText(executable);
+            return false;
+        }));
+
+        Assert.Equal("new exe", startedWith);
+        Assert.Equal("old exe", File.ReadAllText(executable));
+    }
+
+    [Fact]
+    public void Apply_WhenAFileCannotBeRestored_KeepsItsBackupForRecovery()
+    {
+        var source = Directory.CreateDirectory(Path.Combine(_root, "staging")).FullName;
+        var target = Directory.CreateDirectory(Path.Combine(_root, "install")).FullName;
+        var executable = Path.Combine(target, UpdateInstaller.ExecutableName);
+        File.WriteAllText(Path.Combine(source, UpdateInstaller.ExecutableName), "new exe");
+        File.WriteAllText(executable, "old exe");
+        FileStream? inUse = null;
+
+        try
+        {
+            var error = Assert.Throws<UpdateRollbackException>(() =>
+                UpdateInstaller.Apply(source, target, 0, TimeSpan.Zero, _ => { }, () =>
+                {
+                    inUse = File.Open(executable, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    return false;
+                }));
+
+            Assert.Equal("old exe", File.ReadAllText(Path.Combine(error.BackupDirectory, UpdateInstaller.ExecutableName)));
+        }
+        finally
+        {
+            inUse?.Dispose();
+        }
+    }
+
+    [Fact]
+    public void Apply_LeavesTheInstallationAloneIfTheOldProcessDoesNotExit()
+    {
+        var source = Directory.CreateDirectory(Path.Combine(_root, "staging")).FullName;
+        var target = Directory.CreateDirectory(Path.Combine(_root, "install")).FullName;
+        File.WriteAllText(Path.Combine(source, UpdateInstaller.ExecutableName), "new");
+        var executable = Path.Combine(target, UpdateInstaller.ExecutableName);
+        File.WriteAllText(executable, "old");
+
+        Assert.False(UpdateInstaller.Apply(source, target, Environment.ProcessId, TimeSpan.Zero, _ => { }));
+        Assert.Equal("old", File.ReadAllText(executable));
+    }
+
+    [Fact]
     public void Apply_RefusesAFolderThatDoesNotContainTheApp()
     {
         var source = Directory.CreateDirectory(Path.Combine(_root, "staging")).FullName;
@@ -215,6 +350,7 @@ public sealed class UpdateInstallerTests : IDisposable
         var old = Directory.CreateDirectory(Path.Combine(installer.UpdatesRoot, "staging-0.8.0")).FullName;
         var oldHelper = Directory.CreateDirectory(Path.Combine(installer.UpdatesRoot, "helper-abc")).FullName;
         var running = Directory.CreateDirectory(Path.Combine(installer.UpdatesRoot, "staging-0.9.0")).FullName;
+        var recovery = Directory.CreateDirectory(Path.Combine(installer.UpdatesRoot, "rollback-abc")).FullName;
         File.WriteAllText(Path.Combine(installer.UpdatesRoot, "0.9.1.zip.part"), "partial");
 
         installer.CleanUp(running);
@@ -222,6 +358,7 @@ public sealed class UpdateInstallerTests : IDisposable
         Assert.False(Directory.Exists(old));
         Assert.False(Directory.Exists(oldHelper));
         Assert.True(Directory.Exists(running));
+        Assert.True(Directory.Exists(recovery));
         Assert.Empty(Directory.GetFiles(installer.UpdatesRoot, "*.part"));
     }
 
@@ -253,9 +390,27 @@ public sealed class UpdateInstallerTests : IDisposable
             Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(body) });
     }
 
-    // Progress<T> posts to a captured context; tests need the values immediately.
-    private sealed class SynchronousProgress(Action<double> report) : IProgress<double>
+    private sealed class StreamingHandler(Func<int, Stream> openStream) : HttpMessageHandler
     {
-        public void Report(double value) => report(value);
+        public int Attempts { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(openStream(++Attempts)) });
+    }
+
+    private sealed class StallAfterChunkStream(byte[] bytes) : MemoryStream(bytes)
+    {
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (Position == 0) return await base.ReadAsync(buffer[..Math.Min(8, buffer.Length)], cancellationToken);
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return 0;
+        }
+    }
+
+    // Progress<T> posts to a captured context; tests need the values immediately.
+    private sealed class SynchronousProgress(Action<UpdateDownloadProgress> report) : IProgress<UpdateDownloadProgress>
+    {
+        public void Report(UpdateDownloadProgress value) => report(value);
     }
 }

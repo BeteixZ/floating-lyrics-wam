@@ -89,10 +89,10 @@ When a song plays, the app picks the best lyrics it can find, in this order of p
 | 1 | Apple Music (cached) | Apple has the enabled features (word timing, translations) for most of the song |
 | 2 | NetEase Cloud Music | It covers clearly more of the song with those features, and is the same lyrics |
 | 3 | QQ Music | Same as NetEase, if NetEase has no better result |
-| 4 | Apple Music (cached) | Otherwise; missing features may be filled in from other sources on Apple's timeline |
+| 4 | Apple Music (cached) | A verified match has line timestamps. Other sources can fill gaps on that timeline |
 | 5 | LRCLIB | Nothing above is available |
 
-With word highlighting and translations both off, Apple's own lyrics are always used when present. Lyrics from NetEase or QQ only replace Apple's when they are verifiably the same lyrics, and are then aligned to Apple's line timing. The full rules, and exactly what each service receives, are in [Lyric sources, matching, and privacy](docs/lyric-sources.md).
+With word highlighting and translations both off, a verified Apple result with line timestamps takes priority. The app looks for synchronized online lyrics, including LRCLIB, when Apple only has untimed text. Lyrics from NetEase or QQ that replace a timed Apple result must match the same lyrics and are aligned to Apple's line timing. [Lyric sources, matching, and privacy](docs/lyric-sources.md)
 
 ## FAQ
 

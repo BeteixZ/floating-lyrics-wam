@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Diagnostics;
 using System.IO;
+using AppleMusicLyrics.App.Localization;
 using AppleMusicLyrics.App.Services;
 using AppleMusicLyrics.Infrastructure.Windows.Updates;
 
@@ -9,6 +10,7 @@ namespace AppleMusicLyrics.App;
 public partial class App : System.Windows.Application
 {
     private const string MutexName = "AppleMusicLyrics_App_SingleInstance_Mutex";
+    private const string UpdateMutexName = "AppleMusicLyrics_App_Update_Mutex";
 
     // Set in Properties when this launch follows an update, for the main window to report.
     internal const string UpdateOutcomeKey = "UpdateOutcome";
@@ -23,17 +25,33 @@ public partial class App : System.Windows.Application
         if (UpdateInstaller.TryParseApplyArguments(e.Args, out var stagingDirectory, out var installDirectory,
                 out var oldProcessId))
         {
-            ApplyStagedUpdate(stagingDirectory, installDirectory, oldProcessId);
+            using var updateMutex = SingleInstanceGuard.TryAcquire(UpdateMutexName);
+            if (updateMutex is not null)
+            {
+                try { ApplyStagedUpdate(stagingDirectory, installDirectory, oldProcessId); }
+                finally { updateMutex.ReleaseMutex(); }
+            }
             Shutdown();
             return;
         }
 
-        if (e.Args.Contains(UpdateInstaller.UpdatedArgument))
+        var updated = e.Args.Contains(UpdateInstaller.UpdatedArgument);
+        var updateFailed = e.Args.Contains(UpdateFailedArgument);
+        if (updated)
             Current.Properties[UpdateOutcomeKey] = UpdateOutcomeInstalled;
-        else if (e.Args.Contains(UpdateFailedArgument))
+        else if (updateFailed)
             Current.Properties[UpdateOutcomeKey] = UpdateOutcomeFailed;
 
-        var mutex = SingleInstanceGuard.TryAcquire(MutexName);
+        using var updateGate = updated || updateFailed ? null : SingleInstanceGuard.TryAcquire(UpdateMutexName);
+        if (!updated && !updateFailed && updateGate is null)
+        {
+            Shutdown();
+            return;
+        }
+
+        Mutex? mutex;
+        try { mutex = SingleInstanceGuard.TryAcquire(MutexName); }
+        finally { updateGate?.ReleaseMutex(); }
         if (mutex is null)
         {
             // Another instance is already running
@@ -44,14 +62,15 @@ public partial class App : System.Windows.Application
         // Keep mutex alive for the lifetime of the app
         Current.Properties["SingleInstanceMutex"] = mutex;
 
+        StartupUri = new Uri("MainWindow.xaml", UriKind.Relative);
         base.OnStartup(e);
     }
 
-    // Runs from the helper folder: copy the staged new version over the install folder, then start it.
+    // Runs from the helper folder. The updated app must remain running through the startup check.
     private static void ApplyStagedUpdate(string stagingDirectory, string installDirectory, int oldProcessId)
     {
-        var updatesRoot = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppleMusicLyrics", "updates");
+        var stagingPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(stagingDirectory));
+        var updatesRoot = Path.GetDirectoryName(stagingPath) ?? stagingPath;
         void Log(string message)
         {
             try
@@ -65,32 +84,53 @@ public partial class App : System.Windows.Application
             }
         }
 
-        bool installed;
-        try
+        var executable = Path.Combine(installDirectory, UpdateInstaller.ExecutableName);
+        Process StartApp(string argument) => Process.Start(new ProcessStartInfo(executable)
         {
-            installed = UpdateInstaller.Apply(stagingDirectory, installDirectory, oldProcessId,
-                TimeSpan.FromSeconds(60), Log);
-        }
-        catch (Exception error)
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = installDirectory,
+            ArgumentList = { argument },
+        }) ?? throw new InvalidOperationException("No process was started.");
+
+        bool StartUpdatedApp()
         {
-            Log($"Update failed: {error.GetType().Name}.");
-            installed = false;
+            using var process = StartApp(UpdateInstaller.UpdatedArgument);
+            return !process.WaitForExit(TimeSpan.FromSeconds(4));
         }
 
-        var executable = Path.Combine(installDirectory, UpdateInstaller.ExecutableName);
-        if (!File.Exists(executable)) return;
+        var logPath = Path.Combine(updatesRoot, "update.log");
+        void ReportFailure(string key, string path)
+        {
+            var text = new LocalizationManager(Path.Combine(installDirectory, "Languages"));
+            System.Windows.MessageBox.Show(text.Format(key, path), text.Text("Update.Balloon.Failed.Title"),
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+
         try
         {
-            using var _ = Process.Start(new ProcessStartInfo(executable)
-            {
-                UseShellExecute = false,
-                WorkingDirectory = installDirectory,
-                ArgumentList = { installed ? UpdateInstaller.UpdatedArgument : UpdateFailedArgument },
-            });
+            if (UpdateInstaller.Apply(stagingDirectory, installDirectory, oldProcessId,
+                    TimeSpan.FromSeconds(60), Log, StartUpdatedApp)) return;
+        }
+        catch (UpdateRollbackException error)
+        {
+            Log(error.Message);
+            ReportFailure("Update.Status.RollbackFailed", error.BackupDirectory);
+            return;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            Log($"Could not apply the update: {error.Message}");
+        }
+
+        try
+        {
+            using var process = StartApp(UpdateFailedArgument);
         }
         catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException)
         {
-            Log($"Could not restart the app: {error.GetType().Name}.");
+            Log($"Could not restart the previous app: {error.Message}");
+            ReportFailure("Update.Status.RestartFailed", logPath);
         }
     }
 

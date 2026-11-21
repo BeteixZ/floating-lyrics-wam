@@ -7,16 +7,23 @@ namespace AppleMusicLyrics.Application.Services;
 
 public sealed partial class LyricsRuntimeService
 {
+    private LyricsChoice? _rememberedLyrics;
+
+    public ISongLyricsChoiceStore? SongLyricsChoices { get; init; }
+
     public bool RequestLyricsRefresh(int trackGeneration) => QueueLyricsRequest(new(trackGeneration, Refresh: true));
 
-    public bool RequestLyricsSelection(int trackGeneration, LyricsChoice? choice) =>
+    public bool RequestLyricsSelection(int trackGeneration, LyricsChoice? choice, bool remember = false) =>
         (choice is null || choice.Document.Lines.Count > 0)
-        && QueueLyricsRequest(new(trackGeneration, Choice: choice));
+        && QueueLyricsRequest(new(trackGeneration, Choice: choice, Remember: remember));
 
     private bool QueueLyricsRequest(LyricsRequest request)
     {
         var snapshot = Volatile.Read(ref _frameBasis).Snapshot;
-        if (_disposed || !snapshot.CanManageLyrics || snapshot.TrackGeneration != request.TrackGeneration) return false;
+        if (_disposed || !snapshot.CanManageLyrics || snapshot.TrackGeneration != request.TrackGeneration
+            || snapshot.Player is not { } player) return false;
+        if (!request.Refresh && (request.Remember || request.Choice is null))
+            SongLyricsChoices?.Save(player, request.Choice);
         Interlocked.Exchange(ref _pendingLyricsRequest, request);
         return true;
     }
@@ -30,6 +37,13 @@ public sealed partial class LyricsRuntimeService
         if (!request.Refresh)
         {
             _manualLyrics = request.Choice;
+            if (request.Remember || request.Choice is null)
+                _rememberedLyrics = SongLyricsChoices is null ? null : request.Choice;
+            if (_manualLyrics is not null)
+            {
+                CancelExternalFetch(preserveDocument: true);
+                ResetEnrichmentLookup();
+            }
             return;
         }
 
@@ -66,7 +80,8 @@ public sealed partial class LyricsRuntimeService
         if (!target.CanManageLyrics || target.Player is not { } player) return new([], 0);
 
         var apple = SearchAppleChoicesAsync(player, refresh, cancellationToken);
-        var searches = ExternalLyricsProviders.Select(provider => SearchExternalChoiceAsync(provider, player, refresh, cancellationToken));
+        var searches = LookupQueries(player).SelectMany(query => ExternalLyricsProviders
+            .Select(provider => SearchExternalChoiceAsync(provider, query, refresh, cancellationToken)));
         var results = await Task.WhenAll(searches.Prepend(apple)).ConfigureAwait(false);
         var choices = results.SelectMany(result => result.Choices);
         if (target.Document is { Lines.Count: > 0 } current)
@@ -133,5 +148,5 @@ public sealed partial class LyricsRuntimeService
         bool refresh, CancellationToken token) =>
         refresh ? provider.FetchFreshAsync(player, token) : provider.FetchAsync(player, token);
 
-    private sealed record LyricsRequest(int TrackGeneration, bool Refresh = false, LyricsChoice? Choice = null);
+    private sealed record LyricsRequest(int TrackGeneration, bool Refresh = false, LyricsChoice? Choice = null, bool Remember = false);
 }

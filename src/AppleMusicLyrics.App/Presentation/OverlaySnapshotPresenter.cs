@@ -106,7 +106,8 @@ public static class OverlaySnapshotPresenter
             // Keep the secondary slot empty rather than duplicating that same first line.
             snapshot.ActiveLyric.CurrentLine is null ? string.Empty : snapshot.ActiveLyric.NextLine?.Text ?? string.Empty,
             snapshot.Player?.Playing ?? false,
-            Animate: snapshot.ActiveLyric.CurrentLine is not null,
+            // Also crossfade from a finished line into an interlude; only the prelude appears at once.
+            Animate: snapshot.ActiveLyric.CurrentLine is not null || snapshot.ActiveLyric.PreviousLine is not null,
             DisplayedLine: displayedLine,
             TranslationText: LyricsTranslationFilter.Clean(displayedLine?.Translation),
             RomanizationText: LyricRomanization.Resolve(snapshot.Document, displayedLine, showRomanization),

@@ -28,6 +28,7 @@ public sealed class LyricLineView(TextBlock lyric, StackPanel background, TextBl
         BindBackground(line?.BackgroundVocals, highlight, sung, upcoming);
         SetAuxiliaryText(romanization, reading);
         SetAuxiliaryText(translation, LyricsTranslationFilter.Clean(translatedText));
+        UpdateAuxiliaryMargins();
     }
 
     public void UpdateHighlight(double position)
@@ -52,6 +53,25 @@ public sealed class LyricLineView(TextBlock lyric, StackPanel background, TextBl
         foreach (var row in _backgroundRows) SetRowSize(row.Text, GetBackgroundFontSize(lyricSize), 1.25);
         SetRowSize(romanization, translationSize, 1.35);
         SetRowSize(translation, translationSize, 1.35);
+        UpdateAuxiliaryMargins();
+    }
+
+    private const double AuxiliaryBottomMargin = 4;
+
+    /// <summary>
+    /// Space above a translation directly under the lyric. Fonts with tight line spacing put the
+    /// lyric's descenders at the very bottom of its box. Romanization needs none: it only follows
+    /// kana and kanji, which have no descenders, and the rows below the lyric stay together.
+    /// </summary>
+    public static double GetAuxiliaryGap(double translationSize) => Math.Round(translationSize * 0.2);
+
+    private void UpdateAuxiliaryMargins()
+    {
+        var plain = new Thickness(0, 0, 0, AuxiliaryBottomMargin);
+        romanization.Margin = plain;
+        translation.Margin = romanization.Visibility == Visibility.Visible
+            ? plain
+            : new Thickness(0, GetAuxiliaryGap(translation.FontSize), 0, AuxiliaryBottomMargin);
     }
 
     public void SetMaxWidth(double width)

@@ -11,6 +11,7 @@ public sealed record RuntimeSnapshot(
 {
     public int TrackGeneration { get; init; }
     public bool IsManualSelection { get; init; }
+    public bool HasRememberedLyrics { get; init; }
     public bool CanManageLyrics => Player is { Duration: > 0 } player && double.IsFinite(player.Duration)
         && !string.IsNullOrWhiteSpace(player.Title);
 }

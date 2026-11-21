@@ -42,7 +42,7 @@ public static class AppCompositionRoot
             // The unified cache owns the full disk quota. Leave any legacy lrclib-cache.json
             // untouched; do not also enable LRCLIB's private persistent cache.
             // Query order is selection priority: NetEase Cloud Music, QQ Music, then LRCLIB.
-            // LRCLIB never outranks Apple Music's own lyrics; it only fills gaps.
+            // Untimed Apple lyrics fall through to the synchronized online sources, including LRCLIB.
             ? [new NetEaseLyricsProvider(settings.ExternalLyricsTimeoutSeconds),
                 new QQMusicLyricsProvider(settings.ExternalLyricsTimeoutSeconds),
                 new LrcLibLyricsProvider(timeoutSeconds: settings.ExternalLyricsTimeoutSeconds)]
@@ -60,6 +60,7 @@ public static class AppCompositionRoot
             ApplyNativeLyricOffset = settings.ApplyNativeLyricOffset,
             PerSongOffsetEnabled = settings.PerSongOffsetEnabled,
             SongOffsets = new SongOffsetStore(GetWritableDataPath("song-offsets.json")),
+            SongLyricsChoices = new SongLyricsChoiceStore(GetWritableDataPath("song-lyrics-choices")),
             AllowLowConfidenceLyrics = settings.AllowLowConfidenceLyrics,
             PreferWordTimings = settings.WordHighlightEnabled,
             PreferTranslations = settings.ShowTranslation,

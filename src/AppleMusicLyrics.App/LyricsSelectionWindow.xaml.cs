@@ -1,3 +1,4 @@
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using AppleMusicLyrics.App.Localization;
@@ -47,10 +48,11 @@ public partial class LyricsSelectionWindow : Window
             _lifetime.Cancel();
             SearchStatusText.Text = _text.Text("Lyrics.Selection.TrackChanged");
             ChoicesList.IsEnabled = RetryButton.IsEnabled = AutomaticButton.IsEnabled = UseButton.IsEnabled = false;
+            RememberChoiceCheckBox.IsEnabled = false;
         }
         else
         {
-            AutomaticButton.IsEnabled = snapshot.CanManageLyrics && snapshot.IsManualSelection;
+            AutomaticButton.IsEnabled = snapshot.CanManageLyrics && (snapshot.IsManualSelection || snapshot.HasRememberedLyrics);
             UseButton.IsEnabled = snapshot.CanManageLyrics && ChoicesList.SelectedItem is ChoiceRow;
         }
     }
@@ -137,8 +139,15 @@ public partial class LyricsSelectionWindow : Window
     private void SelectLyrics(LyricsChoice? choice)
     {
         if (_trackChanged || _closed) return;
-        if (_runtime.RequestLyricsSelection(TrackGeneration, choice)) Close();
-        else ObserveTrack(_runtime.GetFrameSnapshot());
+        try
+        {
+            if (_runtime.RequestLyricsSelection(TrackGeneration, choice, RememberChoiceCheckBox.IsChecked == true)) Close();
+            else ObserveTrack(_runtime.GetFrameSnapshot());
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            SearchStatusText.Text = _text.Text("Lyrics.Selection.SaveFailed");
+        }
     }
 
     private void CloseButton_OnClick(object sender, RoutedEventArgs e) => Close();

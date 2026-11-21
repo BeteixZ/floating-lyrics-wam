@@ -6,6 +6,7 @@ using AppleMusicLyrics.Core.Parsing;
 using AppleMusicLyrics.Core.Sync;
 using AppleMusicLyrics.Infrastructure.Windows.Cache;
 using AppleMusicLyrics.Infrastructure.Windows.Catalog;
+using AppleMusicLyrics.Infrastructure.Windows.Configuration;
 using Xunit;
 
 namespace AppleMusicLyrics.Tests.Services;
@@ -37,6 +38,96 @@ public sealed class LyricsRuntimeServiceTests
         Assert.False(next.IsManualSelection);
         Assert.NotSame(manual, next.Document);
         Assert.False(runtime.RequestLyricsSelection(start.TrackGeneration, choice));
+    }
+
+    [Fact]
+    public async Task RememberedLyrics_SurviveRestartAndApplyOnlyToTheChosenRecording()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "aml-song-choices-" + Guid.NewGuid().ToString("N"));
+        var automatic = BuildDocument("AP_auto", 180, "automatic lyrics");
+        var manual = BuildDocument("QQ_manual", 180, "chosen lyrics", begin: 1);
+        var track = new PlayerState("Song", "Artist", "Album", 2, 180, false);
+        var player = new MutableEnrichmentPlayer(track);
+        LyricsRuntimeService CreateRuntime() => new(new StubLyricsProvider(automatic), player, new LyricsSynchronizer())
+        {
+            SongLyricsChoices = new SongLyricsChoiceStore(directory),
+        };
+
+        try
+        {
+            await using (var first = CreateRuntime())
+            {
+                var snapshot = await first.SnapshotAsync();
+                Assert.True(first.RequestLyricsSelection(snapshot.TrackGeneration,
+                    new LyricsChoice(manual, LyricsResolutionSource.ExternalProvider, "QQ Music"), remember: true));
+                Assert.True((await first.SnapshotAsync()).HasRememberedLyrics);
+            }
+
+            await using (var restarted = CreateRuntime())
+            {
+                player.State = track with { Duration = 180.4 };
+                var restored = await restarted.SnapshotAsync();
+                Assert.True(restored.IsManualSelection);
+                Assert.Equal(manual.LyricsId, restored.Document?.LyricsId);
+                Assert.Equal(manual.Lines[0].Begin, restored.ActiveLyric.CurrentLine?.Begin);
+
+                player.State = track with { Duration = 185 };
+                var otherRecording = await restarted.SnapshotAsync();
+                Assert.False(otherRecording.IsManualSelection);
+                Assert.True(restarted.RequestLyricsSelection(otherRecording.TrackGeneration,
+                    new LyricsChoice(manual, LyricsResolutionSource.ExternalProvider), remember: false));
+                Assert.True((await restarted.SnapshotAsync()).IsManualSelection);
+                Assert.Null(new SongLyricsChoiceStore(directory).Load(player.State));
+                player.State = track with { Album = "Other edition" };
+                Assert.False((await restarted.SnapshotAsync()).IsManualSelection);
+
+                player.State = track;
+                var original = await restarted.SnapshotAsync();
+                Assert.True(original.IsManualSelection);
+                Assert.True(restarted.RequestLyricsSelection(original.TrackGeneration, null));
+                Assert.False((await restarted.SnapshotAsync()).HasRememberedLyrics);
+            }
+
+            await using var cleared = CreateRuntime();
+            Assert.Same(automatic, (await cleared.SnapshotAsync()).Document);
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    // Two recordings with the same metadata, 1.6 s apart: a report between them that is within a
+    // second of both must change only the choice it loads, never the other recording's.
+    [Fact]
+    public void RememberedLyrics_ClearingOrReplacingOneRecordingKeepsANearbyRecordingsChoice()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "aml-song-choices-" + Guid.NewGuid().ToString("N"));
+        var track = new PlayerState("Song", "Artist", "Album", 2, 180.0, false);
+        var shorter = new LyricsChoice(BuildDocument("QQ_short", 180, "shorter"), LyricsResolutionSource.ExternalProvider);
+        var longer = new LyricsChoice(BuildDocument("QQ_long", 182, "longer"), LyricsResolutionSource.ExternalProvider);
+        var replacement = new LyricsChoice(BuildDocument("QQ_new", 180, "replacement"), LyricsResolutionSource.ExternalProvider);
+        var store = new SongLyricsChoiceStore(directory);
+        string? LoadedId(double duration) => store.Load(track with { Duration = duration })?.Document.LyricsId;
+
+        try
+        {
+            store.Save(track, shorter);
+            store.Save(track with { Duration = 181.6 }, longer);
+            Assert.Equal("QQ_short", LoadedId(180.7));
+
+            store.Save(track with { Duration = 180.7 }, replacement);
+            Assert.Equal("QQ_new", LoadedId(180.0));
+            Assert.Equal("QQ_long", LoadedId(181.6));
+
+            store.Save(track with { Duration = 180.7 }, null);
+            Assert.Null(LoadedId(180.0));
+            Assert.Equal("QQ_long", LoadedId(181.6));
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
@@ -1736,6 +1827,61 @@ public sealed class LyricsRuntimeServiceTests
     }
 
     [Fact]
+    public async Task ExternalLookup_FallsBackToTheOriginalAlbumForAReissue()
+    {
+        const string reissue = "Album: 25th Anniversary Expanded Edition";
+        var player = new MutableEnrichmentPlayer(new PlayerState("Song", "Artist", reissue, 1, 180, true));
+        var albums = new System.Collections.Concurrent.ConcurrentQueue<string?>();
+        var provider = new DelegateEnrichmentProvider("Platform", (state, _) =>
+        {
+            albums.Enqueue(state.Album);
+            return Task.FromResult<LyricsDocument?>(state.Album switch
+            {
+                reissue => RichDocument("NE_reissue", translation: true),
+                "Album" => RichDocument("NE_original", words: true, translation: true),
+                _ => null,
+            });
+        });
+        await using var runtime = EnrichmentRuntime(RichDocument("unused"), [provider], words: true, translation: true,
+            lyricsProvider: new CandidateLyricsProvider([]), playerProvider: player);
+
+        var snapshot = await WaitForSnapshotAsync(runtime, snapshot => snapshot.Document?.LyricsId == "NE_original");
+
+        Assert.True(HasRuntimeFeatures(snapshot, words: true, translation: true));
+        Assert.Contains(reissue, albums);
+        Assert.Contains("Album", albums);
+        Assert.DoesNotContain(albums, album => album is not (reissue or "Album"));
+    }
+
+    [Fact]
+    public async Task ExternalLookup_SearchesTheOriginalAlbumWhenTheReissueHasNoLyrics()
+    {
+        var player = new MutableEnrichmentPlayer(new PlayerState("Song", "Artist", "Album (Deluxe)", 1, 180, true));
+        var provider = new DelegateEnrichmentProvider("Platform", (state, _) =>
+            Task.FromResult<LyricsDocument?>(state.Album == "Album" ? RichDocument("NE_original") : null));
+        await using var runtime = EnrichmentRuntime(RichDocument("unused"), [provider],
+            lyricsProvider: new CandidateLyricsProvider([]), playerProvider: player);
+
+        var snapshot = await WaitForSnapshotAsync(runtime, snapshot => snapshot.Document is not null);
+
+        Assert.Equal("NE_original", snapshot.Document!.LyricsId);
+    }
+
+    [Fact]
+    public async Task ExternalLookup_DoesNotRepeatTheSearchForAnOriginalAlbum()
+    {
+        var player = new MutableEnrichmentPlayer(new PlayerState("Song", "Artist", "Love Deluxe", 1, 180, true));
+        var provider = new DelegateEnrichmentProvider("Platform", (_, _) => Task.FromResult<LyricsDocument?>(null));
+        await using var runtime = EnrichmentRuntime(RichDocument("unused"), [provider],
+            lyricsProvider: new CandidateLyricsProvider([]), playerProvider: player);
+
+        await WaitForSnapshotAsync(runtime,
+            snapshot => snapshot.ExternalDiagnostics?.FallbackState == ExternalLyricsQueryState.Completed);
+
+        Assert.Equal(1, provider.CallCount);
+    }
+
+    [Fact]
     public async Task SnapshotAsync_DiscardsCanceledEnrichmentAfterTheTrackChanges()
     {
         var oldLocal = RichDocument("AP_old");
@@ -2027,7 +2173,7 @@ public sealed class LyricsRuntimeServiceTests
     }
 
     [Fact]
-    public async Task SnapshotAsync_SongChangeAppliesSavedPerSongOffset()
+    public async Task SnapshotAsync_SongChangeAppliesSavedPerSongOffsetAndResetsForUncalibratedTrack()
     {
         var offsets = new MemorySongOffsetStore();
         offsets.RememberOffset("Artist", "Song B", 1.25);
@@ -2036,6 +2182,7 @@ public sealed class LyricsRuntimeServiceTests
             new SequencePlayerProvider([
                 new PlayerState("Song A", "Artist", null, 0.0, 180, true),
                 new PlayerState("Song B", "Artist", null, 0.0, 180, true),
+                new PlayerState("Song C", "Artist", null, 0.0, 180, true),
             ]),
             new LyricsSynchronizer(),
             new PlaybackClock(),
@@ -2050,15 +2197,19 @@ public sealed class LyricsRuntimeServiceTests
 
         await runtime.SnapshotAsync();
         Assert.Equal(1.25, runtime.LyricsOffsetSeconds);
+
+        await runtime.SnapshotAsync();
+        Assert.Equal(0.78, runtime.LyricsOffsetSeconds);
     }
 
     [Fact]
-    public async Task RememberCurrentOffset_PersistsCalibrationForPlayingSong()
+    public async Task SetSongOffset_UpdatesTheTargetSongWithoutChangingTheDefault()
     {
         var offsets = new MemorySongOffsetStore();
+        var player = new PlayerState("Song", "Artist", null, 0.0, 180, true);
         await using var runtime = new LyricsRuntimeService(
             new StubLyricsProvider(BuildDocument("remember", 180, "line")),
-            new StubPlayerProvider(new PlayerState("Song", "Artist", null, 0.0, 180, true)),
+            new StubPlayerProvider(player),
             new LyricsSynchronizer(),
             new PlaybackClock(),
             lyricsOffsetSeconds: 0.78)
@@ -2068,10 +2219,16 @@ public sealed class LyricsRuntimeServiceTests
         };
 
         await runtime.SnapshotAsync();
-        runtime.LyricsOffsetSeconds = 1.1;
-        runtime.RememberCurrentOffset();
+        runtime.SetSongOffset(player with { Title = "Other song" }, 1.25);
+        await runtime.SnapshotAsync();
+        Assert.Equal(0.78, runtime.LyricsOffsetSeconds);
+
+        runtime.SetSongOffset(player, 1.1);
+        await runtime.SnapshotAsync();
 
         Assert.Equal(1.1, offsets.TryGetOffset("Artist", "Song"));
+        Assert.Equal(1.1, runtime.LyricsOffsetSeconds);
+        Assert.Equal(0.78, runtime.GlobalLyricsOffsetSeconds);
     }
 
     [Fact]
@@ -2093,7 +2250,8 @@ public sealed class LyricsRuntimeServiceTests
         await runtime.SnapshotAsync();
         Assert.Equal(0.78, runtime.LyricsOffsetSeconds);
 
-        runtime.RememberCurrentOffset();
+        runtime.PerSongOffsetEnabled = true;
+        Assert.Equal(1.25, runtime.LyricsOffsetSeconds);
         Assert.Equal(1.25, offsets.TryGetOffset("Artist", "Song"));
     }
 

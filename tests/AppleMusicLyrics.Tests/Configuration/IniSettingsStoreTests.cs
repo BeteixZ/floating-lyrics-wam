@@ -15,18 +15,23 @@ public sealed class IniSettingsStoreTests : IDisposable
         Directory.CreateDirectory(_root);
     }
 
-    [Fact]
-    public void Load_LegacySettingsUseLanguageAndUnifiedCacheDefaults()
+    [Theory]
+    [InlineData(null, true)]
+    [InlineData("true", true)]
+    [InlineData("false", false)]
+    public void Load_UsesUnifiedCacheDefaultsUnlessExplicitlyConfigured(string? savedValue, bool enabled)
     {
         var path = Path.Combine(_root, "legacy-cache-language.ini");
-        File.WriteAllLines(path, ["[apple_music_lyrics]", "PersistExternalLyricsCache=true"]);
-        var loaded = new IniSettingsStore(path).Load();
-        Assert.Equal("system", new AppSettings().UiLanguage);
-        Assert.Equal(64, new AppSettings().ExternalLyricsCacheMaxMegabytes);
-        Assert.False(new AppSettings().PersistExternalLyricsCache);
+        var store = new IniSettingsStore(path);
+        Assert.True(store.Load().PersistExternalLyricsCache);
+
+        File.WriteAllLines(path, savedValue is null
+            ? ["[apple_music_lyrics]"]
+            : ["[apple_music_lyrics]", $"PersistExternalLyricsCache={savedValue}"]);
+        var loaded = store.Load();
         Assert.Equal("system", loaded.UiLanguage);
         Assert.Equal(64, loaded.ExternalLyricsCacheMaxMegabytes);
-        Assert.True(loaded.PersistExternalLyricsCache);
+        Assert.Equal(enabled, loaded.PersistExternalLyricsCache);
     }
 
     [Fact]
@@ -89,6 +94,23 @@ public sealed class IniSettingsStoreTests : IDisposable
         var loaded = store.Load().Clone();
         Assert.False(loaded.WordHighlightEnabled);
         Assert.False(loaded.ShowTranslation);
+    }
+
+    [Fact]
+    public void Load_PrePlacementFileKeepsItsAbsolutePositionButAFreshFileUsesTheDefaultAnchor()
+    {
+        var path = Path.Combine(_root, "legacy-placement.ini");
+        File.WriteAllLines(path, ["[apple_music_lyrics]", "WindowX=486", "WindowY=1016", "PureModeWindowX=1030",
+            "PureModeWindowY=1068"]);
+        var legacy = new IniSettingsStore(path).Load();
+        Assert.Equal(-1.0, legacy.WindowRelativeCenterX);
+        Assert.Equal(-1.0, legacy.PureModeRelativeCenterY);
+        Assert.Equal(1030, legacy.PureModeWindowX);
+
+        File.WriteAllLines(path, ["[apple_music_lyrics]", "FontFamily=Optima"]);
+        var fresh = new IniSettingsStore(path).Load();
+        Assert.Equal(AppSettings.DefaultRelativeCenterX, fresh.WindowRelativeCenterX);
+        Assert.Equal(AppSettings.DefaultRelativeCenterY, fresh.PureModeRelativeCenterY);
     }
 
     [Fact]
@@ -400,7 +422,7 @@ public sealed class IniSettingsStoreTests : IDisposable
             CatalogLookupTimeoutSeconds = 4.5,
             ExternalLyricsEnabled = false,
             ExternalLyricsTimeoutSeconds = 8.5,
-            PersistExternalLyricsCache = true,
+            PersistExternalLyricsCache = false,
         };
 
         store.Save(settings);
@@ -412,8 +434,7 @@ public sealed class IniSettingsStoreTests : IDisposable
         Assert.Equal(4.5, clone.CatalogLookupTimeoutSeconds);
         Assert.False(clone.ExternalLyricsEnabled);
         Assert.Equal(8.5, clone.ExternalLyricsTimeoutSeconds);
-        Assert.True(clone.PersistExternalLyricsCache);
-        Assert.False(new AppSettings().PersistExternalLyricsCache);
+        Assert.False(clone.PersistExternalLyricsCache);
         Assert.Empty(Directory.GetFiles(_root, "*.tmp"));
     }
 

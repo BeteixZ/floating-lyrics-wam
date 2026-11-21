@@ -78,16 +78,27 @@ public sealed class KaraokeTextController
             {
                 timedIndex++;
                 var brush = CreateWordBrush();
-                var strength = emphasize ? GetEmphasisStrength(segment.Word, timedIndex, timedCount) : 0;
-                if (strength > 0 && SplitPadding(segment.Text) is { } parts)
+                if (emphasize && SplitPadding(segment.Text) is { } parts)
                 {
-                    // A held syllable is hosted on its own element so it can grow and glow
-                    // without reflowing the line; surrounding spaces stay ordinary text.
+                    // As in Apple Music, each sung word floats up a little with a soft-edged
+                    // wipe, and a held syllable also swells and glows letter by letter. Such
+                    // words are hosted on their own elements so they can move without
+                    // reflowing the line; surrounding spaces stay ordinary text.
                     if (parts.Lead.Length > 0) _target.Inlines.Add(new Run(parts.Lead));
-                    var emphasis = new WordEmphasis(parts.Core, brush, _sung, strength);
-                    _target.Inlines.Add(emphasis.Container);
+                    var strength = GetEmphasisStrength(segment.Word, timedIndex, timedCount);
+                    if (strength > 0)
+                    {
+                        var emphasis = new WordEmphasis(parts.Core, _sung, _upcoming, strength);
+                        _target.Inlines.Add(emphasis.Container);
+                        _timedRuns.Add(new TimedRun(segment.Word, brush) { Emphasis = emphasis });
+                    }
+                    else
+                    {
+                        var lift = new WordLift(parts.Core, brush);
+                        _target.Inlines.Add(lift.Container);
+                        _timedRuns.Add(new TimedRun(segment.Word, brush) { Lift = lift, Feather = WipeFeather });
+                    }
                     if (parts.Trail.Length > 0) _target.Inlines.Add(new Run(parts.Trail));
-                    _timedRuns.Add(new TimedRun(segment.Word, brush) { Emphasis = emphasis });
                     continue;
                 }
 
@@ -114,7 +125,7 @@ public sealed class KaraokeTextController
             timed.Brush.GradientStops[1].Color = sung;
             timed.Brush.GradientStops[2].Color = upcoming;
             timed.Brush.GradientStops[3].Color = upcoming;
-            timed.Emphasis?.SetGlowColor(sung);
+            timed.Emphasis?.SetColors(sung, upcoming);
         }
     }
 
@@ -130,13 +141,13 @@ public sealed class KaraokeTextController
         foreach (var timed in _timedRuns)
         {
             timed.Emphasis?.Update(timed.Word, lyricPosition);
+            timed.Lift?.Update(timed.Word, lyricPosition);
             var progress = LyricsTiming.GetWordProgress(timed.Word, lyricPosition);
             if (progress == timed.Progress)
             {
                 continue;
             }
-            timed.Brush.GradientStops[1].Offset = progress;
-            timed.Brush.GradientStops[2].Offset = progress;
+            SetWipe(timed.Brush, progress, timed.Feather);
             timed.Progress = progress;
         }
     }
@@ -231,6 +242,79 @@ public sealed class KaraokeTextController
         return Math.Clamp(0.4 + (duration - threshold) / 1.2, 0.4, 1.0);
     }
 
+    // How far a sung word floats up, in ems, and how long it takes to get there.
+    private const double SungLift = 0.045;
+    private const double SungRiseSeconds = 0.45;
+    // The soft edge of a word's wipe, as a fraction of the word's width.
+    private const double WipeFeather = 0.12;
+
+    /// <summary>
+    /// Moves the wipe of <paramref name="brush"/> to <paramref name="progress"/>. With a feather,
+    /// a soft edge travels across the text, starting and ending fully outside it.
+    /// </summary>
+    private static void SetWipe(LinearGradientBrush brush, double progress, double feather)
+    {
+        var center = progress * (1 + 2 * feather) - feather;
+        brush.GradientStops[1].Offset = center - feather;
+        brush.GradientStops[2].Offset = center + feather;
+    }
+
+    // 0 before the word starts, easing to 1 shortly after; sung words stay up with the line.
+    private static double Rise(double position, double start) =>
+        position <= start ? 0 : SmoothStep((position - start) / SungRiseSeconds);
+
+    private static double SmoothStep(double value)
+    {
+        var t = Math.Clamp(value, 0, 1);
+        return t * t * (3 - 2 * t);
+    }
+
+    /// <summary>
+    /// An inline element sits with its bottom on the text baseline. Pulling its descent below
+    /// keeps the word's own baseline on the line's.
+    /// </summary>
+    private sealed class BaselineAligner
+    {
+        private double _fontSize = double.NaN;
+        private System.Windows.Media.FontFamily? _family;
+
+        public void Apply(FrameworkElement element)
+        {
+            var size = (double)element.GetValue(TextElement.FontSizeProperty);
+            var family = (System.Windows.Media.FontFamily)element.GetValue(TextElement.FontFamilyProperty);
+            if (size == _fontSize && ReferenceEquals(family, _family)) return;
+            _fontSize = size;
+            _family = family;
+            element.Margin = new Thickness(0, 0, 0, -Math.Max(0, size * (family.LineSpacing - family.Baseline)));
+        }
+    }
+
+    /// <summary>An ordinary sung word: a soft-edged wipe, floating up a little as it is sung.</summary>
+    private sealed class WordLift
+    {
+        private readonly TextBlock _text;
+        private readonly TranslateTransform _lift = new();
+        private readonly BaselineAligner _baseline = new();
+        private double _rise = -1;
+
+        public WordLift(string text, System.Windows.Media.Brush foreground)
+        {
+            _text = new TextBlock { Text = text, Foreground = foreground, RenderTransform = _lift };
+            Container = new InlineUIContainer(_text) { BaselineAlignment = BaselineAlignment.Baseline };
+        }
+
+        public InlineUIContainer Container { get; }
+
+        public void Update(LyricWord word, double position)
+        {
+            _baseline.Apply(_text);
+            var rise = Rise(position, word.Begin);
+            if (Math.Abs(rise - _rise) < 0.002) return;
+            _rise = rise;
+            _lift.Y = -SungLift * _text.FontSize * rise;
+        }
+    }
+
     private const string PunctuationOnly = ".,!?;:'\"()-";
 
     private static (string Lead, string Core, string Trail)? SplitPadding(string text)
@@ -245,89 +329,137 @@ public sealed class KaraokeTextController
         return (text[..start], text[start..end], text[end..]);
     }
 
-    /// <summary>One held syllable: scaled and glowing in proportion to how strongly it is sung.</summary>
+    /// <summary>
+    /// One held syllable, animated letter by letter as Apple Music does: the colour wipes through
+    /// the letters, and each letter rises, grows and glows as the wipe reaches it, so a long
+    /// note travels through the word as a wave. Everything settles once the syllable ends.
+    /// </summary>
     private sealed class WordEmphasis
     {
-        private const double MaxGrowth = 0.08;
-        private const double RiseSeconds = 0.3;
+        private const double MaxGrowth = 0.1;
+        private const double MaxLift = 0.07;
+        private const double RiseSeconds = 0.35;
         private const double FallSeconds = 0.45;
-        private readonly TextBlock _text;
-        private readonly ScaleTransform _scale = new(1, 1);
-        private readonly TranslateTransform _lift = new();
-        private readonly DropShadowEffect _glow;
-        private double _intensity = -1;
-        private double _alignedFontSize = double.NaN;
-        private System.Windows.Media.FontFamily? _alignedFamily;
-
+        // The soft edge of each letter's wipe, as a fraction of the letter's width.
+        private const double Feather = 0.3;
+        private readonly Glyph[] _glyphs;
+        private readonly StackPanel _panel;
         private readonly double _strength;
+        private readonly BaselineAligner _baseline = new();
 
-        public WordEmphasis(string text, System.Windows.Media.Brush foreground, Color glow, double strength)
+        public WordEmphasis(string text, Color sung, Color upcoming, double strength)
         {
             _strength = Math.Clamp(strength, 0, 1);
-            _glow = new DropShadowEffect
+            _panel = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
+            var letters = new List<Glyph>();
+            var elements = System.Globalization.StringInfo.GetTextElementEnumerator(text);
+            while (elements.MoveNext())
             {
-                ShadowDepth = 0,
-                BlurRadius = 20,
-                Color = glow,
-                Opacity = 0,
-                RenderingBias = RenderingBias.Performance,
-            };
-            var transform = new TransformGroup();
-            transform.Children.Add(_scale);
-            transform.Children.Add(_lift);
-            _text = new TextBlock
-            {
-                Text = text,
-                Foreground = foreground,
-                RenderTransformOrigin = new Point(0.5, 0.7),
-                RenderTransform = transform,
-            };
-            Container = new InlineUIContainer(_text) { BaselineAlignment = BaselineAlignment.Baseline };
+                var glyph = new Glyph((string)elements.Current, sung, upcoming);
+                letters.Add(glyph);
+                _panel.Children.Add(glyph.Text);
+            }
+            _glyphs = [.. letters];
+            Container = new InlineUIContainer(_panel) { BaselineAlignment = BaselineAlignment.Baseline };
         }
 
         public InlineUIContainer Container { get; }
 
-        public void SetGlowColor(Color color) => _glow.Color = color;
+        public void SetColors(Color sung, Color upcoming)
+        {
+            foreach (var glyph in _glyphs) glyph.SetColors(sung, upcoming);
+        }
 
         public void Update(LyricWord word, double position)
         {
-            AlignBaseline();
-            // Rise quickly once the syllable starts, hold while it is sung, then settle back.
-            var intensity = position < word.Begin ? 0
-                : position < word.End ? SmoothStep(Math.Min(1, (position - word.Begin) / RiseSeconds))
-                : Math.Max(0, 1 - (position - word.End) / FallSeconds);
-            intensity = SmoothStep(intensity) * _strength;
-            if (Math.Abs(intensity - _intensity) < 0.002) return;
-            _intensity = intensity;
-            _scale.ScaleX = _scale.ScaleY = 1 + MaxGrowth * intensity;
-            _lift.Y = -0.06 * _text.FontSize * intensity;
-            if (intensity <= 0.001)
+            _baseline.Apply(_panel);
+            var count = _glyphs.Length;
+            var duration = Math.Max(0, word.End - word.Begin);
+            var filled = LyricsTiming.GetWordProgress(word, position) * count;
+            for (var index = 0; index < count; index++)
             {
-                // No effect pass at all while idle.
-                _text.Effect = null;
-                return;
+                // The wipe reaches each letter in turn; the letter lifts from that moment.
+                var reached = word.Begin + duration * index / count;
+                var intensity = position < reached ? 0
+                    : position < word.End ? SmoothStep((position - reached) / RiseSeconds)
+                    : SmoothStep((word.End - reached) / RiseSeconds) * Math.Max(0, 1 - (position - word.End) / FallSeconds);
+                // Afterwards the letter settles to the height of the other sung words.
+                _glyphs[index].Update(Math.Clamp(filled - index, 0, 1), SmoothStep(intensity) * _strength,
+                    Rise(position, reached));
             }
-            _glow.Opacity = 0.9 * intensity;
-            _text.Effect ??= _glow;
         }
 
-        // An inline element sits with its bottom on the text baseline. Pull the descent below it
-        // so the word's own baseline lines up with the surrounding text.
-        private void AlignBaseline()
+        private sealed class Glyph
         {
-            var size = _text.FontSize;
-            var family = _text.FontFamily;
-            if (size == _alignedFontSize && ReferenceEquals(family, _alignedFamily)) return;
-            _alignedFontSize = size;
-            _alignedFamily = family;
-            var descent = Math.Max(0, size * (family.LineSpacing - family.Baseline));
-            _text.Margin = new Thickness(0, 0, 0, -descent);
-        }
+            private readonly ScaleTransform _scale = new(1, 1);
+            private readonly TranslateTransform _lift = new();
+            private readonly DropShadowEffect _glow;
+            private readonly LinearGradientBrush _brush;
+            private double _fill = -1;
+            private double _intensity = -1;
+            private double _rise = -1;
 
-        private static double SmoothStep(double value)
-        {
-            var t = Math.Clamp(value, 0, 1);
-            return t * t * (3 - 2 * t);
+            public Glyph(string text, Color sung, Color upcoming)
+            {
+                _brush = new LinearGradientBrush(new GradientStopCollection
+                {
+                    new(sung, 0), new(sung, 0), new(upcoming, 0), new(upcoming, 1),
+                }, new Point(0, 0.5), new Point(1, 0.5));
+                _glow = new DropShadowEffect
+                {
+                    ShadowDepth = 0,
+                    BlurRadius = 16,
+                    Color = sung,
+                    Opacity = 0,
+                    RenderingBias = RenderingBias.Performance,
+                };
+                var transform = new TransformGroup();
+                transform.Children.Add(_scale);
+                transform.Children.Add(_lift);
+                Text = new TextBlock
+                {
+                    Text = text,
+                    Foreground = _brush,
+                    RenderTransformOrigin = new Point(0.5, 0.8),
+                    RenderTransform = transform,
+                };
+                SetFill(0);
+            }
+
+            public TextBlock Text { get; }
+
+            public void SetColors(Color sung, Color upcoming)
+            {
+                _brush.GradientStops[0].Color = sung;
+                _brush.GradientStops[1].Color = sung;
+                _brush.GradientStops[2].Color = upcoming;
+                _brush.GradientStops[3].Color = upcoming;
+                _glow.Color = sung;
+            }
+
+            public void Update(double fill, double intensity, double rise)
+            {
+                if (fill != _fill) SetFill(fill);
+                if (Math.Abs(intensity - _intensity) < 0.002 && Math.Abs(rise - _rise) < 0.002) return;
+                _intensity = intensity;
+                _rise = rise;
+                _scale.ScaleX = _scale.ScaleY = 1 + MaxGrowth * intensity;
+                _lift.Y = -(MaxLift * intensity + SungLift * rise) * Text.FontSize;
+                if (intensity <= 0.001)
+                {
+                    // No effect pass at all while idle.
+                    Text.Effect = null;
+                    return;
+                }
+                _glow.Opacity = 0.7 * intensity;
+                Text.Effect ??= _glow;
+            }
+
+            private void SetFill(double fill)
+            {
+                _fill = fill;
+                SetWipe(_brush, fill, Feather);
+            }
         }
     }
 
@@ -337,5 +469,7 @@ public sealed class KaraokeTextController
         public LinearGradientBrush Brush { get; } = brush;
         public double Progress { get; set; } = double.NaN;
         public WordEmphasis? Emphasis { get; init; }
+        public WordLift? Lift { get; init; }
+        public double Feather { get; init; }
     }
 }

@@ -63,7 +63,9 @@ public static class WindowPlacementService
             throw new ArgumentException("At least one monitor is required.", nameof(monitors));
         }
 
-        var target = FindTargetMonitor(monitors, preferredMonitorId, legacyRect);
+        // Valid anchors without a monitor are a fresh install: there is no old position to follow.
+        var target = FindTargetMonitor(monitors, preferredMonitorId,
+            IsValidAnchor(relativeCenterX) && IsValidAnchor(relativeCenterY) ? null : legacyRect);
         var work = target.WorkAreaPx;
         var widthPx = Math.Clamp((int)Math.Round(Math.Max(1, widthDip) * target.ScaleX), 1, Math.Max(1, work.Width));
         var heightPx = Math.Clamp((int)Math.Round(Math.Max(1, heightDip) * target.ScaleY), 1, Math.Max(1, work.Height));
@@ -137,7 +139,7 @@ public static class WindowPlacementService
     private static MonitorDescriptor FindTargetMonitor(
         IReadOnlyList<MonitorDescriptor> monitors,
         string? preferredMonitorId,
-        PixelRect legacyRect)
+        PixelRect? legacyRect)
     {
         if (!string.IsNullOrWhiteSpace(preferredMonitorId))
         {
@@ -149,8 +151,13 @@ public static class WindowPlacementService
                 ?? monitors[0];
         }
 
+        if (legacyRect is not { } legacy)
+        {
+            return monitors.FirstOrDefault(monitor => monitor.IsPrimary) ?? monitors[0];
+        }
+
         var intersecting = monitors
-            .Select(monitor => (Monitor: monitor, Area: monitor.BoundsPx.IntersectionArea(legacyRect)))
+            .Select(monitor => (Monitor: monitor, Area: monitor.BoundsPx.IntersectionArea(legacy)))
             .OrderByDescending(item => item.Area)
             .First();
         return intersecting.Area > 0
