@@ -39,6 +39,17 @@ licenses/
 
 These bundled files are the MPL-covered sources used to build that binary and may be obtained and modified under MPL-2.0. The project repository is [BeteixZ/floating-lyrics-wam](https://github.com/BeteixZ/floating-lyrics-wam); a release's matching tag or commit contains the same source under the paths listed above. Distributors must preserve the notices and make the corresponding MPL-covered source, including their modifications, available to recipients. See MPL sections 3.1, 3.2, and 3.4; Mozilla also provides an [official FAQ](https://www.mozilla.org/en-US/MPL/2.0/FAQ/).
 
+## Marcellus font
+
+The default lyric font, [Marcellus](https://github.com/google/fonts/tree/main/ofl/marcellus), is bundled unmodified as `Fonts/Marcellus-Regular.ttf` (embedded in the app and copied beside it). It is licensed under the SIL Open Font License, Version 1.1; the [full license text](licenses/Marcellus-OFL.txt) ships under `licenses/Marcellus-OFL.txt`.
+
+```text
+Copyright (c) 2012, Brian J. Bonislawsky DBA Astigmatic (AOETI) (astigma@astigmatic.com),
+with Reserved Font Names "Marcellus"
+```
+
+"Marcellus" is a Reserved Font Name: a modified version of the font (including a subset) must not be distributed under that name.
+
 ## Offline Japanese readings
 
 The app uses [Apache Lucene.NET Kuromoji](https://lucenenet.apache.org/docs/4.8.0-beta00017/api/analysis-kuromoji/Lucene.Net.Analysis.Ja.html) and its bundled Japanese dictionary to generate romaji. Lucene.NET and [J2N](https://github.com/NightOwl888/J2N) are distributed under Apache License 2.0. The [bundled license text](licenses/Lucene.NET-LICENSE.txt) includes the dictionary and other Lucene.NET notices. The transitive Microsoft.Extensions assemblies are distributed under the [MIT license](licenses/Microsoft.Extensions-LICENSE.txt).

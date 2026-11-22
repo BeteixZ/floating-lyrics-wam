@@ -640,7 +640,7 @@ public sealed class SettingsWindowBindingTests
             Assert.Equal(1, opens);
             Assert.Equal(0, applies);
             Assert.False(window.Settings.ShowDebugPanel);
-            Assert.Equal("Optima", window.Settings.FontFamily);
+            Assert.Equal("Marcellus", window.Settings.FontFamily);
             SelectTab(window, "AppearanceTab");
             Assert.Equal("Arial", ((ComboBox)window.FindName("FontFamilyComboBox")).Text);
         }

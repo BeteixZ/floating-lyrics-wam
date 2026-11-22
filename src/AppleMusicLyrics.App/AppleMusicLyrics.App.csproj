@@ -20,8 +20,8 @@
 
   <ItemGroup>
     <Resource Include="icon.ico" />
-    <Resource Include="Fonts\Optima.ttf" />
-    <None Update="Fonts\Optima.ttf">
+    <Resource Include="Fonts\Marcellus-Regular.ttf" />
+    <None Update="Fonts\Marcellus-Regular.ttf">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <ExcludeFromSingleFile>true</ExcludeFromSingleFile>

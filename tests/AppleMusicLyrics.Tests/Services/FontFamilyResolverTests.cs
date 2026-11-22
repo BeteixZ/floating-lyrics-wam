@@ -1,5 +1,6 @@
 using AppleMusicLyrics.App.Services;
 using System.Globalization;
+using System.IO;
 using System.Runtime.ExceptionServices;
 using System.Windows;
 using System.Windows.Media;
@@ -13,13 +14,45 @@ public sealed class FontFamilyResolverTests
     [InlineData(null)]
     [InlineData("")]
     [InlineData("   ")]
-    [InlineData("Optima")]
-    [InlineData("optima")]
-    public void Resolve_OptimaOrEmpty_ResolvesSuccessfully(string? fontName)
+    [InlineData("Marcellus")]
+    [InlineData("marcellus")]
+    public void Resolve_DefaultOrEmpty_UsesTheBundledFont(string? fontName)
     {
         var fontFamily = FontFamilyResolver.Resolve(fontName);
         Assert.NotNull(fontFamily);
-        Assert.Contains("Optima", fontFamily.Source);
+        // A pack:// reference inside a running app, the deployed file otherwise (as in tests).
+        Assert.Contains("#Marcellus", fontFamily.Source);
+        Assert.DoesNotContain("Optima", fontFamily.Source, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("Optima")]
+    [InlineData("optima")]
+    public void Resolve_LegacyOptimaPrefersAnInstalledCopyThenTheBundledFont(string fontName)
+    {
+        var fontFamily = FontFamilyResolver.Resolve(fontName);
+        Assert.StartsWith("Optima, ", fontFamily.Source, StringComparison.Ordinal);
+        Assert.Contains("#Marcellus", fontFamily.Source);
+    }
+
+    [Fact]
+    public void Resolve_CompositeWithLegacyOptimaWithoutItInstalledUsesTheBundledFont() => OnSta(() =>
+    {
+        if (TryGlyphTypeface("Optima", out _)) return; // Covered only where Optima is not installed.
+        var latin = FindRun(GlyphRuns(FontFamilyResolver.Resolve("Optima", "SimSun"), "Ag"), "A");
+        Assert.EndsWith("/Fonts/Marcellus-Regular.ttf", latin.GlyphTypeface.FontUri.AbsolutePath, StringComparison.OrdinalIgnoreCase);
+    });
+
+    [Fact]
+    public void BundledFonts_ShipWithTheirLicenseAndNoOptima()
+    {
+        var baseDirectory = AppContext.BaseDirectory;
+        Assert.True(File.Exists(Path.Combine(baseDirectory, "Fonts", FontFamilyResolver.BundledFontFileName)));
+        Assert.False(File.Exists(Path.Combine(baseDirectory, "Fonts", "Optima.ttf")));
+        Assert.Contains("SIL Open Font License",
+            File.ReadAllText(Path.Combine(baseDirectory, "licenses", "Marcellus-OFL.txt")), StringComparison.Ordinal);
+        Assert.Throws<IOException>(() => System.Windows.Application.GetResourceStream(
+            new Uri("/AppleMusicLyrics.App;component/Fonts/Optima.ttf", UriKind.Relative)));
     }
 
     [Fact]
@@ -102,13 +135,13 @@ public sealed class FontFamilyResolverTests
     });
 
     [Fact]
-    public void Resolve_CompositeKeepsDeployedOptimaLatinAndSelectedChineseAndEmoji() => OnSta(() =>
+    public void Resolve_CompositeKeepsDeployedLatinFontAndSelectedChineseAndEmoji() => OnSta(() =>
     {
-        var runs = GlyphRuns(FontFamilyResolver.Resolve("Optima", "SimSun"), "Ag中🙂");
+        var runs = GlyphRuns(FontFamilyResolver.Resolve("Marcellus", "SimSun"), "Ag中🙂");
         var latin = FindRun(runs, "A");
         Assert.Equal("file", latin.GlyphTypeface.FontUri.Scheme);
-        Assert.EndsWith("/Fonts/Optima.ttf", latin.GlyphTypeface.FontUri.AbsolutePath, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains(latin.GlyphTypeface.FamilyNames.Values, name => name.Equals("Optima", StringComparison.OrdinalIgnoreCase));
+        Assert.EndsWith("/Fonts/Marcellus-Regular.ttf", latin.GlyphTypeface.FontUri.AbsolutePath, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(latin.GlyphTypeface.FamilyNames.Values, name => name.Equals("Marcellus", StringComparison.OrdinalIgnoreCase));
         if (TryGlyphTypeface("SimSun", out var chinese))
         {
             Assert.Equal(chinese!.FontUri, FindRun(runs, "中").GlyphTypeface.FontUri);
@@ -121,17 +154,17 @@ public sealed class FontFamilyResolverTests
     });
 
     [Fact]
-    public void Resolve_ExistingOptimaApiLoadsEmbeddedFontFromAppAssembly() => OnSta(() =>
+    public void Resolve_SingleFamilyApiLoadsEmbeddedFontFromAppAssembly() => OnSta(() =>
     {
         // Normal WPF startup initializes the application resource package. This isolated test
         // must do the same without relying on another UI test to initialize it first.
         using var resource = System.Windows.Application.GetResourceStream(
-            new Uri("/AppleMusicLyrics.App;component/Fonts/Optima.ttf", UriKind.Relative))?.Stream;
+            new Uri("/AppleMusicLyrics.App;component/Fonts/Marcellus-Regular.ttf", UriKind.Relative))?.Stream;
         Assert.NotNull(resource);
         Assert.True(resource.Length > 0);
-        var run = FindRun(GlyphRuns(FontFamilyResolver.Resolve("Optima"), "Ag"), "A");
+        var run = FindRun(GlyphRuns(FontFamilyResolver.Resolve("Marcellus"), "Ag"), "A");
         Assert.Equal("pack", run.GlyphTypeface.FontUri.Scheme);
-        Assert.Contains("AppleMusicLyrics.App;component/Fonts/Optima.ttf", run.GlyphTypeface.FontUri.OriginalString,
+        Assert.Contains("AppleMusicLyrics.App;component/Fonts/Marcellus-Regular.ttf", run.GlyphTypeface.FontUri.OriginalString,
             StringComparison.OrdinalIgnoreCase);
     });
 

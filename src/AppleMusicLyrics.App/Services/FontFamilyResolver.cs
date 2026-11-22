@@ -8,9 +8,19 @@ namespace AppleMusicLyrics.App.Services;
 
 public static class FontFamilyResolver
 {
-    public const string DefaultFontName = "Optima";
+    /// <summary>The bundled Latin lyric font (SIL Open Font License; see licenses/Marcellus-OFL.txt).</summary>
+    public const string DefaultFontName = "Marcellus";
+    public const string BundledFontFileName = "Marcellus-Regular.ttf";
+    /// <summary>
+    /// The default before 0.11. Optima is not redistributable and is no longer bundled; a saved
+    /// "Optima" still uses an installed Optima and otherwise the bundled default.
+    /// </summary>
+    public const string LegacyDefaultFontName = "Optima";
     public const string FallbackFontName = "Segoe UI";
     public const string DefaultChineseFontName = "Microsoft YaHei UI";
+
+    // Built per call: a pack:// Uri parsed before WPF registers the scheme stays unusable.
+    private const string BundledFontBaseUri = "pack://application:,,,/AppleMusicLyrics.App;component/Fonts/";
 
     // Keep Latin text independent even when its chosen family contains CJK glyphs.
     // Route kana with Han characters so Japanese lyrics use the same selected family
@@ -21,18 +31,23 @@ public static class FontFamilyResolver
     public static MediaFontFamily Resolve(string? fontName)
     {
         var targetName = string.IsNullOrWhiteSpace(fontName) ? DefaultFontName : fontName.Trim();
+        var installedFirst = string.Equals(targetName, LegacyDefaultFontName, StringComparison.OrdinalIgnoreCase)
+            ? $"{LegacyDefaultFontName}, "
+            : null;
 
-        if (string.Equals(targetName, DefaultFontName, StringComparison.OrdinalIgnoreCase))
+        if (installedFirst is not null || string.Equals(targetName, DefaultFontName, StringComparison.OrdinalIgnoreCase))
         {
             try
             {
-                // Pack URI allows loading the embedded Optima.ttf from application resources on machines without Optima installed.
-                // It automatically falls back to system "Optima" and then "Segoe UI" if needed.
-                return new MediaFontFamily(new Uri("pack://application:,,,/AppleMusicLyrics.App;component/Fonts/"), "./#Optima, Optima, Segoe UI");
+                // The pack URI loads the bundled font from application resources on machines
+                // without it installed; an installed copy and then Segoe UI follow.
+                return new MediaFontFamily(new Uri(BundledFontBaseUri),
+                    $"{installedFirst}./#{DefaultFontName}, {DefaultFontName}, {FallbackFontName}");
             }
             catch
             {
-                return new MediaFontFamily("Optima, Segoe UI");
+                // Without an initialized pack scheme, the deployed font file still works.
+                return new MediaFontFamily($"{installedFirst}{BundledLatinTarget()}, {FallbackFontName}");
             }
         }
 
@@ -71,17 +86,25 @@ public static class FontFamilyResolver
 
     private static string ResolveLatinTarget(string fontName)
     {
-        if (!fontName.Equals(DefaultFontName, StringComparison.OrdinalIgnoreCase))
+        if (fontName.Equals(LegacyDefaultFontName, StringComparison.OrdinalIgnoreCase))
         {
-            return fontName;
+            return $"{LegacyDefaultFontName}, {BundledLatinTarget()}";
         }
 
-        // Anonymous composite maps have no base URI. WPF accepts only file: absolute font
-        // references there, so a pack:// map target silently loses the embedded font.
-        // The app already ships this same Optima.ttf as Fonts/ content as well as a resource.
-        var fontPath = Path.Combine(AppContext.BaseDirectory, "Fonts", "Optima.ttf");
+        return fontName.Equals(DefaultFontName, StringComparison.OrdinalIgnoreCase)
+            ? BundledLatinTarget()
+            : fontName;
+    }
+
+    // Anonymous composite maps have no base URI. WPF accepts only file: absolute font
+    // references there, so a pack:// map target silently loses the bundled font.
+    // The app ships the same font file as Fonts/ content as well as a resource.
+    private static string BundledLatinTarget()
+    {
+        var fontPath = Path.Combine(AppContext.BaseDirectory, "Fonts", BundledFontFileName);
         return File.Exists(fontPath)
-            ? new Uri(fontPath, UriKind.Absolute).AbsoluteUri.Replace(",", "%2C", StringComparison.Ordinal) + "#Optima, Optima"
-            : "Optima";
+            ? new Uri(fontPath, UriKind.Absolute).AbsoluteUri.Replace(",", "%2C", StringComparison.Ordinal)
+                + $"#{DefaultFontName}, {DefaultFontName}"
+            : DefaultFontName;
     }
 }

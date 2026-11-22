@@ -119,7 +119,7 @@ public sealed class AppSettings
 
     public double GlowOpacity { get; set; } = 1.0;
 
-    public string FontFamily { get; set; } = "Optima";
+    public string FontFamily { get; set; } = "Marcellus";
 
     public string ChineseFontFamily { get; set; } = "Microsoft YaHei UI";
 

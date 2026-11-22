@@ -1,5 +1,18 @@
 # Release Notes
 
+## v0.10.1 - New default lyric font
+
+**Display**
+
+- The default lyric font is now Marcellus, an open-licensed (SIL OFL) font with a similar classical feel. Optima is a commercial font and is no longer included with the app.
+- If Optima is installed on your computer and selected in Settings, it is still used. Otherwise the overlay falls back to Marcellus automatically; no setting needs to change.
+
+**Upgrading from 0.9.0 or 0.10.0:** use **Update to v0.10.1** in the tray or **Check for updates…**. Settings, saved positions, per-song offsets, and the lyrics cache are kept.
+
+Requirements remain Windows 10 version 19041 or later and the x64 .NET 10 Desktop Runtime.
+
+---
+
 ## v0.10.0 - Tighter sync, duets and interludes, and remembered lyric choices
 
 **Timing**
