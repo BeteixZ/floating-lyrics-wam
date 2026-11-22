@@ -1,13 +1,15 @@
 # Release Notes
 
-## v1.0.0-rc.1 - Release candidate for 1.0
+## v1.0.0-rc.2 - Release candidate for 1.0
 
-This is a test version of 1.0. It focuses on reliability: the app keeps working, or tells you what went wrong, when Windows, the settings file or an update misbehaves.
+This is a test version of 1.0. It focuses on reliability: the app keeps working, or tells you what went wrong, when Windows, the settings file or an update misbehaves. It replaces v1.0.0-rc.1.
 
 **Display**
 
 - The bottom of letters such as g, p and y is no longer cut off on lines with word-by-word timing.
 - Instrumental tracks whose lyrics file has no lines are treated like tracks without lyrics: the overlay fades out (with **Fade out when lyrics are unavailable** on) instead of showing "Lyrics file has no displayable lines."
+- In Pure mode, the lyrics card can be dragged all the way to the top of the screen. It used to stop well below it.
+- In Pure mode, applying settings no longer moves the lyrics card.
 
 **Reliability**
 
@@ -22,9 +24,10 @@ This is a test version of 1.0. It focuses on reliability: the app keeps working,
 - The updater installs only the release's own package and only after its SHA-256 checksum matches the one GitHub recorded.
 - The app hands over to the installer only after the installer confirms it has started and checked the downloaded files. If it cannot start, the update window says so and the current version keeps running.
 - If an update was cut off part-way (for example by a power loss), the app shows a notification at the next start that opens the backup of the previous files. `RECOVERY.txt` in the app folder explains how to repair the installation.
+- **Check now** in Settings checks in place. When no update is available, the result, the time of the last check and the next automatic check are shown next to the button instead of in a new window. An available update opens the update window, which now stays in front of the lyrics and Settings windows.
 - Stable versions are never offered a test version such as this one.
 
-**Installing this test version:** it is not offered by the in-app updater. Exit the app from the tray, download `AppleMusicLyrics-v1.0.0-rc.1-win-x64.zip` from this release, extract it over your app folder replacing all files, and start `AppleMusicLyrics.App.exe`. Settings, saved positions, per-song offsets, and the lyrics cache are kept. When 1.0.0 is published, this version updates to it from the tray as usual.
+**Installing this test version:** it is not offered by the in-app updater. Exit the app from the tray, download `AppleMusicLyrics-v1.0.0-rc.2-win-x64.zip` from this release, extract it over your app folder replacing all files, and start `AppleMusicLyrics.App.exe`. Settings, saved positions, per-song offsets, and the lyrics cache are kept. When 1.0.0 is published, this version updates to it from the tray as usual.
 
 Requirements remain Windows 10 version 19041 or later and the x64 .NET 10 Desktop Runtime.
 
