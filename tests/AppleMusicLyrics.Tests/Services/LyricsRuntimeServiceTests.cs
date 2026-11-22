@@ -569,9 +569,12 @@ public sealed class LyricsRuntimeServiceTests
 
         resolver.Complete(["AP_222"]);
         RuntimeSnapshot resolved = pending;
-        for (var attempt = 0; attempt < 10 && resolved.Document is null; attempt++)
+        // The catalog result is applied by a background continuation; a slow CI machine can
+        // need more than a few yields, so wait on time rather than on a number of attempts.
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (resolved.Document is null && DateTime.UtcNow < deadline)
         {
-            await Task.Yield();
+            await Task.Delay(10);
             resolved = await runtime.SnapshotAsync();
         }
 
