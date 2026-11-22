@@ -45,6 +45,31 @@ All builds use a temporary publish directory first. Apart from this running-app
 exception, do not create local folders or ZIPs named after a task, date, or version.
 GitHub Release attachments remain versioned.
 
+### Pre-push formatting check
+
+CI fails the build (and skips the GitHub Release) when `dotnet format` finds
+changes. A versioned `pre-push` hook runs the same check locally; enable it once
+per clone:
+
+```powershell
+git config core.hooksPath .githooks
+```
+
+To fix a failure, run `dotnet format AppleMusicLyrics.sln --severity warn` and commit.
+
+### Release checklist
+
+1. Update `RELEASE_NOTES.md` with a section for the new version.
+2. Verify formatting and tests:
+
+   ```powershell
+   dotnet format AppleMusicLyrics.sln --verify-no-changes --severity warn
+   dotnet test AppleMusicLyrics.sln -c Release
+   ```
+
+3. Commit, tag `vX.Y.Z`, and push the commit and the tag. The pre-push hook
+   re-checks formatting; the tag push triggers the GitHub Release.
+
 ## Project structure
 
 ```text

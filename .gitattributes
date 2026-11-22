@@ -1,0 +1,2 @@
+# Git hooks are run by sh; keep them LF.
+.githooks/* text eol=lf

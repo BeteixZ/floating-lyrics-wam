@@ -1,0 +1,16 @@
+#!/bin/sh
+# Run the same formatting check as CI before anything (main or a v* release tag) is pushed.
+# Enable once per clone:  git config core.hooksPath .githooks
+# Skip in an emergency:   git push --no-verify
+
+repo_root=$(git rev-parse --show-toplevel) || exit 1
+cd "$repo_root" || exit 1
+
+echo "pre-push: dotnet format --verify-no-changes ..."
+if ! dotnet format AppleMusicLyrics.sln --verify-no-changes --severity warn; then
+    echo >&2
+    echo "pre-push: formatting check failed; push aborted." >&2
+    echo "Fix with:  dotnet format AppleMusicLyrics.sln --severity warn" >&2
+    echo "Then commit (and move the release tag if you already created one)." >&2
+    exit 1
+fi
