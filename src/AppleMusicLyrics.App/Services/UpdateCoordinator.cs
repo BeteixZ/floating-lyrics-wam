@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Windows.Threading;
 using AppleMusicLyrics.Core.Configuration;
 using AppleMusicLyrics.Core.Updates;
+using AppleMusicLyrics.Infrastructure.Windows.Diagnostics;
 using AppleMusicLyrics.Infrastructure.Windows.Updates;
 
 namespace AppleMusicLyrics.App.Services;
@@ -91,9 +92,15 @@ public sealed class UpdateCoordinator : IDisposable
             if (isNew && !manual) NewReleaseFound?.Invoke(release);
             return new UpdateCheckResult(release, true, false);
         }
-        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException)
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException
+            or System.Text.Json.JsonException or InvalidOperationException or IOException)
         {
-            // Offline, rate-limited, or GitHub unavailable: try again at the next scheduled check.
+            // Offline, rate-limited, GitHub unavailable, or an unexpected response: try again at
+            // the next scheduled check.
+            if (error is not TaskCanceledException || !cancellationToken.IsCancellationRequested)
+            {
+                ErrorLog.Report("Updates", "Update check failed", error);
+            }
             return new UpdateCheckResult(null, false, true);
         }
         finally
@@ -114,16 +121,56 @@ public sealed class UpdateCoordinator : IDisposable
 
     /// <summary>
     /// Starts a helper copy of this executable, which installs <paramref name="stagingDirectory"/>
-    /// once this process has exited.
+    /// once this process has exited. True once the helper has taken over, and the app should
+    /// exit; false when it did not, and the app should keep running.
     /// </summary>
-    public void LaunchInstaller(string stagingDirectory)
+    public async Task<bool> LaunchInstallerAsync(string stagingDirectory, CancellationToken cancellationToken = default)
     {
         var current = Environment.ProcessPath
             ?? Path.Combine(InstallDirectory, UpdateInstaller.ExecutableName);
         var helper = Installer.PrepareHelper(current);
+        var signalName = UpdateHandoff.NewSignalName();
+        using var ready = UpdateHandoff.CreateSignal(signalName);
         using var process = Process.Start(UpdateInstaller.CreateApplyStartInfo(
-            helper, stagingDirectory, InstallDirectory, Environment.ProcessId))
+            helper, stagingDirectory, InstallDirectory, Environment.ProcessId, signalName))
             ?? throw new InvalidOperationException("The update helper did not start.");
+        var handedOver = false;
+        try
+        {
+            var helperReady = await UpdateHandoff.WaitForHelperAsync(ready, () => process.HasExited,
+                UpdateHandoff.DefaultTimeout, cancellationToken);
+            // "Later" may have been clicked after the helper answered: the user's choice wins,
+            // and the finally below stops the helper because nothing was handed over.
+            cancellationToken.ThrowIfCancellationRequested();
+            handedOver = helperReady;
+            if (!handedOver)
+            {
+                ErrorLog.Report("Updates", process.HasExited
+                    ? $"The update helper exited with code {process.ExitCode} before taking over"
+                    : "The update helper did not take over in time");
+            }
+            return handedOver;
+        }
+        finally
+        {
+            // Also on cancellation (the update window closed): a helper left behind could
+            // still install once this app exits later, without the user having agreed to it.
+            if (!handedOver) StopHelper(process);
+        }
+    }
+
+    private static void StopHelper(Process process)
+    {
+        try
+        {
+            if (process.HasExited) return;
+            process.Kill();
+            process.WaitForExit(5000);
+        }
+        catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            ErrorLog.Report("Updates", "Could not stop the update helper", error);
+        }
     }
 
     public static void OpenReleasePage(ReleaseInfo? release)

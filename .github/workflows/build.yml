@@ -35,6 +35,12 @@ jobs:
         with:
           global-json-file: global.json
 
+      # A tag must match the built version and have release notes before anything is built.
+      - name: Check release version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: ./.github/scripts/Test-ReleaseVersion.ps1 -Tag $env:GITHUB_REF_NAME
+
       - name: Restore
         run: dotnet restore AppleMusicLyrics.sln
 
@@ -79,6 +85,11 @@ jobs:
           Compress-Archive -Path .\artifacts\publish\win-x64\* -DestinationPath $zipPath
           "zip_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
+      # Test the file users download: its contents, and that the extracted app starts.
+      - name: Check release package
+        shell: pwsh
+        run: ./.github/scripts/Test-ReleasePackage.ps1 -ZipPath "./artifacts/${{ steps.package.outputs.zip_name }}"
+
       - name: Upload Publish Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -89,14 +100,20 @@ jobs:
     needs: build-test
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # One release run per tag at a time.
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: write
 
     steps:
-      - name: Checkout release notes
+      - name: Checkout release notes and scripts
         uses: actions/checkout@v4
         with:
-          sparse-checkout: RELEASE_NOTES.md
+          sparse-checkout: |
+            RELEASE_NOTES.md
+            .github/scripts
           sparse-checkout-cone-mode: false
 
       # The release body is what the in-app updater shows: this tag's section of RELEASE_NOTES.md.
@@ -109,7 +126,8 @@ jobs:
             found { print }
           ' RELEASE_NOTES.md > release-notes.md
           if [ -z "$(tr -d '[:space:]' < release-notes.md)" ]; then
-            echo "See [RELEASE_NOTES.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/RELEASE_NOTES.md)." > release-notes.md
+            echo "::error::RELEASE_NOTES.md has no section for $GITHUB_REF_NAME."
+            exit 1
           fi
 
       - name: Download Release Artifact
@@ -118,9 +136,51 @@ jobs:
           name: AppleMusicLyrics-win-x64
           path: artifacts
 
-      - name: Publish GitHub Release
+      # The upload action reuses an existing release as it is: re-running a published tag would
+      # replace the file users download before the digest check below. Only a draft continues.
+      - name: Refuse to modify a published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # This endpoint returns only published releases: 404 means none (a draft may continue);
+        # any other failure stops the release rather than guessing.
+        run: |
+          set +e
+          response=$(gh api --include "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" 2>&1)
+          set -e
+          status=$(printf '%s\n' "$response" | sed -n '1s/^HTTP\/[0-9.]* \([0-9][0-9]*\).*/\1/p')
+          case "$status" in
+            404) echo "No published release for $GITHUB_REF_NAME yet." ;;
+            200) echo "::error::Release $GITHUB_REF_NAME is already published. Tag a new version instead of re-running."; exit 1 ;;
+            *) echo "::error::Could not check for an existing release (status '${status:-none}')."; printf '%s\n' "$response" | head -20; exit 1 ;;
+          esac
+
+      # Upload as a draft first: users only see the release once the uploaded file is verified.
+      - name: Create draft GitHub Release
+        id: release
         uses: softprops/action-gh-release@v2
         with:
           name: AppleMusicLyrics ${{ github.ref_name }}
           files: artifacts/${{ needs.build-test.outputs.zip_name }}
           body_path: release-notes.md
+          draft: true
+          # A tag such as v1.0.0-rc.1 is a pre-release, which /releases/latest never returns.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: false
+
+      - name: Verify the uploaded package digest
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          ./.github/scripts/Test-ReleaseAssetDigest.ps1
+          -Repository $env:GITHUB_REPOSITORY
+          -ReleaseId "${{ steps.release.outputs.id }}"
+          -ZipPath "artifacts/${{ needs.build-test.outputs.zip_name }}"
+
+      - name: Publish the verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/${{ steps.release.outputs.id }}"
+          -F draft=false
+          -f make_latest=${{ contains(github.ref_name, '-') && 'false' || 'true' }}

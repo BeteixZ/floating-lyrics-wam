@@ -31,6 +31,14 @@ public static class OverlaySnapshotPresenter
     // weak ownership allows completed tracks (and their text) to be collected normally.
     private static readonly ConditionalWeakTable<LyricsDocument, DocumentStatistics> Statistics = new();
 
+    /// <summary>
+    /// True when the resolved lyrics have a line to show. An instrumental can resolve to a lyrics
+    /// file with no text at all; the overlay treats that like a song without lyrics.
+    /// </summary>
+    public static bool HasDisplayableLyrics(RuntimeSnapshot snapshot) =>
+        snapshot.Document is { } document
+        && Statistics.GetValue(document, static document => new DocumentStatistics(document)).HasText;
+
     public static PlayerPresentation CreatePlayer(RuntimeSnapshot snapshot, LocalizationManager? localization = null)
     {
         var text = localization ?? LocalizationManager.Instance;
@@ -82,8 +90,9 @@ public static class OverlaySnapshotPresenter
         var displayedLine = snapshot.ActiveLyric.CurrentLine
             ?? snapshot.ActiveLyric.NextLine
             ?? snapshot.Document.Lines.FirstOrDefault();
-        var currentText = displayedLine?.Text
-            ?? text.Text("Lyrics.NoDisplayableLines");
+        // An instrumental can resolve to a lyrics file without lines: show nothing rather than
+        // a message, in the overlay and in the tray tooltip alike.
+        var currentText = displayedLine?.Text ?? string.Empty;
         var source = GetSourceLabel(snapshot.Document, snapshot.Resolution.Source, text);
         if (snapshot.IsManualSelection) source = text.Format("Lyrics.Selection.ManualSource", source);
         var statistics = Statistics.GetValue(snapshot.Document, static document => new DocumentStatistics(document));
@@ -197,6 +206,7 @@ public static class OverlaySnapshotPresenter
     {
         public int WordLines { get; }
         public int TranslatedLines { get; }
+        public bool HasText { get; }
 
         public DocumentStatistics(LyricsDocument document)
         {
@@ -206,6 +216,7 @@ public static class OverlaySnapshotPresenter
             {
                 if (line.Words is { Count: > 0 }) wordLines++;
                 if (HasTranslation(line)) translatedLines++;
+                if (!string.IsNullOrWhiteSpace(line.Text)) HasText = true;
             }
             WordLines = wordLines;
             TranslatedLines = translatedLines;

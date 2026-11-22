@@ -23,9 +23,6 @@
 
 Apple Music for Windows has no desktop lyrics. Apple Music Lyrics adds an always-on-top overlay that follows playback: it reads the lyrics Apple Music has already cached, highlights them word by word, shows translations and romanization, and fills the gaps from NetEase Cloud Music, QQ Music, and LRCLIB when Apple's lyrics are missing or incomplete.
 
-> [!NOTE]
-> The project is in active development (0.x). Features and settings may still change between releases.
-
 ## Features
 
 **Lyrics**

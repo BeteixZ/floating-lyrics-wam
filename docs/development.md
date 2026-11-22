@@ -59,16 +59,35 @@ To fix a failure, run `dotnet format AppleMusicLyrics.sln --severity warn` and c
 
 ### Release checklist
 
-1. Update `RELEASE_NOTES.md` with a section for the new version.
-2. Verify formatting and tests:
+1. Set `Version`, `InformationalVersion`, `AssemblyVersion` and `FileVersion` in
+   [`Directory.Build.props`](../Directory.Build.props) to the new version
+   (`AssemblyVersion`/`FileVersion` without a pre-release suffix, e.g. `1.0.0.0`).
+2. Add a `## vX.Y.Z` section to `RELEASE_NOTES.md`; it becomes the release body and the
+   text shown by the in-app updater.
+3. Verify formatting, tests and the tag:
 
    ```powershell
    dotnet format AppleMusicLyrics.sln --verify-no-changes --severity warn
    dotnet test AppleMusicLyrics.sln -c Release
+   ./.github/scripts/Test-ReleaseVersion.ps1 -Tag vX.Y.Z
    ```
 
-3. Commit, tag `vX.Y.Z`, and push the commit and the tag. The pre-push hook
-   re-checks formatting; the tag push triggers the GitHub Release.
+4. Commit, tag `vX.Y.Z`, and push the commit and the tag. The pre-push hook
+   re-checks formatting; the tag push triggers the release workflow.
+
+The workflow refuses a tag whose version or release notes do not match, checks the
+final ZIP (required files and licenses, and that the extracted app starts), uploads it
+to a **draft** release, compares the digest GitHub recorded with the built file, and
+only then publishes the release. The in-app updater installs only
+`AppleMusicLyrics-vX.Y.Z-win-x64.zip` with a SHA-256 digest; anything else is offered
+as a download page.
+
+A tag with a suffix, such as `v1.0.0-rc.1`, is published as a GitHub pre-release.
+The in-app updater asks only for `/releases/latest`, which never returns a pre-release,
+and stable builds would not offer one anyway. Release candidates are therefore installed
+by hand from the release page; a candidate is updated to the final version once that is
+published. Run a candidate for at least a day of normal use before tagging the final
+version.
 
 ## Project structure
 

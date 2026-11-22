@@ -26,6 +26,10 @@ public sealed class KaraokeTextController
     private Color _upcoming = Colors.Gray;
 
     private readonly bool _emphasizeSustainedWords;
+    private bool _hostsWordElements;
+    private bool _ownsLineHeight;
+    private (double Size, System.Windows.Media.FontFamily Family, FontWeight Weight, System.Windows.FontStyle Style,
+        FontStretch Stretch, string? Text, double PixelsPerDip) _lineHeightKey;
 
     /// <param name="emphasizeSustainedWords">
     /// Let held single words swell and glow while sung (Apple Music style). Such words are hosted
@@ -39,6 +43,15 @@ public sealed class KaraokeTextController
     }
 
     public bool HasTimedWords => _timedRuns.Count > 0;
+
+    private static readonly DependencyProperty ManagesLineHeightProperty = DependencyProperty.RegisterAttached(
+        "ManagesLineHeight", typeof(bool), typeof(KaraokeTextController), new PropertyMetadata(false));
+
+    /// <summary>
+    /// True while a controller sets <paramref name="text"/>'s line height for the line it shows.
+    /// That height fits only the current line, so measuring other text must not reuse it.
+    /// </summary>
+    public static bool ManagesLineHeight(TextBlock text) => (bool)text.GetValue(ManagesLineHeightProperty);
 
     /// <summary>The full display text, independent of WPF's plain Text property for rich inlines.</summary>
     public string DisplayText => _text ?? string.Empty;
@@ -58,6 +71,7 @@ public sealed class KaraokeTextController
         _hasLine = true;
         _timedRuns.Clear();
         _target.Inlines.Clear();
+        _hostsWordElements = false;
 
         if (!enabled || !TryGetSegments(text, line, out var segments)
             || !segments.Any(segment => segment.Word is not null))
@@ -65,6 +79,7 @@ public sealed class KaraokeTextController
             // No local foreground override: line-only and disabled lyrics inherit the ordinary
             // playing/paused color from the TextBlock.
             _target.Text = text;
+            SyncLineHeight();
             return;
         }
 
@@ -108,6 +123,8 @@ public sealed class KaraokeTextController
             }
             _target.Inlines.Add(new Run(segment.Text));
         }
+        _hostsWordElements = _timedRuns.Any(timed => timed.Lift is not null || timed.Emphasis is not null);
+        SyncLineHeight();
     }
 
     public void SetColors(Color sung, Color upcoming)
@@ -136,6 +153,9 @@ public sealed class KaraokeTextController
             return;
         }
 
+        // The host's font size changes as the overlay fits a line; keep the line box in step.
+        SyncLineHeight();
+
         // Recalculate every fragment, rather than advancing a one-way index. A seek backwards
         // within the same lyric must remove a previously completed highlight immediately.
         foreach (var timed in _timedRuns)
@@ -150,6 +170,56 @@ public sealed class KaraokeTextController
             SetWipe(timed.Brush, progress, timed.Feather);
             timed.Progress = progress;
         }
+    }
+
+    /// <summary>
+    /// Words hosted on their own elements sit with their descent pulled below the baseline
+    /// (<see cref="BaselineAligner"/>), so WPF sizes the line without room for descenders and
+    /// cuts off "g", "y" and "p". While such words are shown, the host stacks each line at the
+    /// height plain text of the same content would have. A line height the host set itself is
+    /// left alone.
+    /// </summary>
+    private void SyncLineHeight()
+    {
+        var hasForeignLineHeight = !_ownsLineHeight
+            && (_target.ReadLocalValue(TextBlock.LineHeightProperty) != DependencyProperty.UnsetValue
+                || _target.ReadLocalValue(TextBlock.LineStackingStrategyProperty) != DependencyProperty.UnsetValue);
+        if (!_hostsWordElements || hasForeignLineHeight)
+        {
+            if (_ownsLineHeight)
+            {
+                _target.ClearValue(TextBlock.LineHeightProperty);
+                _target.ClearValue(TextBlock.LineStackingStrategyProperty);
+                _target.ClearValue(ManagesLineHeightProperty);
+                _ownsLineHeight = false;
+                _lineHeightKey = default;
+            }
+            return;
+        }
+
+        var key = (_target.FontSize, _target.FontFamily, _target.FontWeight, _target.FontStyle,
+            _target.FontStretch, _text, VisualTreeHelper.GetDpi(_target).PixelsPerDip);
+        if (_ownsLineHeight && key.Equals(_lineHeightKey)) return;
+        _lineHeightKey = key;
+
+        var lineHeight = MeasurePlainLineHeight(_target, _text ?? string.Empty);
+        if (!(lineHeight > 0) || !double.IsFinite(lineHeight)) return;
+        _target.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
+        _target.LineHeight = lineHeight;
+        _target.SetValue(ManagesLineHeightProperty, true);
+        _ownsLineHeight = true;
+    }
+
+    /// <summary>The height of one line of <paramref name="text"/> laid out as plain runs.</summary>
+    internal static double MeasurePlainLineHeight(TextBlock target, string text)
+    {
+        var content = string.IsNullOrWhiteSpace(text) ? " " : text.ReplaceLineEndings(" ");
+        var formatted = new FormattedText(content, System.Globalization.CultureInfo.CurrentUICulture,
+            target.FlowDirection,
+            new Typeface(target.FontFamily, target.FontStyle, target.FontWeight, target.FontStretch),
+            target.FontSize, System.Windows.Media.Brushes.White, VisualTreeHelper.GetDpi(target).PixelsPerDip);
+        // Never shorter than the font's own line, so a line of short letters keeps descender room.
+        return Math.Max(formatted.Height, target.FontSize * target.FontFamily.LineSpacing);
     }
 
     private LinearGradientBrush CreateWordBrush() => new(

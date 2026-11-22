@@ -5,6 +5,7 @@ using System.Windows;
 using AppleMusicLyrics.App.Localization;
 using AppleMusicLyrics.App.Services;
 using AppleMusicLyrics.Core.Updates;
+using AppleMusicLyrics.Infrastructure.Windows.Diagnostics;
 using AppleMusicLyrics.Infrastructure.Windows.Updates;
 
 namespace AppleMusicLyrics.App;
@@ -120,12 +121,23 @@ public partial class UpdateWindow : Window
         if (_lifetime.IsCancellationRequested) return;
         _installing = false; // Ignore progress callbacks once the package has been staged.
         StatusText.Text = _text.Text("Update.Status.Installing");
+        bool handedOver;
         try
         {
-            _updates.LaunchInstaller(staging);
+            handedOver = await _updates.LaunchInstallerAsync(staging, _lifetime.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
         }
         catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException or IOException or UnauthorizedAccessException)
         {
+            ErrorLog.Report("Updates", "Could not start the update helper", error);
+            handedOver = false;
+        }
+        if (!handedOver)
+        {
+            // Nothing was replaced; this version keeps running.
             StatusText.Text = _text.Text("Update.Status.LaunchFailed");
             ResetAfterFailure();
             return;

@@ -438,6 +438,112 @@ public sealed class IniSettingsStoreTests : IDisposable
         Assert.Empty(Directory.GetFiles(_root, "*.tmp"));
     }
 
+    [Theory]
+    [InlineData("PlayerPollInterval=NaN")]
+    [InlineData("PlayerPollInterval=Infinity")]
+    [InlineData("PlayerPollInterval=-0.5")]
+    [InlineData("HoverFadeDuration=NaN")]
+    [InlineData("MaxCurrentFontSize=1e300")]
+    [InlineData("OverlayOpacity=-Infinity")]
+    [InlineData("BackgroundAlpha=900")]
+    // Math.Clamp(x, 12, ContextFontSize) throws when the maximum is below 12.
+    [InlineData("ContextFontSize=11")]
+    [InlineData("MaxCurrentFontSize=8")]
+    public void Load_InvalidNumberKeepsTheDefaultAndOtherValues(string line)
+    {
+        // NaN passes double.TryParse and Math.Clamp, then fails in TimeSpan.FromSeconds while the
+        // main window is built: one bad value used to stop the app from starting at all.
+        var path = Path.Combine(_root, "invalid-number.ini");
+        File.WriteAllLines(path, ["[apple_music_lyrics]", line, "FontFamily=Arial", "LyricsOffsetSeconds=0.5"]);
+
+        var loaded = new IniSettingsStore(path).Load();
+        var defaults = new AppSettings();
+        var name = line[..line.IndexOf('=')];
+        var property = typeof(AppSettings).GetProperty(name)!;
+
+        Assert.Equal(property.GetValue(defaults), property.GetValue(loaded));
+        Assert.Equal("Arial", loaded.FontFamily);
+        Assert.Equal(0.5, loaded.LyricsOffsetSeconds);
+    }
+
+    [Fact]
+    public void Load_ValuesSavedByTheAppStayWithinBounds()
+    {
+        var path = Path.Combine(_root, "slider-extremes.ini");
+        var store = new IniSettingsStore(path);
+        store.Save(new AppSettings
+        {
+            PlayerPollInterval = 0.05,
+            LyricsOffsetSeconds = -0.2,
+            MaxCurrentFontSize = 72,
+            ContextFontSize = 12,
+            TranslationFontSize = 48,
+            GlowOpacity = 0,
+            OverlayOpacity = 0.2,
+            BackgroundAlpha = 255,
+            HoverFadeDuration = 1,
+            HoverFadeMinOpacity = 0.5,
+            ExternalLyricsCacheMaxMegabytes = 1024,
+        });
+
+        var loaded = store.Load();
+
+        Assert.Equal(0.05, loaded.PlayerPollInterval);
+        Assert.Equal(-0.2, loaded.LyricsOffsetSeconds);
+        Assert.Equal(72, loaded.MaxCurrentFontSize);
+        Assert.Equal(12, loaded.ContextFontSize);
+        Assert.Equal(255, loaded.BackgroundAlpha);
+        Assert.Equal(1024, loaded.ExternalLyricsCacheMaxMegabytes);
+    }
+
+    [Fact]
+    public void Save_LeavesAFileThatCouldNotBeReadUnchanged()
+    {
+        var path = Path.Combine(_root, "locked.ini");
+        File.WriteAllLines(path, ["[apple_music_lyrics]", "FontFamily=Arial", "LyricsOffsetSeconds=0.4"]);
+        var original = File.ReadAllText(path);
+        var store = new IniSettingsStore(path);
+
+        AppSettings loaded;
+        using (new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            loaded = store.Load();
+        }
+
+        Assert.True(store.LoadFailed);
+        Assert.IsAssignableFrom<IOException>(store.LoadError);
+        Assert.Equal(new AppSettings().FontFamily, loaded.FontFamily);
+        // The defaults the app ran on must not replace the user's real settings at exit.
+        Assert.Throws<IOException>(() => store.Save(loaded));
+        Assert.Equal(original, File.ReadAllText(path));
+        Assert.Empty(Directory.GetFiles(_root, "*.tmp"));
+
+        var reloaded = store.Load();
+        Assert.False(store.LoadFailed);
+        Assert.Equal("Arial", reloaded.FontFamily);
+        store.Save(reloaded);
+    }
+
+    [Fact]
+    public async Task Load_RetriesABrieflyLockedFile()
+    {
+        var path = Path.Combine(_root, "briefly-locked.ini");
+        File.WriteAllLines(path, ["[apple_music_lyrics]", "FontFamily=Arial"]);
+        var store = new IniSettingsStore(path);
+        var lockStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+        var release = Task.Run(async () =>
+        {
+            await Task.Delay(60);
+            lockStream.Dispose();
+        });
+
+        var loaded = store.Load();
+        await release;
+
+        Assert.False(store.LoadFailed);
+        Assert.Equal("Arial", loaded.FontFamily);
+    }
+
     public void Dispose()
     {
         if (Directory.Exists(_root))

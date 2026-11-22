@@ -49,6 +49,37 @@ public sealed class UpdateInstallerTests : IDisposable
     }
 
     [Theory]
+    // Only another zip on the release: never installed in its place.
+    [InlineData("""{ "name": "AppleMusicLyrics-v1.0.0-debug-win-x64.zip", "digest": "sha256:DIGEST" }""")]
+    // The right file without a digest: nothing to verify it against.
+    [InlineData("""{ "name": "AppleMusicLyrics-v1.0.0-win-x64.zip" }""")]
+    [InlineData("""{ "name": "AppleMusicLyrics-v1.0.0-win-x64.zip", "digest": "sha512:DIGEST" }""")]
+    [InlineData("""{ "name": "AppleMusicLyrics-v1.0.0-win-x64.zip", "digest": "sha256:abc" }""")]
+    [InlineData("\"not an object\"")]
+    public void ParseRelease_OffersOnlyTheReleasePageWithoutAVerifiablePackage(string asset)
+    {
+        var json = $$"""
+            { "tag_name": "v1.0.0", "draft": false, "assets": [ {{asset.Replace("DIGEST", new string('a', 64))}} ] }
+            """;
+        using var document = JsonDocument.Parse(json);
+
+        var release = GitHubReleaseClient.ParseRelease(document.RootElement);
+
+        Assert.NotNull(release);
+        Assert.Null(release.Package);
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("\"v1.0.0\"")]
+    [InlineData("""{ "tag_name": 100, "assets": "none" }""")]
+    public void ParseRelease_ReturnsNullForUnexpectedJsonShapes(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        Assert.Null(GitHubReleaseClient.ParseRelease(document.RootElement));
+    }
+
+    [Theory]
     [InlineData("""{ "tag_name": "v1.0.0", "draft": true }""")]
     [InlineData("""{ "tag_name": "nightly", "draft": false }""")]
     public void ParseRelease_IgnoresDraftsAndNonVersionTags(string json)
@@ -149,12 +180,25 @@ public sealed class UpdateInstallerTests : IDisposable
     {
         var zip = CreateZip(("AppleMusicLyrics.App.exe", "exe"));
         var installer = new UpdateInstaller(Path.Combine(_root, "updates"));
-        var release = Release(zip, sha256: null) with { };
+        var release = Release(zip, Sha256(zip));
         release = release with { Package = release.Package! with { Size = zip.Length + 10 } };
 
         var error = await Assert.ThrowsAsync<UpdateException>(() => installer.DownloadAndStageAsync(Client(zip), release));
 
         Assert.Equal(UpdateFailure.Verification, error.Failure);
+    }
+
+    [Fact]
+    public async Task DownloadAndStage_NeverInstallsAPackageWithoutADigest()
+    {
+        var zip = CreateZip(("AppleMusicLyrics.App.exe", "exe"));
+        var installer = new UpdateInstaller(Path.Combine(_root, "updates"));
+
+        var error = await Assert.ThrowsAsync<UpdateException>(() =>
+            installer.DownloadAndStageAsync(Client(zip), Release(zip, sha256: null)));
+
+        Assert.Equal(UpdateFailure.Verification, error.Failure);
+        Assert.Empty(Directory.GetDirectories(installer.UpdatesRoot));
     }
 
     [Fact]

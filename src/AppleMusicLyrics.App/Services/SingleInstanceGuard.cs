@@ -2,12 +2,14 @@ namespace AppleMusicLyrics.App.Services;
 
 public static class SingleInstanceGuard
 {
-    public static Mutex? TryAcquire(string name)
+    public static Mutex? TryAcquire(string name) => TryAcquire(name, TimeSpan.Zero);
+
+    public static Mutex? TryAcquire(string name, TimeSpan timeout)
     {
         var mutex = new Mutex(false, name);
         try
         {
-            if (mutex.WaitOne(TimeSpan.Zero, exitContext: false))
+            if (mutex.WaitOne(timeout, exitContext: false))
             {
                 return mutex;
             }

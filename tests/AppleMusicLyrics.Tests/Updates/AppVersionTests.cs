@@ -62,6 +62,17 @@ public sealed class AppVersionTests
     }
 
     [Fact]
+    public void ShouldOffer_KeepsReleaseCandidatesAwayFromStableBuilds()
+    {
+        var candidate = new AppVersion(1, 0, 0, "rc.1");
+
+        // Even if a release candidate is published without GitHub's pre-release flag.
+        Assert.False(UpdatePolicy.ShouldOffer(candidate, new AppVersion(0, 10, 0), null, manualCheck: true));
+        Assert.True(UpdatePolicy.ShouldOffer(new AppVersion(1, 0, 0, "rc.2"), candidate, null, manualCheck: false));
+        Assert.True(UpdatePolicy.ShouldOffer(new AppVersion(1, 0, 0), candidate, null, manualCheck: false));
+    }
+
+    [Fact]
     public void CleanNotes_TurnsReleaseMarkdownIntoPlainText()
     {
         var notes = UpdateWindow.CleanNotes("## v0.9.0 - Title\r\n\r\n**Lyric sources**\r\n\r\n\r\n- First change\r\n* Second change\r\n");

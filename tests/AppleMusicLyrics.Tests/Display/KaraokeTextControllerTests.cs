@@ -356,6 +356,66 @@ public sealed class KaraokeTextControllerTests
         Assert.Single(text.Inlines.OfType<Run>());
     });
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void SetLine_FloatingWordsKeepRoomForDescenders(int wrappedLines) => OnSta(() =>
+    {
+        // Words hosted on their own elements used to shrink the line box by the font's descent,
+        // cutting off the bottoms of "g", "y" and "p" and pulling the next row up into them.
+        const string lyric = "Says gypsy body, why king up";
+        var words = lyric.Split(' ');
+        var timed = words.Select((word, index) =>
+            new LyricWord(index, index + 0.9, index < words.Length - 1 ? word + " " : word)).ToArray();
+        var line = new LyricsLine(0, words.Length, lyric, Words: timed);
+        var width = wrappedLines == 1 ? 2000.0 : 260.0;
+        TextBlock CreateText() => new()
+        {
+            FontFamily = new FontFamily("Segoe UI"),
+            FontSize = 40,
+            FontWeight = FontWeights.SemiBold,
+            TextWrapping = TextWrapping.Wrap,
+        };
+
+        var plain = CreateText();
+        new KaraokeTextController(plain).SetLine(lyric, line, enabled: true);
+        Render(plain, width);
+        var floating = CreateText();
+        var controller = new KaraokeTextController(floating, emphasizeSustainedWords: true);
+        controller.SetLine(lyric, line, enabled: true);
+        controller.Update(2.5);
+        Render(floating, width);
+
+        Assert.Contains(floating.Inlines, inline => inline is InlineUIContainer);
+        Assert.Equal(plain.ActualHeight, floating.ActualHeight, 0.5);
+        var lines = (int)Math.Round(floating.ActualHeight / floating.LineHeight);
+        Assert.True(wrappedLines == 1 ? lines == 1 : lines > 1, $"{lines} line(s)");
+
+        Assert.True(KaraokeTextController.ManagesLineHeight(floating));
+        Assert.False(KaraokeTextController.ManagesLineHeight(plain));
+
+        // A plain line afterwards returns the host to WPF's own line stacking.
+        controller.SetLine("Plain line", null, enabled: true);
+        Assert.False(KaraokeTextController.ManagesLineHeight(floating));
+        Assert.Equal(DependencyProperty.UnsetValue, floating.ReadLocalValue(TextBlock.LineHeightProperty));
+        Assert.Equal(DependencyProperty.UnsetValue, floating.ReadLocalValue(TextBlock.LineStackingStrategyProperty));
+    });
+
+    [Fact]
+    public void SetLine_LeavesALineHeightTheHostSetItself() => OnSta(() =>
+    {
+        var text = new TextBlock { FontSize = 20, LineHeight = 25, LineStackingStrategy = LineStackingStrategy.BlockLineHeight };
+        var controller = new KaraokeTextController(text, emphasizeSustainedWords: true);
+        var line = new LyricsLine(0, 2, "One Two", Words: [new LyricWord(0, 1, "One "), new LyricWord(1, 2, "Two")]);
+
+        controller.SetLine(line.Text, line, enabled: true);
+        controller.Update(1.5);
+        controller.SetLine("Plain", null, enabled: true);
+
+        Assert.Equal(25, text.LineHeight);
+        Assert.Equal(LineStackingStrategy.BlockLineHeight, text.LineStackingStrategy);
+    });
+
     private static RenderTargetBitmap Render(TextBlock text, double width)
     {
         text.Measure(new Size(width, double.PositiveInfinity));

@@ -1,0 +1,45 @@
+Apple Music Lyrics - recovering from a failed update
+====================================================
+
+Updates replace the app's files one by one and keep a backup of every file they replace.
+If an update fails, the previous version is restored automatically and started again.
+
+Only if the update was cut off part-way (power loss, the update helper was ended in Task
+Manager) can the app folder be left with a mix of old and new files. The app then shows
+"An earlier update did not finish" when it starts. To repair it:
+
+1. Exit Apple Music Lyrics from the tray icon, if it is running.
+2. Download the latest AppleMusicLyrics-vX.Y.Z-win-x64.zip from
+   https://github.com/BeteixZ/floating-lyrics-wam/releases/latest
+3. Extract it over this folder, replacing all files, and start AppleMusicLyrics.App.exe.
+
+Your settings, window positions, per-song offsets and lyrics cache are stored separately in
+%LOCALAPPDATA%\AppleMusicLyrics and are not affected.
+
+The backup of the previous files is in %LOCALAPPDATA%\AppleMusicLyrics\updates\rollback-*.
+Copying its contents back over this folder restores the version you had before. Once the app
+runs normally again, the rollback-* folder can be deleted.
+
+If the app does not start at all, the error log is in %LOCALAPPDATA%\AppleMusicLyrics\logs.
+Please attach errors.log when reporting a problem.
+
+
+Apple Music Lyrics - 更新失败后的恢复
+====================================
+
+更新会逐个替换程序文件，并备份每一个被替换的文件。更新失败时会自动恢复旧版本并重新启动。
+
+只有当更新在中途被打断（断电，或在任务管理器中结束了更新程序）时，程序文件夹才可能新旧文件混杂。
+这时程序启动后会提示“上次更新没有完成”。修复方法：
+
+1. 如果程序正在运行，从托盘图标退出 Apple Music Lyrics。
+2. 从 https://github.com/BeteixZ/floating-lyrics-wam/releases/latest
+   下载最新的 AppleMusicLyrics-vX.Y.Z-win-x64.zip。
+3. 解压并覆盖本文件夹中的全部文件，然后运行 AppleMusicLyrics.App.exe。
+
+设置、窗口位置、单曲偏移和歌词缓存单独保存在 %LOCALAPPDATA%\AppleMusicLyrics，不受影响。
+
+旧版本文件的备份在 %LOCALAPPDATA%\AppleMusicLyrics\updates\rollback-*。
+把其中的内容复制回本文件夹即可回到更新前的版本。程序恢复正常后，可以删除 rollback-* 文件夹。
+
+如果程序完全无法启动，错误日志在 %LOCALAPPDATA%\AppleMusicLyrics\logs。报告问题时请附上 errors.log。

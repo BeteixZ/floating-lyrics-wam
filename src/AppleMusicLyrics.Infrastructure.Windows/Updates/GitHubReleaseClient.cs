@@ -40,9 +40,15 @@ public sealed class GitHubReleaseClient : IDisposable
         return ParseRelease(document.RootElement);
     }
 
-    /// <summary>Maps one GitHub release object; null when it is a draft or its tag is not a version.</summary>
+    /// <summary>
+    /// Maps one GitHub release object; null when it is not an object, is a draft, or its tag is
+    /// not a version. The release has an installable <see cref="ReleaseInfo.Package"/> only when
+    /// it carries exactly <c>AppleMusicLyrics-vX.Y.Z-win-x64.zip</c> with a SHA-256 digest; any
+    /// other release is offered as a download page instead.
+    /// </summary>
     public static ReleaseInfo? ParseRelease(JsonElement release)
     {
+        if (release.ValueKind != JsonValueKind.Object) return null;
         if (GetBool(release, "draft") || !AppVersion.TryParse(GetString(release, "tag_name"), out var version)) return null;
         var page = Uri.TryCreate(GetString(release, "html_url"), UriKind.Absolute, out var htmlUrl) && htmlUrl.Scheme == Uri.UriSchemeHttps
             ? htmlUrl
@@ -52,23 +58,19 @@ public sealed class GitHubReleaseClient : IDisposable
         if (release.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
         {
             var expected = $"AppleMusicLyrics-{version.Tag}-win-x64.zip";
-            ReleaseAsset? fallback = null;
             foreach (var asset in assets.EnumerateArray())
             {
-                var name = GetString(asset, "name");
-                if (name is null || !name.EndsWith("-win-x64.zip", StringComparison.OrdinalIgnoreCase)) continue;
+                if (asset.ValueKind != JsonValueKind.Object) continue;
+                // Another zip on the same release (a debug build, a mistaken upload) is never installed.
+                if (!string.Equals(GetString(asset, "name"), expected, StringComparison.Ordinal)) continue;
                 if (!Uri.TryCreate(GetString(asset, "browser_download_url"), UriKind.Absolute, out var url)
                     || url.Scheme != Uri.UriSchemeHttps) continue;
+                // Without a digest there is nothing to verify the download against.
+                if (ParseSha256(GetString(asset, "digest")) is not { } sha256) continue;
                 var size = asset.TryGetProperty("size", out var sizeValue) && sizeValue.TryGetInt64(out var bytes) ? bytes : 0;
-                var candidate = new ReleaseAsset(name, url, size, ParseSha256(GetString(asset, "digest")));
-                if (string.Equals(name, expected, StringComparison.OrdinalIgnoreCase))
-                {
-                    package = candidate;
-                    break;
-                }
-                fallback ??= candidate;
+                package = new ReleaseAsset(expected, url, size, sha256);
+                break;
             }
-            package ??= fallback;
         }
 
         return new ReleaseInfo(version, GetString(release, "name") ?? version.Tag, GetString(release, "body") ?? string.Empty,

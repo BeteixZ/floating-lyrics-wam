@@ -1,5 +1,35 @@
 # Release Notes
 
+## v1.0.0-rc.1 - Release candidate for 1.0
+
+This is a test version of 1.0. It focuses on reliability: the app keeps working, or tells you what went wrong, when Windows, the settings file or an update misbehaves.
+
+**Display**
+
+- The bottom of letters such as g, p and y is no longer cut off on lines with word-by-word timing.
+- Instrumental tracks whose lyrics file has no lines are treated like tracks without lyrics: the overlay fades out (with **Fade out when lyrics are unavailable** on) instead of showing "Lyrics file has no displayable lines."
+
+**Reliability**
+
+- When Windows' media controls stop answering, the overlay no longer freezes. The app keeps retrying in the background and picks up playback again once Windows responds.
+- Errors are now written to `%LOCALAPPDATA%\AppleMusicLyrics\logs\errors.log`. The tray menu has **Open log folder**. If the app has to close because of an unexpected error, it says so and shows where the details were saved.
+- If the settings file cannot be read (for example while another program has it locked), the app runs on defaults and does not overwrite your file. If your changes cannot be saved, a notification says so.
+- Values in `settings.ini` that are out of range or not a number (from a hand edit or a damaged file) fall back to their defaults instead of breaking the overlay.
+- Clearing the lyrics cache in Settings no longer blocks the window.
+
+**Updates**
+
+- The updater installs only the release's own package and only after its SHA-256 checksum matches the one GitHub recorded.
+- The app hands over to the installer only after the installer confirms it has started and checked the downloaded files. If it cannot start, the update window says so and the current version keeps running.
+- If an update was cut off part-way (for example by a power loss), the app shows a notification at the next start that opens the backup of the previous files. `RECOVERY.txt` in the app folder explains how to repair the installation.
+- Stable versions are never offered a test version such as this one.
+
+**Installing this test version:** it is not offered by the in-app updater. Exit the app from the tray, download `AppleMusicLyrics-v1.0.0-rc.1-win-x64.zip` from this release, extract it over your app folder replacing all files, and start `AppleMusicLyrics.App.exe`. Settings, saved positions, per-song offsets, and the lyrics cache are kept. When 1.0.0 is published, this version updates to it from the tray as usual.
+
+Requirements remain Windows 10 version 19041 or later and the x64 .NET 10 Desktop Runtime.
+
+---
+
 ## v0.10.1 - New default lyric font
 
 **Display**

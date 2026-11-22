@@ -44,8 +44,10 @@ public sealed class UpdateInstaller(string updatesRoot, TimeSpan? downloadIdleTi
     public const string ExecutableName = "AppleMusicLyrics.App.exe";
     public const string ApplyArgument = "--apply-update";
     public const string UpdatedArgument = "--updated";
+    public const string ReadyArgument = "--ready";
     private const string StagingPrefix = "staging-";
     private const string HelperPrefix = "helper-";
+    private const string RollbackPrefix = "rollback-";
     private readonly TimeSpan _downloadIdleTimeout = downloadIdleTimeout ?? TimeSpan.FromSeconds(20);
 
     public string UpdatesRoot { get; } = updatesRoot;
@@ -137,8 +139,9 @@ public sealed class UpdateInstaller(string updatesRoot, TimeSpan? downloadIdleTi
         }
 
         if (asset.Size > 0 && received != asset.Size) throw new UpdateException(UpdateFailure.Verification);
-        if (asset.Sha256 is { } digest
-            && !string.Equals(Convert.ToHexStringLower(hash.GetHashAndReset()), digest, StringComparison.Ordinal))
+        // A package without a published digest is never installed.
+        if (asset.Sha256 is not { Length: 64 } digest
+            || !string.Equals(Convert.ToHexStringLower(hash.GetHashAndReset()), digest, StringComparison.OrdinalIgnoreCase))
         {
             throw new UpdateException(UpdateFailure.Verification);
         }
@@ -179,7 +182,7 @@ public sealed class UpdateInstaller(string updatesRoot, TimeSpan? downloadIdleTi
     /// <paramref name="processId"/> has exited.
     /// </summary>
     public static ProcessStartInfo CreateApplyStartInfo(string helperExecutable, string stagingDirectory,
-        string installDirectory, int processId)
+        string installDirectory, int processId, string? readySignalName = null)
     {
         var start = new ProcessStartInfo(helperExecutable)
         {
@@ -193,24 +196,56 @@ public sealed class UpdateInstaller(string updatesRoot, TimeSpan? downloadIdleTi
         start.ArgumentList.Add(installDirectory);
         start.ArgumentList.Add("--pid");
         start.ArgumentList.Add(processId.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (readySignalName is not null)
+        {
+            start.ArgumentList.Add(ReadyArgument);
+            start.ArgumentList.Add(readySignalName);
+        }
         return start;
     }
 
     /// <summary>Parses the arguments <see cref="CreateApplyStartInfo"/> produces.</summary>
     public static bool TryParseApplyArguments(IReadOnlyList<string> args, out string sourceDirectory,
-        out string targetDirectory, out int processId)
+        out string targetDirectory, out int processId) =>
+        TryParseApplyArguments(args, out sourceDirectory, out targetDirectory, out processId, out _);
+
+    /// <summary>Also returns the signal the helper sets once it has taken over the update.</summary>
+    public static bool TryParseApplyArguments(IReadOnlyList<string> args, out string sourceDirectory,
+        out string targetDirectory, out int processId, out string? readySignalName)
     {
         sourceDirectory = string.Empty;
         targetDirectory = string.Empty;
         processId = 0;
+        readySignalName = null;
         if (args.Count == 0 || args[0] != ApplyArgument) return false;
         for (var index = 1; index + 1 < args.Count; index += 2)
         {
             if (args[index] == "--source") sourceDirectory = args[index + 1];
             else if (args[index] == "--target") targetDirectory = args[index + 1];
             else if (args[index] == "--pid") _ = int.TryParse(args[index + 1], out processId);
+            else if (args[index] == ReadyArgument && UpdateHandoff.IsValidSignalName(args[index + 1]))
+                readySignalName = args[index + 1];
         }
         return sourceDirectory.Length > 0 && targetDirectory.Length > 0;
+    }
+
+    /// <summary>
+    /// Backup folders an installation left behind. A helper deletes its backup once the new
+    /// version is running or the old one is restored, so a remaining folder after no helper is
+    /// active means an update was interrupted or could not be rolled back completely.
+    /// </summary>
+    public IReadOnlyList<string> FindLeftoverBackups()
+    {
+        try
+        {
+            return Directory.Exists(UpdatesRoot)
+                ? Directory.GetDirectories(UpdatesRoot, RollbackPrefix + "*")
+                : [];
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            return [];
+        }
     }
 
     /// <summary>
@@ -218,24 +253,33 @@ public sealed class UpdateInstaller(string updatesRoot, TimeSpan? downloadIdleTi
     /// <paramref name="sourceDirectory"/> over <paramref name="targetDirectory"/>. Both folders must
     /// contain the app, so a tampered argument cannot spray files into another folder.
     /// </summary>
+    /// <summary>
+    /// The checks <see cref="Apply"/> makes before touching anything. The helper runs them
+    /// before telling the running app it may exit, so a staged package that went missing (an
+    /// antivirus quarantine, say) leaves the old app running instead of closing it for nothing.
+    /// </summary>
+    public static bool CanApply(string sourceDirectory, string targetDirectory, out string problem)
+    {
+        var source = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sourceDirectory));
+        var target = Path.TrimEndingDirectorySeparator(Path.GetFullPath(targetDirectory));
+        problem = !File.Exists(Path.Combine(source, ExecutableName))
+            ? $"Refusing to install: {source} does not contain {ExecutableName}."
+            : !File.Exists(Path.Combine(target, ExecutableName))
+                ? $"Refusing to install: {target} does not contain {ExecutableName}."
+                : IsInside(source, target) || IsInside(target, source)
+                    ? "The staging and installation folders overlap."
+                    : string.Empty;
+        return problem.Length == 0;
+    }
+
     public static bool Apply(string sourceDirectory, string targetDirectory, int processId, TimeSpan waitTimeout,
         Action<string> log, Func<bool>? startUpdatedApplication = null)
     {
         var source = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sourceDirectory));
         var target = Path.TrimEndingDirectorySeparator(Path.GetFullPath(targetDirectory));
-        if (!File.Exists(Path.Combine(source, ExecutableName)))
+        if (!CanApply(source, target, out var problem))
         {
-            log($"Refusing to install: {source} does not contain {ExecutableName}.");
-            return false;
-        }
-        if (!File.Exists(Path.Combine(target, ExecutableName)))
-        {
-            log($"Refusing to install: {target} does not contain {ExecutableName}.");
-            return false;
-        }
-        if (IsInside(source, target) || IsInside(target, source))
-        {
-            log("The staging and installation folders overlap.");
+            log(problem);
             return false;
         }
 
@@ -244,16 +288,25 @@ public sealed class UpdateInstaller(string updatesRoot, TimeSpan? downloadIdleTi
             log($"Process {processId} did not exit in time. Installation was skipped.");
             return false;
         }
+        // Checked again: the staged files can disappear while the old app is closing.
+        if (!CanApply(source, target, out problem))
+        {
+            log(problem);
+            return false;
+        }
 
         // Keep backups separate from staging and helper folders. The restarted app cleans those
         // folders on startup, while this helper may still need to roll back.
-        var backup = Path.Combine(Path.GetDirectoryName(source)!, $"rollback-{Guid.NewGuid():N}");
+        var backup = Path.Combine(Path.GetDirectoryName(source)!, $"{RollbackPrefix}{Guid.NewGuid():N}");
         var transaction = new UpdateFileTransaction(target, backup);
         try
         {
             Directory.CreateDirectory(backup);
             var files = Directory.GetFiles(source, "*", SearchOption.AllDirectories);
             var executable = Path.Combine(source, ExecutableName);
+            // Without the new executable the old one would start and pass for a successful update.
+            if (!files.Contains(executable, StringComparer.OrdinalIgnoreCase))
+                throw new IOException($"The staged package lost {ExecutableName}.");
             foreach (var file in files.OrderBy(file => file.Equals(executable, StringComparison.OrdinalIgnoreCase))
                          .ThenBy(file => file, StringComparer.OrdinalIgnoreCase))
                 transaction.Replace(file, Path.GetRelativePath(source, file));

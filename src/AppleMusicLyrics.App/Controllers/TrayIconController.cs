@@ -17,6 +17,7 @@ public sealed class TrayIconController : IDisposable
     private readonly Forms.ToolStripMenuItem _twoLineMenuItem;
     private readonly Forms.ToolStripMenuItem _debugPanelMenuItem;
     private readonly Forms.ToolStripMenuItem _diagnosticsMenuItem;
+    private readonly Forms.ToolStripMenuItem? _logsMenuItem;
     private readonly Forms.ToolStripMenuItem _refreshLyricsMenuItem;
     private readonly Forms.ToolStripMenuItem _chooseLyricsMenuItem;
     private readonly Forms.ToolStripMenuItem _updateMenuItem;
@@ -36,7 +37,8 @@ public sealed class TrayIconController : IDisposable
         Action chooseLyrics,
         Action openSettings,
         Action exit,
-        Action openUpdates)
+        Action openUpdates,
+        Action? openLogs = null)
     {
         var menu = new Forms.ContextMenuStrip();
         var text = LocalizationManager.Instance;
@@ -47,6 +49,7 @@ public sealed class TrayIconController : IDisposable
         _twoLineMenuItem = AddItem(menu, text.Text("Tray.TwoLine"), dispatcher, toggleTwoLine);
         _debugPanelMenuItem = AddItem(menu, text.Text("Tray.Debug"), dispatcher, toggleDebugPanel);
         _diagnosticsMenuItem = AddItem(menu, text.Text("Diagnostics.Open"), dispatcher, openDiagnostics);
+        if (openLogs is not null) _logsMenuItem = AddItem(menu, text.Text("Tray.OpenLogs"), dispatcher, openLogs);
         menu.Items.Add(new Forms.ToolStripSeparator());
         _refreshLyricsMenuItem = AddItem(menu, text.Text("Lyrics.Menu.Rescan"), dispatcher, refreshLyrics);
         _chooseLyricsMenuItem = AddItem(menu, text.Text("Lyrics.Menu.Choose"), dispatcher, chooseLyrics);
@@ -112,6 +115,7 @@ public sealed class TrayIconController : IDisposable
         _twoLineMenuItem.Text = text.Text("Tray.TwoLine");
         _debugPanelMenuItem.Text = text.Text("Tray.Debug");
         _diagnosticsMenuItem.Text = text.Text("Diagnostics.Open");
+        if (_logsMenuItem is not null) _logsMenuItem.Text = text.Text("Tray.OpenLogs");
         _refreshLyricsMenuItem.Text = text.Text("Lyrics.Menu.Rescan");
         _chooseLyricsMenuItem.Text = text.Text("Lyrics.Menu.Choose");
         _refreshLyricsMenuItem.Enabled = canManageLyrics;

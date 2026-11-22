@@ -1,8 +1,11 @@
 using System.Windows;
 using System.Diagnostics;
 using System.IO;
+using System.Windows.Threading;
+using AppleMusicLyrics.App.Composition;
 using AppleMusicLyrics.App.Localization;
 using AppleMusicLyrics.App.Services;
+using AppleMusicLyrics.Infrastructure.Windows.Diagnostics;
 using AppleMusicLyrics.Infrastructure.Windows.Updates;
 
 namespace AppleMusicLyrics.App;
@@ -10,31 +13,65 @@ namespace AppleMusicLyrics.App;
 public partial class App : System.Windows.Application
 {
     private const string MutexName = "AppleMusicLyrics_App_SingleInstance_Mutex";
-    private const string UpdateMutexName = "AppleMusicLyrics_App_Update_Mutex";
+    internal const string UpdateMutexName = "AppleMusicLyrics_App_Update_Mutex";
+    // Long enough for a starting app to release the update lock it holds briefly.
+    private static readonly TimeSpan HelperLockTimeout = TimeSpan.FromSeconds(10);
 
     // Set in Properties when this launch follows an update, for the main window to report.
     internal const string UpdateOutcomeKey = "UpdateOutcome";
     internal const string UpdateOutcomeInstalled = "installed";
     internal const string UpdateOutcomeFailed = "failed";
     private const string UpdateFailedArgument = "--update-failed";
+    // Release CI starts the packaged app with this: it exits with code 0 once the main window
+    // has loaded, polling has started and the UI thread has answered, or non-zero on a crash.
+    internal const string SmokeTestArgument = "--smoke-test";
+
+    internal static bool IsSmokeTest { get; private set; }
 
     protected override void OnStartup(StartupEventArgs e)
     {
+        InstallErrorLogging();
+
         // The update helper (a copy of the previous version): no window, no single-instance lock
         // (the old process still holds it until it exits).
         if (UpdateInstaller.TryParseApplyArguments(e.Args, out var stagingDirectory, out var installDirectory,
-                out var oldProcessId))
+                out var oldProcessId, out var readySignal))
         {
-            using var updateMutex = SingleInstanceGuard.TryAcquire(UpdateMutexName);
-            if (updateMutex is not null)
+            using var updateMutex = SingleInstanceGuard.TryAcquire(UpdateMutexName, HelperLockTimeout);
+            if (updateMutex is null)
             {
-                try { ApplyStagedUpdate(stagingDirectory, installDirectory, oldProcessId); }
+                // Another update is running. The old app is still waiting for the signal below
+                // and keeps running when it does not come.
+                ErrorLog.Report("Updates", "Another update holds the update lock; this helper exits");
+            }
+            else
+            {
+                try
+                {
+                    if (!UpdateInstaller.CanApply(stagingDirectory, installDirectory, out var problem))
+                    {
+                        // Nothing to install: stay silent so the old app keeps running.
+                        ErrorLog.Report("Updates", problem);
+                    }
+                    // Tell the old app it may exit now. An app from 0.10 or earlier passes no
+                    // signal and exits without waiting. If the waiting app is gone, nobody
+                    // agreed to this installation any more.
+                    else if (readySignal is not null && !UpdateHandoff.SignalReady(readySignal))
+                    {
+                        ErrorLog.Report("Updates", "The app that started this update is no longer waiting; not installing");
+                    }
+                    else
+                    {
+                        ApplyStagedUpdate(stagingDirectory, installDirectory, oldProcessId);
+                    }
+                }
                 finally { updateMutex.ReleaseMutex(); }
             }
             Shutdown();
             return;
         }
 
+        IsSmokeTest = e.Args.Contains(SmokeTestArgument);
         var updated = e.Args.Contains(UpdateInstaller.UpdatedArgument);
         var updateFailed = e.Args.Contains(UpdateFailedArgument);
         if (updated)
@@ -45,7 +82,8 @@ public partial class App : System.Windows.Application
         using var updateGate = updated || updateFailed ? null : SingleInstanceGuard.TryAcquire(UpdateMutexName);
         if (!updated && !updateFailed && updateGate is null)
         {
-            Shutdown();
+            // A smoke test that never started the app must not pass.
+            Shutdown(IsSmokeTest ? 4 : 0);
             return;
         }
 
@@ -55,7 +93,7 @@ public partial class App : System.Windows.Application
         if (mutex is null)
         {
             // Another instance is already running
-            Shutdown();
+            Shutdown(IsSmokeTest ? 4 : 0);
             return;
         }
 
@@ -131,6 +169,52 @@ public partial class App : System.Windows.Application
         {
             Log($"Could not restart the previous app: {error.Message}");
             ReportFailure("Update.Status.RestartFailed", logPath);
+        }
+    }
+
+    // Registered before anything else runs, so a startup failure is recorded too.
+    private void InstallErrorLogging()
+    {
+        ErrorLog.Current ??= new ErrorLog(Path.Combine(
+            Path.GetDirectoryName(AppCompositionRoot.GetWritableDataPath("settings.ini")) ?? AppContext.BaseDirectory,
+            "logs"));
+        DispatcherUnhandledException += OnDispatcherUnhandledException;
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        {
+            if (args.ExceptionObject is Exception error) ErrorLog.ReportFatal("Process", error);
+        };
+        // Not fatal on modern .NET, but a faulted fire-and-forget task is otherwise invisible.
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            ErrorLog.Report("Task", "Unobserved task exception", args.Exception.GetBaseException());
+            args.SetObserved();
+        };
+    }
+
+    private int _reportingCrash;
+
+    // The UI thread's state is unknown after an unhandled exception, so the app records it, tells
+    // the user where the log is, and closes instead of carrying on half-broken.
+    private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
+    {
+        ErrorLog.ReportFatal("UI", e.Exception);
+        if (IsSmokeTest || Current?.Properties[UpdateOutcomeKey] as string == UpdateOutcomeInstalled)
+        {
+            // A freshly installed version that fails must exit at once, without a message box:
+            // the update helper (also 0.10's) treats a process that is still running after a few
+            // seconds as a successful update and deletes the backup it would otherwise restore.
+            Environment.Exit(3);
+        }
+        if (Interlocked.Exchange(ref _reportingCrash, 1) != 0) return;
+        try
+        {
+            var text = LocalizationManager.Instance;
+            System.Windows.MessageBox.Show(text.Format("App.Crash.Text", ErrorLog.Current?.FilePath ?? string.Empty),
+                text.Text("App.Crash.Title"), MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        catch (Exception error)
+        {
+            ErrorLog.Report("UI", "Could not show the crash message", error);
         }
     }
 

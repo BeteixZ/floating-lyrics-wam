@@ -5,6 +5,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Windows.Controls;
@@ -24,6 +25,7 @@ using AppleMusicLyrics.Core.Sync;
 using AppleMusicLyrics.Infrastructure.Windows.Cache;
 using AppleMusicLyrics.Infrastructure.Windows.Catalog;
 using AppleMusicLyrics.Infrastructure.Windows.Configuration;
+using AppleMusicLyrics.Infrastructure.Windows.Diagnostics;
 using AppleMusicLyrics.Infrastructure.Windows.Display;
 using AppleMusicLyrics.Infrastructure.Windows.External;
 using AppleMusicLyrics.Infrastructure.Windows.Interop;
@@ -121,6 +123,11 @@ public partial class MainWindow : Window
         var composition = AppCompositionRoot.Create();
         _settingsStore = composition.SettingsStore;
         _settings = composition.Settings;
+        if (_settingsStore.LoadFailed)
+        {
+            ErrorLog.Report("Settings", "Could not read settings; using defaults and leaving the file unchanged",
+                _settingsStore.LoadError);
+        }
         _externalLyricsCache = composition.ExternalLyricsCache;
         LocalizationManager.Instance.SetLanguage(_settings.UiLanguage);
         _playerProvider = composition.PlayerProvider;
@@ -151,7 +158,8 @@ public partial class MainWindow : Window
             OpenLyricsSelection,
             OpenSettingsWindow,
             Close,
-            () => OpenUpdateWindow(checkNow: false));
+            () => OpenUpdateWindow(checkNow: false),
+            OpenLogFolder);
         _updates = new UpdateCoordinator(_settings, PersistCurrentSettings, Dispatcher);
         _updates.AvailabilityChanged += () => _trayIconController.SetAvailableUpdate(_updates.Available?.Version.ToString());
         _updates.NewReleaseFound += release => _trayIconController.ShowNotification(
@@ -261,6 +269,17 @@ public partial class MainWindow : Window
         if (_isClosed)
         {
             return;
+        }
+
+        if (App.IsSmokeTest)
+        {
+            // Let queued work run, then exit through the normal shutdown path.
+            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+            await Task.Delay(TimeSpan.FromSeconds(3));
+            if (_isClosed) return;
+            // No player is a valid snapshot; a refresh that threw is not.
+            if (_hasRuntimeSnapshot && !_runtimeRefreshFailed) Close();
+            else System.Windows.Application.Current.Shutdown(5);
         }
     }
 
@@ -439,6 +458,7 @@ public partial class MainWindow : Window
 
     private void HandleRuntimeError(Exception ex)
     {
+        ErrorLog.Report("Runtime", "Lyrics refresh failed", ex);
         _runtimeRefreshFailed = true;
         _lastRuntimeError = ex;
         _canManageLyrics = false;
@@ -985,7 +1005,7 @@ public partial class MainWindow : Window
 
     private void UpdateOverlayVisibility(RuntimeSnapshot snapshot)
     {
-        _lastHasLyrics = snapshot.Document is not null;
+        _lastHasLyrics = OverlaySnapshotPresenter.HasDisplayableLyrics(snapshot);
         _lastPlaying = snapshot.Player?.Playing ?? false;
 
         if (_overlayHiddenByUser)
@@ -1431,26 +1451,43 @@ public partial class MainWindow : Window
     private void OnClosed(object? sender, EventArgs e)
     {
         _isClosed = true;
-        var diagnosticsWindow = _diagnosticsWindow;
-        _diagnosticsWindow = null;
-        diagnosticsWindow?.Close();
-        var lyricsSelectionWindow = _lyricsSelectionWindow;
-        _lyricsSelectionWindow = null;
-        lyricsSelectionWindow?.Close();
-        HeaderPanel.SizeChanged -= OnDiagnosticContentSizeChanged;
-        LocalizationManager.Instance.LanguageChanged -= OnUiLanguageChanged;
-        UpdateRenderingSubscription();
-        _runtimePollingController.Dispose();
-        StopMouseTracker();
-        PersistCurrentSettings();
-        _updateWindow?.Close();
-        _updates.Dispose();
-        _trayIconController.Dispose();
-        _runtimeService.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        _catalogResolver?.Dispose();
+        // Every step runs even if an earlier one fails: a leftover tray icon or polling timer
+        // would keep the process alive, and the update helper waits for this process to exit.
+        void Step(string name, Action action)
+        {
+            try { action(); }
+            catch (Exception error) { ErrorLog.Report("Shutdown", $"{name} failed", error); }
+        }
+
+        Step("Close diagnostics", () =>
+        {
+            var diagnosticsWindow = _diagnosticsWindow;
+            _diagnosticsWindow = null;
+            diagnosticsWindow?.Close();
+        });
+        Step("Close lyrics selection", () =>
+        {
+            var lyricsSelectionWindow = _lyricsSelectionWindow;
+            _lyricsSelectionWindow = null;
+            lyricsSelectionWindow?.Close();
+        });
+        Step("Detach handlers", () =>
+        {
+            HeaderPanel.SizeChanged -= OnDiagnosticContentSizeChanged;
+            LocalizationManager.Instance.LanguageChanged -= OnUiLanguageChanged;
+            UpdateRenderingSubscription();
+        });
+        Step("Stop polling", _runtimePollingController.Dispose);
+        Step("Stop mouse tracking", StopMouseTracker);
+        Step("Save settings", PersistCurrentSettings);
+        Step("Close update window", () => _updateWindow?.Close());
+        Step("Stop updates", _updates.Dispose);
+        Step("Remove tray icon", _trayIconController.Dispose);
+        Step("Stop runtime", () => _runtimeService.DisposeAsync().AsTask().GetAwaiter().GetResult());
+        Step("Dispose catalog", () => _catalogResolver?.Dispose());
         foreach (var provider in _externalLyricsProviders.OfType<IDisposable>())
         {
-            provider.Dispose();
+            Step($"Dispose {provider.GetType().Name}", provider.Dispose);
         }
     }
 
@@ -1965,8 +2002,30 @@ public partial class MainWindow : Window
 
     private void StartUpdates()
     {
+        // Updates are optional: a failure here must not stop the lyrics from starting.
+        try
+        {
+            StartUpdatesCore();
+        }
+        catch (Exception error)
+        {
+            ErrorLog.Report("Updates", "Could not start the update service", error);
+        }
+    }
+
+    private void StartUpdatesCore()
+    {
         // Remove packages left by earlier updates, then start the automatic schedule.
-        _updates.Installer.CleanUp(AppContext.BaseDirectory);
+        try
+        {
+            _updates.Installer.CleanUp(AppContext.BaseDirectory);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or System.Security.SecurityException)
+        {
+            ErrorLog.Report("Updates", "Could not clean up earlier update files", error);
+        }
+        ReportInterruptedUpdate();
         _updates.ApplySchedule();
         var text = LocalizationManager.Instance;
         switch (System.Windows.Application.Current.Properties[App.UpdateOutcomeKey] as string)
@@ -1979,6 +2038,42 @@ public partial class MainWindow : Window
                 _trayIconController.ShowNotification(text.Text("Update.Balloon.Failed.Title"),
                     text.Text("Update.Balloon.Failed.Text"), () => UpdateCoordinator.OpenReleasePage(null));
                 break;
+        }
+    }
+
+    // A helper deletes its backup when it finishes. One that is left while no helper is running
+    // means an update was cut off (power loss, a killed process) or could not be rolled back,
+    // and the install folder may mix old and new files; the backup holds the previous files.
+    private void ReportInterruptedUpdate()
+    {
+        using var updateLock = SingleInstanceGuard.TryAcquire(App.UpdateMutexName);
+        if (updateLock is null) return; // A helper is still working.
+        try
+        {
+            var leftovers = _updates.Installer.FindLeftoverBackups();
+            if (leftovers.Count == 0) return;
+            var backup = leftovers[0];
+            ErrorLog.Report("Updates", $"An earlier update did not finish; previous files are in {backup}");
+            var text = LocalizationManager.Instance;
+            _trayIconController.ShowNotification(text.Text("Update.Balloon.Interrupted.Title"),
+                text.Text("Update.Balloon.Interrupted.Text"), () => OpenFolder(backup));
+        }
+        finally
+        {
+            updateLock.ReleaseMutex();
+        }
+    }
+
+    private static void OpenFolder(string path)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true })?.Dispose();
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            ErrorLog.Report("Updates", "Could not open a folder", error);
         }
     }
 
@@ -2192,7 +2287,40 @@ public partial class MainWindow : Window
             }
         }
 
-        _settingsStore.Save(_settings);
+        try
+        {
+            _settingsStore.Save(_settings);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or System.Security.SecurityException)
+        {
+            ErrorLog.Report("Settings", "Could not save settings", error);
+            if (!_reportedSettingsSaveFailure && !_isClosed)
+            {
+                // Once per run: settings changes stay in effect until the app exits.
+                _reportedSettingsSaveFailure = true;
+                var text = LocalizationManager.Instance;
+                _trayIconController.ShowNotification(text.Text("Settings.SaveFailed.Title"),
+                    text.Text("Settings.SaveFailed.Text"), OpenLogFolder);
+            }
+        }
+    }
+
+    private bool _reportedSettingsSaveFailure;
+
+    private void OpenLogFolder()
+    {
+        if (ErrorLog.Current is not { } log) return;
+        try
+        {
+            Directory.CreateDirectory(log.Directory);
+            Process.Start(new ProcessStartInfo(log.Directory) { UseShellExecute = true });
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException
+            or System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            ErrorLog.Report("Logs", "Could not open the log folder", error);
+        }
     }
 
     private void CacheCurrentExternalLyrics(long? expectedGeneration)
@@ -2479,7 +2607,7 @@ public partial class MainWindow : Window
             reference.FontStyle,
             reference.FontWeight,
             reference.FontStretch);
-        var lineHeight = double.IsFinite(reference.LineHeight) && reference.LineHeight > 0 && reference.FontSize > 0
+        var lineHeight = HasOwnLineHeight(reference)
             ? reference.LineHeight * fontSize / reference.FontSize
             : 0;
         return new LyricTextMeasurement(text, typeface, fontSize, lineHeight, pixelsPerDip);
@@ -2509,7 +2637,7 @@ public partial class MainWindow : Window
             System.Windows.Media.Brushes.White,
             pixelsPerDip);
 
-        if (double.IsFinite(reference.LineHeight) && reference.LineHeight > 0 && reference.FontSize > 0)
+        if (HasOwnLineHeight(reference))
         {
             formattedText.LineHeight = reference.LineHeight * fontSize / reference.FontSize;
         }
@@ -2524,6 +2652,12 @@ public partial class MainWindow : Window
 
         return new System.Windows.Size(Math.Ceiling(formattedText.Width), Math.Ceiling(formattedText.Height));
     }
+
+    // A line height the karaoke controller set for the line on screen does not apply to the
+    // text being measured; such text is measured with its own natural line height.
+    private static bool HasOwnLineHeight(TextBlock reference) =>
+        double.IsFinite(reference.LineHeight) && reference.LineHeight > 0 && reference.FontSize > 0
+        && !KaraokeTextController.ManagesLineHeight(reference);
 
     private void UpdateTextMaxWidths(double windowWidth)
     {

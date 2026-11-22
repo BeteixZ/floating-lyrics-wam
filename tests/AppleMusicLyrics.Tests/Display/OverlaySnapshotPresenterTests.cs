@@ -74,6 +74,26 @@ public sealed class OverlaySnapshotPresenterTests
     }
 
     [Fact]
+    public void HasDisplayableLyrics_IsFalseForAnInstrumentalsEmptyLyricsFile()
+    {
+        // Instrumentals can resolve to a lyrics file without text. With auto-hide on, the overlay
+        // must hide as for a song without lyrics instead of saying the file has nothing to show.
+        RuntimeSnapshot Snapshot(params LyricsLine[] lines) => new(
+            new LyricsDocument("id", "ok", "lyrics.ttml", DateTimeOffset.UtcNow, lines, 200),
+            new PlayerState("Interlude", "Artist", "Album", 10, 200, true),
+            new ActiveLyricState(-1, null, null, lines.FirstOrDefault()),
+            new LyricsResolution(LyricsResolutionStatus.Resolved, LyricsResolutionConfidence.High,
+                LyricsResolutionSource.AppleMusicCache, "resolved"));
+
+        Assert.False(OverlaySnapshotPresenter.HasDisplayableLyrics(Snapshot()));
+        Assert.False(OverlaySnapshotPresenter.HasDisplayableLyrics(Snapshot(new LyricsLine(0, 200, "  "))));
+        Assert.True(OverlaySnapshotPresenter.HasDisplayableLyrics(Snapshot(new LyricsLine(0, 2, " "), new LyricsLine(2, 4, "Hi"))));
+        Assert.False(OverlaySnapshotPresenter.HasDisplayableLyrics(Snapshot() with { Document = null }));
+        // With auto-hide off (and in the tray tooltip) an instrumental shows nothing, not a message.
+        Assert.Equal(string.Empty, OverlaySnapshotPresenter.CreateLyrics(Snapshot(), _english).CurrentText);
+    }
+
+    [Fact]
     public void CreateLyrics_ResolvedDocument_MapsActiveLines()
     {
         var previous = new LyricsLine(0, 1, "previous");

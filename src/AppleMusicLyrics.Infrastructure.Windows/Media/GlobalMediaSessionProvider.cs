@@ -7,76 +7,76 @@ namespace AppleMusicLyrics.Infrastructure.Windows.Media;
 
 public sealed class GlobalMediaSessionProvider : IPlayerSessionProvider
 {
-    private Task<GlobalSystemMediaTransportControlsSessionManager>? _managerTask;
+    private readonly SessionSampler<GlobalSystemMediaTransportControlsSessionManager, PlayerState?> _sampler;
 
     public GlobalMediaSessionProvider(bool allowNonAppleMediaSessions = false)
     {
         AllowNonAppleMediaSessions = allowNonAppleMediaSessions;
+        // Each poll has a deadline and a stuck or disconnected manager is replaced, so one
+        // unanswered SMTC call cannot freeze the lyrics until the app restarts.
+        _sampler = new(
+            token => GlobalSystemMediaTransportControlsSessionManager.RequestAsync().AsTask(token),
+            ReadPlayerStateAsync);
     }
 
     public bool AllowNonAppleMediaSessions { get; set; }
 
-    public async Task<PlayerState?> GetCurrentPlayerStateAsync(CancellationToken cancellationToken = default)
+    public async Task<PlayerState?> GetCurrentPlayerStateAsync(CancellationToken cancellationToken = default) =>
+        await _sampler.ReadAsync(cancellationToken).ConfigureAwait(false);
+
+    private async Task<PlayerState?> ReadPlayerStateAsync(
+        GlobalSystemMediaTransportControlsSessionManager manager, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        try
+        var currentSession = manager.GetCurrentSession();
+        var (currentState, currentError) = await TryCreatePlayerStateAsync(currentSession, cancellationToken).ConfigureAwait(false);
+        if (MediaSessionSelectionPolicy.IsAppleMusicState(currentState))
         {
-            var manager = await GetManagerTask().ConfigureAwait(false);
-            var currentSession = manager.GetCurrentSession();
-            var currentState = await TryCreatePlayerStateAsync(currentSession, cancellationToken).ConfigureAwait(false);
-            if (MediaSessionSelectionPolicy.IsAppleMusicState(currentState))
+            return currentState;
+        }
+
+        var states = new List<PlayerState>();
+        var sessions = 0;
+        var lastError = currentError;
+        var failures = currentError is null ? 0 : 1;
+        foreach (var session in manager.GetSessions())
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            sessions++;
+            var (state, error) = await TryCreatePlayerStateAsync(session, cancellationToken).ConfigureAwait(false);
+            if (state is not null)
             {
-                return currentState;
+                states.Add(state);
             }
-
-            var states = new List<PlayerState>();
-            foreach (var session in manager.GetSessions())
+            else if (error is not null)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var state = await TryCreatePlayerStateAsync(session, cancellationToken).ConfigureAwait(false);
-                if (state is not null)
-                {
-                    states.Add(state);
-                }
+                failures++;
+                lastError = error;
             }
+        }
 
-            return MediaSessionSelectionPolicy.Select(
-                currentState,
-                states,
-                AllowNonAppleMediaSessions);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        // No sessions is a normal answer (nothing is playing). Sessions that all fail to read
+        // point at a broken manager, which the sampler replaces after repeated failures.
+        if (states.Count == 0 && currentState is null && failures > 0 && failures >= sessions)
         {
-            throw;
+            throw new InvalidOperationException("No media session could be read.", lastError);
         }
-        catch
-        {
-            return null;
-        }
+
+        return MediaSessionSelectionPolicy.Select(
+            currentState,
+            states,
+            AllowNonAppleMediaSessions);
     }
 
-    private Task<GlobalSystemMediaTransportControlsSessionManager> GetManagerTask()
-    {
-        var task = _managerTask;
-        // A transient RequestAsync failure (early boot, service restart) must not be cached
-        // forever; the next poll retries instead of returning null until the app restarts.
-        if (task is null || task.IsFaulted || task.IsCanceled)
-        {
-            task = GlobalSystemMediaTransportControlsSessionManager.RequestAsync().AsTask();
-            _managerTask = task;
-        }
-        return task;
-    }
-
-    private static async Task<PlayerState?> TryCreatePlayerStateAsync(
+    private static async Task<(PlayerState? State, Exception? Error)> TryCreatePlayerStateAsync(
         GlobalSystemMediaTransportControlsSession? session,
         CancellationToken cancellationToken)
     {
         if (session is null)
         {
-            return null;
+            return (null, null);
         }
 
         try
@@ -99,7 +99,7 @@ public sealed class GlobalMediaSessionProvider : IPlayerSessionProvider
                 mediaProperties?.Artist,
                 mediaProperties?.AlbumTitle);
 
-            return new PlayerState(
+            return (new PlayerState(
                 Title: mediaProperties?.Title,
                 Artist: cleanArtist,
                 Album: cleanAlbum,
@@ -107,15 +107,16 @@ public sealed class GlobalMediaSessionProvider : IPlayerSessionProvider
                 Duration: Math.Max(0, duration),
                 Playing: playbackInfo?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing,
                 SourceAppId: session.SourceAppUserModelId,
-                PositionAgeSeconds: double.IsFinite(positionAge) && positionAge >= 0 ? positionAge : null);
+                PositionAgeSeconds: double.IsFinite(positionAge) && positionAge >= 0 ? positionAge : null), null);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
-        catch
+        catch (Exception error)
         {
-            return null;
+            // One session that cannot be read (its app is closing) must not hide the others.
+            return (null, error);
         }
     }
 }

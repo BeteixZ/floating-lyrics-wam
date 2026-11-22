@@ -5,6 +5,7 @@ using System.Windows.Threading;
 using AppleMusicLyrics.App.Localization;
 using AppleMusicLyrics.App.Services;
 using AppleMusicLyrics.Core.Configuration;
+using AppleMusicLyrics.Infrastructure.Windows.Diagnostics;
 using AppleMusicLyrics.Infrastructure.Windows.External;
 using Drawing = System.Drawing;
 using Forms = System.Windows.Forms;
@@ -195,16 +196,26 @@ public partial class SettingsWindow : Window
         _cacheClearing = true;
         _cacheStatusKey = "Settings.Cache.Clearing";
         RenderCacheUsage();
-        var result = await Task.Run(_lyricsCache.Clear).ConfigureAwait(false);
+        var cache = _lyricsCache;
+        ExternalLyricsCacheClearResult? result = null;
+        try
+        {
+            result = await Task.Run(cache.Clear).ConfigureAwait(false);
+        }
+        catch (Exception error)
+        {
+            // An async void handler must not let an unexpected cache failure end the app.
+            ErrorLog.Report("Settings", "Could not clear the lyrics cache", error);
+        }
         if (_closed || Dispatcher.HasShutdownStarted) return;
         try
         {
             await Dispatcher.InvokeAsync(() =>
             {
-                if (_closed) return;
                 _cacheClearing = false;
-                _cacheUsage = result.RemainingUsage;
-                _cacheStatusKey = result.Success ? null : "Settings.Cache.ClearFailed";
+                if (_closed) return;
+                if (result is not null) _cacheUsage = result.RemainingUsage;
+                _cacheStatusKey = result is { Success: true } ? null : "Settings.Cache.ClearFailed";
                 RenderCacheUsage();
             });
         }
