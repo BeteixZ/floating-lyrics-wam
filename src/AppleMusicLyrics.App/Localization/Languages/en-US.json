@@ -274,6 +274,13 @@
     "Settings.Section.Updates": "Updates",
     "Settings.Toggle.CheckUpdates": "Check for updates automatically",
     "Settings.ToolTip.CheckUpdates": "Checks GitHub Releases at startup and once a day",
-    "Settings.Action.CheckUpdatesNow": "Check now"
+    "Settings.Action.CheckUpdatesNow": "Check now",
+    "Settings.Updates.UpToDate": "No update available. You have {0}.",
+    "Settings.Updates.Failed": "Couldn't check for updates. Check your connection and try again.",
+    "Settings.Updates.LastCheck": "Last checked {0}",
+    "Settings.Updates.NextCheck": "next automatic check {0}",
+    "Settings.Updates.Today": "today at {0}",
+    "Settings.Updates.Tomorrow": "tomorrow at {0}",
+    "Settings.Updates.Yesterday": "yesterday at {0}"
   }
 }

@@ -5,6 +5,7 @@ using System.Windows.Threading;
 using AppleMusicLyrics.App.Localization;
 using AppleMusicLyrics.App.Services;
 using AppleMusicLyrics.Core.Configuration;
+using AppleMusicLyrics.Core.Updates;
 using AppleMusicLyrics.Infrastructure.Windows.Diagnostics;
 using AppleMusicLyrics.Infrastructure.Windows.External;
 using Drawing = System.Drawing;
@@ -22,7 +23,8 @@ public partial class SettingsWindow : Window
 
     private readonly Action<AppSettings>? _applyPreview;
     private readonly Action? _openDiagnostics;
-    private readonly Action? _checkForUpdates;
+    private readonly IUpdateChecks? _updates;
+    private readonly Action<ReleaseInfo>? _showRelease;
     private readonly SongOffsetEditor? _songOffset;
     private readonly ExternalLyricsCache? _lyricsCache;
     private readonly DispatcherTimer _cacheUsageTimer;
@@ -42,15 +44,18 @@ public partial class SettingsWindow : Window
     private double _globalOffsetBaseline;
     private ExternalLyricsCacheUsage _cacheUsage = new(0, 0, true);
     private string? _cacheStatusKey;
+    private bool _checkingUpdates;
 
     public SettingsWindow(AppSettings settings, Action<AppSettings>? applyPreview = null, ExternalLyricsCache? lyricsCache = null,
-        Action? openDiagnostics = null, Action? checkForUpdates = null, SongOffsetEditor? songOffset = null)
+        Action? openDiagnostics = null, IUpdateChecks? updates = null, Action<ReleaseInfo>? showRelease = null,
+        SongOffsetEditor? songOffset = null)
     {
         _languageOnCancel = _localization.Preference;
         Settings = settings.Clone();
         _applyPreview = applyPreview;
         _openDiagnostics = openDiagnostics;
-        _checkForUpdates = checkForUpdates;
+        _updates = updates;
+        _showRelease = showRelease;
         _songOffset = songOffset;
         _lyricsCache = lyricsCache;
         _localization.SetLanguage(Settings.UiLanguage);
@@ -74,13 +79,94 @@ public partial class SettingsWindow : Window
         Loaded += SettingsWindow_OnLoaded;
         UpdateFontPreview();
         RefreshCacheUsage();
+        RenderUpdateStatus();
     }
 
     public AppSettings Settings { get; }
 
     private void OpenDiagnosticsButton_OnClick(object sender, RoutedEventArgs e) => _openDiagnostics?.Invoke();
 
-    private void CheckUpdatesButton_OnClick(object sender, RoutedEventArgs e) => _checkForUpdates?.Invoke();
+    // Checks in place: only a release worth installing opens the update window. "Up to date"
+    // and failures are shown next to the button with the check times.
+    private async void CheckUpdatesButton_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (_updates is null || _checkingUpdates) return;
+        _checkingUpdates = true;
+        RenderUpdateStatus();
+        UpdateCheckResult result;
+        try
+        {
+            result = await _updates.CheckAsync(manual: true);
+        }
+        catch (Exception error)
+        {
+            // CheckAsync handles network and response errors itself; anything else must not
+            // take the app down from a button click.
+            ErrorLog.Report("Updates", "Update check failed", error);
+            result = new UpdateCheckResult(null, false, true);
+        }
+        finally
+        {
+            _checkingUpdates = false;
+        }
+
+        if (_closed) return;
+        RenderUpdateStatus(result);
+        if (result.Offered && result.Release is { } release) _showRelease?.Invoke(release);
+    }
+
+    private void CheckForUpdatesCheckBox_OnClick(object sender, RoutedEventArgs e) => RenderUpdateStatus();
+
+    private UpdateCheckResult? _shownUpdateResult;
+
+    private void RenderUpdateStatus(UpdateCheckResult? result = null)
+    {
+        if (_updates is null)
+        {
+            CheckUpdatesButton.IsEnabled = false;
+            return;
+        }
+
+        if (result is not null) _shownUpdateResult = result;
+        var last = _updates.LastCheck;
+        var shown = _shownUpdateResult ?? last?.Result;
+        CheckUpdatesButton.IsEnabled = !_checkingUpdates;
+        var status = _checkingUpdates ? _localization.Text("Update.Headline.Checking")
+            : shown is null ? null
+            : shown.Failed ? _localization.Text("Settings.Updates.Failed")
+            : shown.Offered && shown.Release is { } release ? _localization.Format("Update.Headline.Available", release.Version)
+            : _localization.Format("Settings.Updates.UpToDate", _updates.CurrentVersion);
+        UpdateStatusText.Text = status ?? string.Empty;
+        UpdateStatusText.Visibility = status is null ? Visibility.Collapsed : Visibility.Visible;
+
+        var now = DateTimeOffset.Now;
+        var parts = new List<string>(2);
+        if (last is not null)
+        {
+            parts.Add(_localization.Format("Settings.Updates.LastCheck", FormatCheckTime(last.CheckedAt, now)));
+        }
+        // The automatic schedule follows the saved setting; an unsaved toggle has no time yet.
+        if (Settings.CheckForUpdates && _updates.NextAutomaticCheck is { } next)
+        {
+            parts.Add(_localization.Format("Settings.Updates.NextCheck", FormatCheckTime(next, now)));
+        }
+        UpdateScheduleText.Text = string.Join(" · ", parts);
+        UpdateScheduleText.Visibility = parts.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    internal string FormatCheckTime(DateTimeOffset time, DateTimeOffset now)
+    {
+        var local = time.ToLocalTime();
+        var clock = local.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+        var days = (local.Date - now.ToLocalTime().Date).Days;
+        return days switch
+        {
+            0 => _localization.Format("Settings.Updates.Today", clock),
+            1 => _localization.Format("Settings.Updates.Tomorrow", clock),
+            -1 => _localization.Format("Settings.Updates.Yesterday", clock),
+            _ => local.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture),
+        };
+    }
 
     protected override void OnClosed(EventArgs e)
     {
@@ -135,6 +221,7 @@ public partial class SettingsWindow : Window
             RefreshLanguageChoices();
             UpdateSliderLabels();
             RenderCacheUsage();
+            RenderUpdateStatus();
         }, System.Windows.Threading.DispatcherPriority.DataBind);
     }
 

@@ -618,8 +618,18 @@
               <Border Style="{StaticResource CardStyle}">
                 <StackPanel>
                   <TextBlock Style="{StaticResource SectionTitleStyle}" Text="{loc:Loc Settings.Section.Updates}" />
-                  <CheckBox Style="{StaticResource ToggleStyle}" Content="{loc:Loc Settings.Toggle.CheckUpdates}" ToolTip="{loc:Loc Settings.ToolTip.CheckUpdates}" IsChecked="{Binding Settings.CheckForUpdates, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" />
-                  <Button x:Name="CheckUpdatesButton" Content="{loc:Loc Settings.Action.CheckUpdatesNow}" Style="{StaticResource GhostButtonStyle}" HorizontalAlignment="Left" Margin="0,12,0,0" Click="CheckUpdatesButton_OnClick" />
+                  <CheckBox x:Name="CheckForUpdatesCheckBox" Style="{StaticResource ToggleStyle}" Content="{loc:Loc Settings.Toggle.CheckUpdates}" ToolTip="{loc:Loc Settings.ToolTip.CheckUpdates}" IsChecked="{Binding Settings.CheckForUpdates, RelativeSource={RelativeSource AncestorType=Window}, Mode=TwoWay}" Click="CheckForUpdatesCheckBox_OnClick" />
+                  <Grid Margin="0,12,0,0">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="Auto" />
+                      <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Button x:Name="CheckUpdatesButton" Content="{loc:Loc Settings.Action.CheckUpdatesNow}" Style="{StaticResource GhostButtonStyle}" VerticalAlignment="Center" Click="CheckUpdatesButton_OnClick" />
+                    <StackPanel Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite">
+                      <TextBlock x:Name="UpdateStatusText" TextWrapping="Wrap" Visibility="Collapsed" />
+                      <TextBlock x:Name="UpdateScheduleText" Foreground="{DynamicResource TextFillColorSecondaryBrush}" FontSize="12" TextWrapping="Wrap" Visibility="Collapsed" />
+                    </StackPanel>
+                  </Grid>
                 </StackPanel>
               </Border>
               <Border Style="{StaticResource CardStyle}">

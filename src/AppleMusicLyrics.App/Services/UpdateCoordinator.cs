@@ -12,12 +12,29 @@ namespace AppleMusicLyrics.App.Services;
 
 public sealed record UpdateCheckResult(ReleaseInfo? Release, bool Offered, bool Failed);
 
+/// <summary>When the last finished check ran and what it found.</summary>
+public sealed record UpdateCheckStatus(DateTimeOffset CheckedAt, UpdateCheckResult Result);
+
+/// <summary>What the settings window needs to check for updates and show the outcome.</summary>
+public interface IUpdateChecks
+{
+    AppVersion CurrentVersion { get; }
+
+    /// <summary>The last finished check, automatic or manual, or null before the first one.</summary>
+    UpdateCheckStatus? LastCheck { get; }
+
+    /// <summary>When the next automatic check is due, or null while automatic checks are off.</summary>
+    DateTimeOffset? NextAutomaticCheck { get; }
+
+    Task<UpdateCheckResult> CheckAsync(bool manual, CancellationToken cancellationToken = default);
+}
+
 /// <summary>
 /// Checks GitHub Releases for a newer version (at startup, then daily, when enabled in settings,
 /// plus on demand) and hands a found release to the update window. All members are used on the
 /// UI thread.
 /// </summary>
-public sealed class UpdateCoordinator : IDisposable
+public sealed class UpdateCoordinator : IUpdateChecks, IDisposable
 {
     private static readonly TimeSpan FirstCheckDelay = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan CheckInterval = TimeSpan.FromHours(24);
@@ -40,6 +57,7 @@ public sealed class UpdateCoordinator : IDisposable
         _timer.Tick += async (_, _) =>
         {
             _timer.Interval = CheckInterval;
+            NextAutomaticCheck = DateTimeOffset.Now + CheckInterval;
             await CheckAsync(manual: false);
         };
     }
@@ -57,6 +75,10 @@ public sealed class UpdateCoordinator : IDisposable
     /// <summary>Raised once per version when an automatic check finds it.</summary>
     public event Action<ReleaseInfo>? NewReleaseFound;
 
+    public UpdateCheckStatus? LastCheck { get; private set; }
+
+    public DateTimeOffset? NextAutomaticCheck { get; private set; }
+
     public string InstallDirectory => AppContext.BaseDirectory;
 
     public HttpClient HttpClient => _client.HttpClient;
@@ -66,11 +88,14 @@ public sealed class UpdateCoordinator : IDisposable
     {
         if (_settings.CheckForUpdates)
         {
-            if (!_timer.IsEnabled) _timer.Start();
+            if (_timer.IsEnabled) return;
+            _timer.Start();
+            NextAutomaticCheck = DateTimeOffset.Now + _timer.Interval;
         }
         else
         {
             _timer.Stop();
+            NextAutomaticCheck = null;
         }
     }
 
@@ -78,6 +103,21 @@ public sealed class UpdateCoordinator : IDisposable
     {
         if (_checking && !manual) return new UpdateCheckResult(Available, Available is not null, false);
         _checking = true;
+        UpdateCheckResult result;
+        try
+        {
+            result = await CheckCoreAsync(manual, cancellationToken);
+        }
+        finally
+        {
+            _checking = false;
+        }
+        if (!cancellationToken.IsCancellationRequested) LastCheck = new UpdateCheckStatus(DateTimeOffset.Now, result);
+        return result;
+    }
+
+    private async Task<UpdateCheckResult> CheckCoreAsync(bool manual, CancellationToken cancellationToken)
+    {
         try
         {
             var release = await _client.GetLatestReleaseAsync(cancellationToken);
@@ -102,10 +142,6 @@ public sealed class UpdateCoordinator : IDisposable
                 ErrorLog.Report("Updates", "Update check failed", error);
             }
             return new UpdateCheckResult(null, false, true);
-        }
-        finally
-        {
-            _checking = false;
         }
     }
 

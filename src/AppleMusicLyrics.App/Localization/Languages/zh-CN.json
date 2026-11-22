@@ -274,6 +274,13 @@
     "Settings.Section.Updates": "更新",
     "Settings.Toggle.CheckUpdates": "自动检查更新",
     "Settings.ToolTip.CheckUpdates": "启动时及每天检查一次 GitHub Releases",
-    "Settings.Action.CheckUpdatesNow": "立即检查"
+    "Settings.Action.CheckUpdatesNow": "立即检查",
+    "Settings.Updates.UpToDate": "无可用更新，当前版本为 {0}。",
+    "Settings.Updates.Failed": "无法检查更新，请检查网络连接后重试。",
+    "Settings.Updates.LastCheck": "上次检查：{0}",
+    "Settings.Updates.NextCheck": "下次自动检查：{0}",
+    "Settings.Updates.Today": "今天 {0}",
+    "Settings.Updates.Tomorrow": "明天 {0}",
+    "Settings.Updates.Yesterday": "昨天 {0}"
   }
 }

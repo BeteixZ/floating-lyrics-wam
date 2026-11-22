@@ -22,6 +22,7 @@ using AppleMusicLyrics.Core.Display;
 using AppleMusicLyrics.Core.Models;
 using AppleMusicLyrics.Core.Parsing;
 using AppleMusicLyrics.Core.Sync;
+using AppleMusicLyrics.Core.Updates;
 using AppleMusicLyrics.Infrastructure.Windows.Cache;
 using AppleMusicLyrics.Infrastructure.Windows.Catalog;
 using AppleMusicLyrics.Infrastructure.Windows.Configuration;
@@ -1865,6 +1866,12 @@ public partial class MainWindow : Window
         if (_settings.PureMode)
         {
             SetWindowDragging(true);
+            // Drag the card, not the transparent envelope around it. Windows keeps a dragged
+            // window's top edge on screen, so dragging the envelope kept the card at least the
+            // envelope's top padding below the top of the screen. The envelope is rebuilt
+            // around the card's new position once the drag ends.
+            CancelPureModeBoundsAnimation();
+            ExitPureEnvelope(resizeWindowToCard: true);
         }
 
         try
@@ -2078,7 +2085,7 @@ public partial class MainWindow : Window
     }
 
     // A known release opens directly; otherwise (or when asked to) the window checks first.
-    private void OpenUpdateWindow(bool checkNow)
+    private void OpenUpdateWindow(bool checkNow, ReleaseInfo? release = null)
     {
         if (_isClosed) return;
         if (_updateWindow is not null)
@@ -2087,7 +2094,9 @@ public partial class MainWindow : Window
             return;
         }
 
-        _updateWindow = new UpdateWindow(_updates, checkNow ? null : _updates.Available);
+        // Topmost: the overlay and the Settings window it owns are topmost, so a normal window
+        // opened from them (or from the tray) would appear behind them.
+        _updateWindow = new UpdateWindow(_updates, checkNow ? null : release ?? _updates.Available) { Topmost = true };
         _updateWindow.Closed += (_, _) => _updateWindow = null;
         _updateWindow.Show();
         _updateWindow.Activate();
@@ -2103,7 +2112,8 @@ public partial class MainWindow : Window
             previewSettings => ApplySettings(previewSettings, persist: true, cacheGeneration),
             lyricsCache: _externalLyricsCache,
             openDiagnostics: OpenDiagnosticsWindow,
-            checkForUpdates: () => OpenUpdateWindow(checkNow: true),
+            updates: _updates,
+            showRelease: release => OpenUpdateWindow(checkNow: false, release),
             songOffset: player is { Title.Length: > 0 }
                 ? new SettingsWindow.SongOffsetEditor(player.Title, _runtimeService.GetSongOffset(player),
                     value => _runtimeService.SetSongOffset(player, value))
@@ -2203,8 +2213,7 @@ public partial class MainWindow : Window
     private void ApplySettings(AppSettings sourceSettings, bool persist, long? expectedCacheGeneration = null)
     {
         // In Pure Mode the window is a transparent envelope larger than the card. Shrink it back
-        // to the card first: ApplyAppearanceSettings does so anyway, and restoring the envelope's
-        // corner onto the card-sized window afterwards moved the card up and left on every save.
+        // to the card first so the card is laid out from where it is actually shown.
         CancelPureModeBoundsAnimation();
         ExitPureEnvelope(resizeWindowToCard: true);
         var currentLeft = Left;
@@ -2249,12 +2258,15 @@ public partial class MainWindow : Window
             SetWindowDragging(false);
         }
 
-        // Apply appearance settings but preserve the active mode's current placement.
+        // Apply appearance settings but preserve the window's current placement. Pure Mode keeps
+        // its place by itself: ApplyAppearanceSettings re-centers the card on its current center
+        // and grows the window back into the envelope around it. Writing the card's old corner
+        // onto that envelope shifted the card by the envelope padding on every apply.
         ApplyAppearanceSettings();
-        Left = currentLeft;
-        Top = currentTop;
         if (!_settings.PureMode)
         {
+            Left = currentLeft;
+            Top = currentTop;
             Width = currentWidth;
             Height = currentHeight;
             // Font edits must resize the current line even when playback is paused.
