@@ -12,6 +12,11 @@ namespace AppleMusicLyrics.Tests.External;
 
 public sealed class QQMusicLyricsProviderTests
 {
+    // A hanging search then expires after half a second while the rest of the lookup keeps a
+    // generous budget, so a slow CI machine cannot turn the expected timeout into a cancellation.
+    private static QQMusicLyricsProvider CreateWithShortSearchBudget(HttpMessageHandler handler)
+        => new(timeoutSeconds: 30, messageHandler: handler) { SearchBudget = TimeSpan.FromMilliseconds(500) };
+
     [Theory]
     [InlineData("{\"code\":2001}")]
     [InlineData("{\"code\":0,\"req_1\":{\"code\":2001}}")]
@@ -242,18 +247,20 @@ public sealed class QQMusicLyricsProviderTests
                 return XmlResponse("[00:01.00]Successful fallback");
             if (request.Uri.AbsolutePath.Contains("smartbox", StringComparison.Ordinal) == hangSmartbox)
             {
-                using var registration = token.Register(() => endpointCanceled.TrySetResult());
+                // Not disposed: the canceled wait below can resume this handler, and disposing the
+                // registration then, before its callback ran, lost the cancellation signal.
+                token.Register(() => endpointCanceled.TrySetResult());
                 return ignoreCancellation ? await abandoned.Task : await abandoned.Task.WaitAsync(token);
             }
             return SearchResponse(request, Candidate);
         });
-        using var provider = new QQMusicLyricsProvider(timeoutSeconds: 2, messageHandler: handler);
+        using var provider = CreateWithShortSearchBudget(handler);
         try
         {
-            var document = await provider.FetchAsync(Player).WaitAsync(TimeSpan.FromSeconds(5));
+            var document = await provider.FetchAsync(Player).WaitAsync(TimeSpan.FromSeconds(10));
 
             Assert.Equal("Successful fallback", Assert.Single(document!.Lines).Text);
-            await endpointCanceled.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await endpointCanceled.Task.WaitAsync(TimeSpan.FromSeconds(10));
             Assert.Single(handler.Requests, request => request.Uri.AbsolutePath.Contains("lyric_download", StringComparison.Ordinal));
         }
         finally
@@ -275,7 +282,7 @@ public sealed class QQMusicLyricsProviderTests
                 ? XmlResponse(failSearch ? string.Empty : "[00:01.00]Recovered lyrics")
                 : SearchResponse(request, Candidate);
         });
-        using var provider = new QQMusicLyricsProvider(timeoutSeconds: 2, messageHandler: handler);
+        using var provider = CreateWithShortSearchBudget(handler);
 
         var error = await Assert.ThrowsAsync<HttpRequestException>(() => provider.FetchAsync(Player));
         var failures = Assert.IsType<AggregateException>(error.InnerException);
@@ -517,7 +524,7 @@ public sealed class QQMusicLyricsProviderTests
         using var provider = new QQMusicLyricsProvider(messageHandler: handler);
         using var cancellation = new CancellationTokenSource();
         var fetch = provider.FetchAsync(Player, cancellation.Token);
-        await started.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(10));
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fetch);
         Assert.Equal(2, count);
@@ -539,7 +546,7 @@ public sealed class QQMusicLyricsProviderTests
         using var provider = new QQMusicLyricsProvider(messageHandler: handler);
         using var cancellation = new CancellationTokenSource();
         var fetch = provider.FetchAsync(Player, cancellation.Token);
-        await hangingStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await hangingStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
         cancellation.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fetch);

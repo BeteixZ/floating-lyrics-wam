@@ -87,7 +87,7 @@ public sealed class NetEaseArtistAliasTests
         using var provider = new NetEaseLyricsProvider(messageHandler: handler);
         using var cancellation = new CancellationTokenSource();
         var fetch = provider.FetchAsync(Player, cancellation.Token);
-        await handler.AliasStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await handler.AliasStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
         cancellation.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fetch);

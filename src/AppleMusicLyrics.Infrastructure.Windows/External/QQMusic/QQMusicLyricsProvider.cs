@@ -20,7 +20,16 @@ public sealed class QQMusicLyricsProvider : PlatformLyricsProvider
     private const string LyricsUrl = "https://c.y.qq.com/qqmusic/fcgi-bin/lyric_download.fcg";
 
     public QQMusicLyricsProvider(double timeoutSeconds = 6.0, HttpMessageHandler? messageHandler = null)
-        : base(timeoutSeconds, messageHandler) { }
+        : base(timeoutSeconds, messageHandler)
+    {
+        SearchBudget = FetchTimeout / 2;
+    }
+
+    /// <summary>
+    /// How long one search endpoint may take: half the lookup budget, leaving the rest for lyric
+    /// downloads. Tests shorten it to expire a search quickly without also shrinking that rest.
+    /// </summary>
+    internal TimeSpan SearchBudget { get; init; }
 
     public override string Name => "QQ Music";
 
@@ -107,7 +116,7 @@ public sealed class QQMusicLyricsProvider : PlatformLyricsProvider
         // One slow search must not consume the lyric-download budget or discard the other
         // endpoint's successful candidates. Both searches still finish before ranking results.
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(FetchTimeout / 2);
+        deadline.CancelAfter(SearchBudget);
         var search = SearchAsync(player, smartbox, deadline.Token);
         // A handler which ignores cancellation may finish after WaitAsync abandons it.
         _ = search.ContinueWith(completed => { _ = completed.Exception; }, CancellationToken.None,
