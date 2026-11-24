@@ -1,8 +1,8 @@
 # Release Notes
 
-## v1.0.0-rc.2 - Release candidate for 1.0
+## v1.0.0 - Reliability
 
-This is a test version of 1.0. It focuses on reliability: the app keeps working, or tells you what went wrong, when Windows, the settings file or an update misbehaves. It replaces v1.0.0-rc.1.
+1.0 focuses on reliability: the app keeps working, or tells you what went wrong, when Windows, the settings file or an update misbehaves.
 
 **Display**
 
@@ -25,9 +25,9 @@ This is a test version of 1.0. It focuses on reliability: the app keeps working,
 - The app hands over to the installer only after the installer confirms it has started and checked the downloaded files. If it cannot start, the update window says so and the current version keeps running.
 - If an update was cut off part-way (for example by a power loss), the app shows a notification at the next start that opens the backup of the previous files. `RECOVERY.txt` in the app folder explains how to repair the installation.
 - **Check now** in Settings checks in place. When no update is available, the result, the time of the last check and the next automatic check are shown next to the button instead of in a new window. An available update opens the update window, which now stays in front of the lyrics and Settings windows.
-- Stable versions are never offered a test version such as this one.
+- Test versions (release candidates) are never offered to stable versions.
 
-**Installing this test version:** it is not offered by the in-app updater. Exit the app from the tray, download `AppleMusicLyrics-v1.0.0-rc.2-win-x64.zip` from this release, extract it over your app folder replacing all files, and start `AppleMusicLyrics.App.exe`. Settings, saved positions, per-song offsets, and the lyrics cache are kept. When 1.0.0 is published, this version updates to it from the tray as usual.
+**Upgrading from 0.9.0 or later, or from a 1.0.0 release candidate:** use **Update to 1.0.0** in the tray or **Check for updates…**. Settings, saved positions, per-song offsets, and the lyrics cache are kept. Versions before 0.9.0 have no updater: exit the old version from the tray and extract `AppleMusicLyrics-v1.0.0-win-x64.zip` over its folder once.
 
 Requirements remain Windows 10 version 19041 or later and the x64 .NET 10 Desktop Runtime.
 
