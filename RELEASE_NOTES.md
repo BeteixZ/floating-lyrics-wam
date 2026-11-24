@@ -16,7 +16,7 @@
 - When Windows' media controls stop answering, the overlay no longer freezes. The app keeps retrying in the background and picks up playback again once Windows responds.
 - Errors are now written to `%LOCALAPPDATA%\AppleMusicLyrics\logs\errors.log`. The tray menu has **Open log folder**. If the app has to close because of an unexpected error, it says so and shows where the details were saved.
 - If the settings file cannot be read (for example while another program has it locked), the app runs on defaults and does not overwrite your file. If your changes cannot be saved, a notification says so.
-- Values in `settings.ini` that are out of range or not a number (from a hand edit or a damaged file) fall back to their defaults instead of breaking the overlay.
+- Values in `settings.ini` that are out of range or not a number (from a hand edit or a damaged file) fall back to safe values instead of breaking the overlay.
 - Clearing the lyrics cache in Settings no longer blocks the window.
 
 **Updates**
@@ -24,8 +24,10 @@
 - The updater installs only the release's own package and only after its SHA-256 checksum matches the one GitHub recorded.
 - The app hands over to the installer only after the installer confirms it has started and checked the downloaded files. If it cannot start, the update window says so and the current version keeps running.
 - If an update was cut off part-way (for example by a power loss), the app shows a notification at the next start that opens the backup of the previous files. `RECOVERY.txt` in the app folder explains how to repair the installation.
-- **Check now** in Settings checks in place. When no update is available, the result, the time of the last check and the next automatic check are shown next to the button instead of in a new window. An available update opens the update window, which now stays in front of the lyrics and Settings windows.
+- **Check now** in Settings checks in place. When no update is available, the result and the time of the last check (and of the next automatic check, when those are on) are shown next to the button instead of in a new window. An available update opens the update window in front of the lyrics and Settings windows.
 - Test versions (release candidates) are never offered to stable versions.
+
+The update to 1.0 itself is installed by the version you have now, so the installer handover above applies from the first update after 1.0. Updating from 0.10 restores the previous version if the update fails to start; updating from 0.9.0 does not.
 
 **Upgrading from 0.9.0 or later, or from a 1.0.0 release candidate:** use **Update to 1.0.0** in the tray or **Check for updates…**. Settings, saved positions, per-song offsets, and the lyrics cache are kept. Versions before 0.9.0 have no updater: exit the old version from the tray and extract `AppleMusicLyrics-v1.0.0-win-x64.zip` over its folder once.
 
