@@ -17,7 +17,10 @@
 
 [**下載**](https://github.com/BeteixZ/floating-lyrics-wam/releases/latest) · [功能](#功能) · [快速開始](#快速開始) · [常見問題](#常見問題) · [更新記錄](RELEASE_NOTES.md)
 
-<img src=".github/assets/demo.gif" alt="純淨模式歌詞卡片：逐字高亮、長音發光、翻譯與下一句" width="720">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/demo-dark.gif">
+  <img src=".github/assets/demo-light.gif" alt="純淨模式歌詞卡片：逐字高亮、長音發光、翻譯與下一句" width="720">
+</picture>
 
 </div>
 
