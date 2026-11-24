@@ -126,6 +126,31 @@ public sealed class ErrorLog
         "AppleMusicLyrics_ErrorLog_" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
             Encoding.UTF8.GetBytes(Path.GetFullPath(Directory).ToUpperInvariant())))[..16];
 
-    private static string AppVersionText =>
-        System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "unknown version";
+    private static string AppVersionText
+    {
+        get
+        {
+            var assembly = System.Reflection.Assembly.GetEntryAssembly();
+            return DescribeVersion(
+                assembly?.GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+                    .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion,
+                assembly?.GetName().Version);
+        }
+    }
+
+    /// <summary>
+    /// The product version for the log header, such as "1.0.0-rc.2 (5d915fc)". The assembly
+    /// version alone drops the pre-release tag, so a release candidate's log would read as the
+    /// final release.
+    /// </summary>
+    internal static string DescribeVersion(string? informationalVersion, Version? assemblyVersion)
+    {
+        if (string.IsNullOrWhiteSpace(informationalVersion))
+            return assemblyVersion?.ToString(3) ?? "unknown version";
+        var text = informationalVersion.Trim();
+        var plus = text.IndexOf('+');
+        if (plus < 0) return text;
+        var commit = text[(plus + 1)..];
+        return commit.Length == 0 ? text[..plus] : $"{text[..plus]} ({commit[..Math.Min(7, commit.Length)]})";
+    }
 }

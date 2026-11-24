@@ -30,6 +30,20 @@ public sealed class ErrorLogTests : IDisposable
         Assert.Contains("(repeated 2 more times)", lines[3]);
     }
 
+    [Theory]
+    [InlineData("1.0.0-rc.2+5d915fc14a08e088ed046eeeb2d1bfc2c19a5b79", "1.0.0-rc.2 (5d915fc)")]
+    [InlineData("1.0.0+5d915fc", "1.0.0 (5d915fc)")]
+    [InlineData("1.0.0-rc.2", "1.0.0-rc.2")]
+    [InlineData("1.0.0-rc.2+", "1.0.0-rc.2")]
+    [InlineData(null, "1.0.0")]
+    [InlineData(" ", "1.0.0")]
+    public void DescribeVersion_KeepsThePreReleaseTagAndAShortCommit(string? informational, string expected)
+        => Assert.Equal(expected, ErrorLog.DescribeVersion(informational, new Version(1, 0, 0, 0)));
+
+    [Fact]
+    public void DescribeVersion_WithoutAnyVersionSaysSo()
+        => Assert.Equal("unknown version", ErrorLog.DescribeVersion(null, null));
+
     [Fact]
     public void Write_FatalEntriesKeepTheStackTraceAndAreNeverCollapsed()
     {
