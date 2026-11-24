@@ -28,8 +28,15 @@ public partial class App : System.Windows.Application
 
     internal static bool IsSmokeTest { get; private set; }
 
+    // After an update, the helper that installed it (also 0.10's) watches the new version for
+    // its first four seconds and restores the previous one if it has exited by then. A crash in
+    // this window must end the process at once; a later crash is reported like any other.
+    internal static readonly TimeSpan UpdatedStartupWindow = TimeSpan.FromSeconds(15);
+    private static readonly Stopwatch Uptime = new();
+
     protected override void OnStartup(StartupEventArgs e)
     {
+        Uptime.Start();
         InstallErrorLogging();
 
         // The update helper (a copy of the previous version): no window, no single-instance lock
@@ -198,10 +205,10 @@ public partial class App : System.Windows.Application
     private void OnDispatcherUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
     {
         ErrorLog.ReportFatal("UI", e.Exception);
-        if (IsSmokeTest || Current?.Properties[UpdateOutcomeKey] as string == UpdateOutcomeInstalled)
+        if (ExitsSilentlyOnCrash(IsSmokeTest, Current?.Properties[UpdateOutcomeKey] as string, Uptime.Elapsed))
         {
-            // A freshly installed version that fails must exit at once, without a message box:
-            // the update helper (also 0.10's) treats a process that is still running after a few
+            // A freshly installed version that fails while it starts must exit at once, without a
+            // message box: the update helper treats a process that is still running after a few
             // seconds as a successful update and deletes the backup it would otherwise restore.
             Environment.Exit(3);
         }
@@ -217,6 +224,13 @@ public partial class App : System.Windows.Application
             ErrorLog.Report("UI", "Could not show the crash message", error);
         }
     }
+
+    /// <summary>
+    /// True when a crash should end the app without a message: in a smoke test, or while a
+    /// version that was just installed by an update is still within its startup check.
+    /// </summary>
+    internal static bool ExitsSilentlyOnCrash(bool smokeTest, string? updateOutcome, TimeSpan uptime) =>
+        smokeTest || (updateOutcome == UpdateOutcomeInstalled && uptime < UpdatedStartupWindow);
 
     protected override void OnExit(ExitEventArgs e)
     {
